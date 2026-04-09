@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "lego-robot": {
+      "command": ".venv/bin/python3",
+      "args": ["-m", "mcp_robot.server"],
+      "env": {
+        "ROBOT_HOST": "rpi.local",
+        "ROBOT_USER": "rpi",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+      }
+    }
+  }
+}

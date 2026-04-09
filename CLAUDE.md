@@ -1,9 +1,16 @@
 # CLAUDE.md — Lego Robot MCP Server
 
 ## Project context
-This repo implements an MCP server that lets Claude Code (and other MCP clients) control a Lego robot attached to a Raspberry Pi via the BuildHat HAT and OV5647 Pi Camera.
+This repo implements an MCP server (`mcp_robot/`) that lets Claude Code (and other MCP clients) control a 4-motor Lego robot attached to a Raspberry Pi via the BuildHat HAT and OV5647 Pi Camera.
 
-The robot is accessible at `ssh rpi@rpi.local` (no password prompt required — key-based auth).
+The robot has:
+- **2 drive wheels** — ports A (left) and B (right)
+- **1 arm motor** — port C (up/down)
+- **1 gripper motor** — port D (open/close)
+
+The MCP server runs locally on this Mac (`.venv/bin/python3 -m mcp_robot.server`).
+It connects to the RPi at `ssh rpi@rpi.local` (key-based, no password).
+All robot code executes on the RPi over SSH.
 
 ## Hardware facts (verified 2026-04-09)
 - **RPi SSH**: `rpi@rpi.local` — reachable, key-auth configured
@@ -52,19 +59,33 @@ On failure: `"ok": false, "error": "<human-readable message>"`.
 ## Development workflow
 
 ```bash
-# Run the MCP server locally (requires SSH access to RPi)
-python3 -m mcp_robot.server
+# Run the MCP server (Claude Code picks it up via .mcp.json)
+GEMINI_API_KEY=... .venv/bin/python3 -m mcp_robot.server
 
-# Test a single tool without Claude Code
-python3 -m mcp_robot.server --test get_motor_position --port A
+# Quick smoke test — motor positions + camera
+.venv/bin/python3 -c "
+from mcp_robot import robot, camera
+print(robot.get_all_positions())
+still = camera.capture_still()
+print(still['width'], still['height'], still['bytes'], 'bytes')
+"
+
+# Quick clip test
+.venv/bin/python3 -c "
+from mcp_robot import camera
+clip = camera.capture_clip(2.0, 2.0)
+print(clip['count'], 'frames')
+"
 
 # Lint
 ruff check mcp_robot/
-
-# Tests (unit tests mock SSH; integration tests need live RPi)
-pytest tests/unit/
-pytest tests/integration/  # requires RPi on network
 ```
+
+## Vision (Gemini)
+- Uses `google-genai` SDK (v1+), **not** the deprecated `google-generativeai`
+- Set `GEMINI_API_KEY` env var before using any `analyze_*` or `verify_action` tools
+- Default model: `gemini-1.5-flash` — override with `GEMINI_MODEL` env var
+- Multi-frame clips are sent as individual `Part.from_bytes` JPEG parts; Gemini 1.5+ reasons temporally
 
 ## Stop conditions — hard stops
 If any of these occur **stop immediately and tell the user**:

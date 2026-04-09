@@ -52,40 +52,55 @@ pip3 install opencv-python-headless numpy
 
 ---
 
-## Phase 2 — MCP Server Implementation
+## Phase 2 — MCP Server Implementation ✓ Done (2026-04-09)
 
 ### File layout
 ```
 mcp_robot/
-├── server.py          # MCP server entry point
-├── rpi_client.py      # SSH session manager + RPi command execution
-├── robot_actions.py   # High-level GRASP, PUT, MOVE logic
-├── vision.py          # Computer vision helpers (position check, object detect)
-├── requirements.txt
-└── pyproject.toml     # MCP tool declarations
+├── __init__.py
+├── config.py      # env-based configuration
+├── rpi_client.py  # persistent SSH session, Python execution on RPi
+├── robot.py       # motor primitives + high-level GRASP/PUT/MOVE
+├── camera.py      # still + video clip capture via picamera2
+├── vision.py      # Gemini vision analysis (google-genai SDK)
+└── server.py      # FastMCP entry point — 13 tools
+requirements.txt
+pyproject.toml
+.mcp.json
+.venv/             # Python 3.12 venv (mcp, paramiko, google-genai, Pillow)
 ```
 
-### MCP Tools to expose
+### MCP Tools (all verified importable)
 
-| Tool name | Description |
+| Tool | Description |
 |---|---|
-| `get_motor_position` | Read current absolute position (degrees) of a motor port (A/B/C/D) |
-| `move_motor` | Move a motor by N degrees at given speed; returns final position |
-| `run_motors` | Move multiple motors simultaneously |
-| `capture_image` | Capture a still frame; returns base64 JPEG + timestamp |
-| `move` | High-level: drive the robot in a direction by distance/time |
-| `grasp` | High-level: close gripper motor; verify grip with force or position delta |
-| `put` | High-level: open gripper motor to release object |
-| `look` | Capture image and return it for AI visual inspection |
-| `get_robot_state` | Return all motor positions + a camera snapshot in one call |
+| `get_robot_state` | Motor positions + live camera frame — call before planning |
+| `get_motor_positions` | Positions for all 4 ports |
+| `move_motor` | Move a single port by N degrees |
+| `drive` | forward / backward / left / right / stop |
+| `move_arm` | Move arm up or down |
+| `control_gripper` | Open or close gripper |
+| `grasp` | Lower arm + close gripper |
+| `put` | Open gripper + raise arm |
+| `capture_image` | Still frame as MCP `ImageContent` |
+| `capture_video_clip` | N-second clip as sequence of `ImageContent` frames |
+| `analyze_scene` | Capture + Gemini description |
+| `analyze_video_clip` | Capture clip + Gemini temporal reasoning |
+| `verify_action` | Before/after frames → Gemini success judgement |
 
-### Motor port mapping (to be confirmed with physical robot)
-| Port | Motor | Role |
-|---|---|---|
-| A | Large Lego motor | Left drive / arm extension |
-| B | Large Lego motor | Right drive / arm extension |
-| C | Medium motor | Gripper / wrist |
-| D | Medium motor | Gripper / wrist (if dual) |
+### Motor port mapping (default — adjust via env vars if wiring differs)
+| Port | Env var | Default | Role |
+|---|---|---|---|
+| A | `PORT_LEFT_WHEEL` | A | Left drive wheel |
+| B | `PORT_RIGHT_WHEEL` | B | Right drive wheel |
+| C | `PORT_ARM` | C | Arm up/down |
+| D | `PORT_GRIPPER` | D | Gripper open/close |
+
+### Implementation notes
+- SSH execution uses `os.dup2(devnull, 2)` to silence libcamera C-level logs
+- Exceptions in RPi scripts are caught and returned as `{"__error__": ...}` JSON
+- Video clip capture uses `format='RGB888'` to avoid PIL/XBGR array type mismatch
+- Vision uses `google-genai` SDK (v1+); `google-generativeai` is deprecated
 
 ---
 
