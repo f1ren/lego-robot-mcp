@@ -40,6 +40,9 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 # ── DroidCam ──────────────────────────────────────────────────────────────────
 DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.106:4747/video")
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+LOG_FILE = os.getenv("LOG_FILE", "/tmp/lego-robot-mcp.log")
+
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging
 # RERUN_MODE=spawn         launch the desktop viewer (default)

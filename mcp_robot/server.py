@@ -328,7 +328,17 @@ def _shutdown() -> None:
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log_file = config.LOG_FILE
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=handlers,
+    )
+    if log_file:
+        log.info("Logging to %s", log_file)
     if config.RERUN_ENABLED:
         _start_background_streams()
     mcp.run()
