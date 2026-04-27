@@ -74,6 +74,11 @@ class RPiClient:
         footer = textwrap.dedent("""\
             except Exception as _e:
                 print(_json.dumps({"__error__": str(_e), "__trace__": _tb.format_exc()}))
+            finally:
+                try:
+                    import buildhat as _bh; _bh.Hat().deinit()
+                except Exception:
+                    pass
         """)
         full_script = wrapper + indented + "\n" + footer
 
