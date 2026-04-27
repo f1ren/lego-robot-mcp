@@ -24,7 +24,10 @@ config.RERUN_ENABLED = True
 
 def _poll_motors(stop: threading.Event, interval: float) -> None:
     while not stop.is_set():
-        robot.get_all_positions()
+        try:
+            robot.get_all_positions()
+        except Exception as exc:
+            log.warning("Motor poll failed: %s", exc)
         stop.wait(interval)
 
 
@@ -39,8 +42,11 @@ def main() -> None:
 
     # Seed one motor read so Rerun initializes before the camera stream starts.
     log.info("Initializing motors...")
-    robot.get_all_positions()
-    log.info("Motors ready.")
+    try:
+        robot.get_all_positions()
+        log.info("Motors ready.")
+    except Exception as exc:
+        log.warning("Motor init failed (%s) — continuing without motor data.", exc)
 
     motor_thread = threading.Thread(
         target=_poll_motors, args=(stop, 1.0 / args.motor_hz), daemon=True,

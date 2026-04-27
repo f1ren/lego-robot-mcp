@@ -83,7 +83,12 @@ class RPiClient:
             stdin.write(full_script.encode())
             stdin.channel.shutdown_write()
 
-            raw = stdout.read().decode().strip()
+            try:
+                raw = stdout.read().decode().strip()
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    "RPi script timed out — BuildHAT may be missing or unresponsive"
+                ) from exc
             if not raw:
                 err = stderr.read().decode().strip()
                 raise RuntimeError(
