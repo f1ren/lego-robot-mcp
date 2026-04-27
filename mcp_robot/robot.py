@@ -158,29 +158,15 @@ def drive(
 
 # ── arm ───────────────────────────────────────────────────────────────────────
 
-def move_arm(
-    direction: str,
-    degrees: int | None = None,
-    speed: int = config.DEFAULT_ARM_SPEED,
-) -> dict:
+def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """
-    Move the arm.
+    Move the arm by *degrees*. Positive = down, negative = up.
 
     Args:
-        direction: "up" or "down".
-        degrees:   How far to move (default: full range from config).
-        speed:     Motor speed 1–100.
+        degrees: How far to move. Positive = down, negative = up.
+        speed:   Motor speed 1–100.
     """
-    if direction == "up":
-        deg = -(degrees or abs(config.ARM_DOWN_DEG - config.ARM_UP_DEG))
-    elif direction == "down":
-        deg = degrees or abs(config.ARM_DOWN_DEG - config.ARM_UP_DEG)
-    else:
-        raise ValueError(f"direction must be 'up' or 'down', got {direction!r}")
-
-    result = move_motor(config.PORT_ARM, deg, speed)
-    result["direction"] = direction
-    return result
+    return move_motor(config.PORT_ARM, degrees, speed)
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
@@ -221,7 +207,8 @@ def control_gripper(
 
 def grasp(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
     """Lower arm then close gripper."""
-    arm_result     = move_arm("down", speed=config.DEFAULT_ARM_SPEED)
+    arm_deg        = config.ARM_DOWN_DEG - config.ARM_UP_DEG
+    arm_result     = move_arm(arm_deg, speed=config.DEFAULT_ARM_SPEED)
     gripper_result = control_gripper("close", speed=speed)
     return {
         "action":  "grasp",
@@ -232,8 +219,9 @@ def grasp(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
 
 def put(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
     """Open gripper then raise arm."""
+    arm_deg        = config.ARM_DOWN_DEG - config.ARM_UP_DEG
     gripper_result = control_gripper("open", speed=speed)
-    arm_result     = move_arm("up", speed=config.DEFAULT_ARM_SPEED)
+    arm_result     = move_arm(-arm_deg, speed=config.DEFAULT_ARM_SPEED)
     return {
         "action":  "put",
         "gripper": gripper_result,

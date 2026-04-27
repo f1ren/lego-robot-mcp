@@ -46,10 +46,7 @@ def _send_blueprint() -> None:
                 rrb.Spatial2DView(name="Pi Camera", origin="camera/rpi"),
                 rrb.Spatial2DView(name="DroidCam", origin="camera/droidcam"),
             ),
-            rrb.Vertical(
-                rrb.TimeSeriesView(name="Motors", origin="motors"),
-                rrb.TextLogView(name="Vision log", origin="vision"),
-            ),
+            rrb.TimeSeriesView(name="Motors", origin="motors"),
         ),
         collapse_panels=True,
     )
@@ -128,22 +125,6 @@ def log_droidcam_frame(frame_b64: str, timestamp: float) -> None:
         return
     _log_camera(frame_b64, timestamp, entity="camera/droidcam")
 
-
-def log_verify(before_b64: str, after_b64: str, result: dict) -> None:
-    """Log before/after frames and the Gemini verdict."""
-    if not _ensure_init():
-        return
-    rr = _rr()
-    now = time.time()
-    _log_camera(before_b64, now - 1.0)
-    _log_camera(after_b64, now)
-
-    success = result.get("success")
-    confidence = result.get("confidence", "?")
-    explanation = result.get("explanation", "")
-    level = rr.TextLogLevel.INFO if success else rr.TextLogLevel.WARN
-    rr.set_time("time", timestamp=now)
-    rr.log("vision/verify", rr.TextLog(f"[{confidence}] {explanation}", level=level))
 
 
 _motor_series_logged: set[str] = set()

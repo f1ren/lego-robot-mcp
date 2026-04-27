@@ -23,13 +23,10 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   grasp                  Lower arm + close gripper
   put                    Open gripper + raise arm
 
-  Camera & vision
-  ────────────────
+  Camera
+  ──────
   capture_image          Capture one still frame (returns ImageContent)
   capture_video_clip     Capture N-second clip, return frames as images
-  analyze_scene          Capture frame + ask Gemini a question
-  analyze_video_clip     Capture clip + ask Gemini (temporal reasoning)
-  verify_action          Before/after frames → Gemini success judgement
 
 Run with:
     python3 -m mcp_robot.server
@@ -45,7 +42,6 @@ from mcp.types import ImageContent, TextContent
 
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
-import mcp_robot.vision as vision_mod
 from mcp_robot import config, viz
 
 log = logging.getLogger(__name__)
@@ -57,7 +53,7 @@ mcp = FastMCP(
         "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
         "Motors: left_wheel (A), right_wheel (B), arm (C), gripper (D). "
         "Always call get_robot_state before planning a sequence of actions. "
-        "After each action call verify_action or analyze_scene to confirm outcome. "
+        "After each action call capture_image or capture_video_clip to confirm the outcome visually. "
         "Stop and report to the user if a motor or camera tool raises an error."
     ),
 )
@@ -134,21 +130,17 @@ def drive(
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def move_arm(
-    direction: str,
-    degrees: int | None = None,
-    speed: int = 30,
-) -> dict:
+def move_arm(degrees: int, speed: int = 30) -> dict:
     """
-    Move the robot arm.
+    Move the robot arm by the given number of degrees.
 
     Args:
-        direction: "up" or "down".
-        degrees:   How far to move (omit for full configured range).
-        speed:     Motor speed, 1–100.
+        degrees: How far to move. Positive = down, negative = up.
+                 Start with values like ±30–90 and adjust based on results.
+        speed:   Motor speed, 1–100.
     """
     try:
-        return _ok(robot_mod.move_arm(direction, degrees, speed))
+        return _ok(robot_mod.move_arm(degrees, speed))
     except Exception as exc:
         return _err(str(exc))
 
@@ -242,89 +234,6 @@ def capture_video_clip(
         return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
-
-
-# ── camera + Gemini ───────────────────────────────────────────────────────────
-
-@mcp.tool()
-def analyze_scene(prompt: str = "Describe what you see.") -> list[ImageContent | TextContent]:
-    """
-    Capture a still frame and ask Gemini to analyse it.
-
-    Args:
-        prompt: Question or instruction for Gemini, e.g.
-                "Is the gripper holding an object?",
-                "Where is the red block relative to the robot?"
-    """
-    try:
-        result = cam_mod.capture_still()
-        analysis = vision_mod.analyze_frame(result["frame"], prompt)
-        return [
-            _image_content(result["frame"]),
-            TextContent(type="text", text=analysis),
-        ]
-    except Exception as exc:
-        return [TextContent(type="text", text=f"ERROR: {exc}")]
-
-
-@mcp.tool()
-def analyze_video_clip(
-    prompt: str = "Describe what happens across these frames.",
-    duration_s: float = 2.0,
-    fps: float = 2.0,
-) -> list[ImageContent | TextContent]:
-    """
-    Capture a short video clip and ask Gemini to reason over it temporally.
-
-    Useful for verifying motion: "Did the arm move down?",
-    "Did the robot travel forward?", "Was an object picked up?"
-
-    Args:
-        prompt:     Question for Gemini about the clip.
-        duration_s: Clip length in seconds.
-        fps:        Frames per second.
-    """
-    try:
-        result = cam_mod.capture_clip(duration_s, fps)
-        analysis = vision_mod.analyze_clip(result["frames"], prompt)
-        content: list[ImageContent | TextContent] = [
-            TextContent(
-                type="text",
-                text=f"[{result['count']} frames, {duration_s}s]\n\n{analysis}",
-            )
-        ]
-        for frame_b64 in result["frames"]:
-            content.append(_image_content(frame_b64))
-        return content
-    except Exception as exc:
-        return [TextContent(type="text", text=f"ERROR: {exc}")]
-
-
-@mcp.tool()
-def verify_action(
-    action_description: str,
-    before_frame_b64: str,
-    after_frame_b64: str,
-) -> dict:
-    """
-    Ask Gemini to judge whether an action succeeded by comparing before/after frames.
-
-    Typical usage:
-        1. before = capture_image()  (save the base64)
-        2. perform action
-        3. after  = capture_image()  (save the base64)
-        4. verify_action("robot grasped the red block", before_b64, after_b64)
-
-    Returns:
-        {"success": bool, "confidence": "high"|"medium"|"low", "explanation": str}
-    """
-    try:
-        result = vision_mod.verify_action(
-            before_frame_b64, after_frame_b64, action_description
-        )
-        return _ok(result)
-    except Exception as exc:
-        return _err(str(exc))
 
 
 @mcp.tool()

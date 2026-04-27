@@ -15,8 +15,8 @@ SSH_TIMEOUT = int(os.getenv("SSH_TIMEOUT", "10"))
 # Adjust these to match the physical BuildHat wiring.
 PORT_LEFT_WHEEL  = os.getenv("PORT_LEFT_WHEEL",  "A")
 PORT_RIGHT_WHEEL = os.getenv("PORT_RIGHT_WHEEL", "B")
-PORT_ARM         = os.getenv("PORT_ARM",         "C")
-PORT_GRIPPER     = os.getenv("PORT_GRIPPER",     "D")
+PORT_ARM         = os.getenv("PORT_ARM",         "D")
+PORT_GRIPPER     = os.getenv("PORT_GRIPPER",     "C")
 
 # ── Gripper calibration (degrees) ────────────────────────────────────────────
 # Run control_gripper manually and observe positions to calibrate.
@@ -39,10 +39,6 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
 DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.106:4747/video")
-
-# ── Gemini ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging
