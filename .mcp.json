@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "lego-robot": {
+      "disabled": true,
       "command": ".venv/bin/python3",
       "args": ["-m", "mcp_robot.server"],
       "env": {
@@ -8,7 +9,9 @@
         "ROBOT_USER": "rpi",
         "GEMINI_API_KEY": "${GEMINI_API_KEY}",
         "RERUN_ENABLED": "${RERUN_ENABLED}",
-        "RERUN_MODE": "${RERUN_MODE}"
+        "RERUN_MODE": "${RERUN_MODE}",
+        "RERUN_CONNECT": "${RERUN_CONNECT}",
+        "RERUN_ADDR": "${RERUN_ADDR}"
       }
     }
   }

@@ -37,6 +37,22 @@ def _venv_rerun() -> str | None:
     return candidate if os.path.isfile(candidate) else None
 
 
+def _send_blueprint() -> None:
+    import rerun.blueprint as rrb
+    rr = _rr()
+    blueprint = rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial2DView(name="Camera", origin="camera"),
+            rrb.Vertical(
+                rrb.TimeSeriesView(name="Motors", origin="motors"),
+                rrb.TextLogView(name="Vision log", origin="vision"),
+            ),
+        ),
+        collapse_panels=True,
+    )
+    rr.send_blueprint(blueprint)
+
+
 def _ensure_init() -> bool:
     global _initialized, _init_failed
     if _init_failed:
@@ -45,12 +61,15 @@ def _ensure_init() -> bool:
     if rr is None or not config.RERUN_ENABLED:
         return False
     if not _initialized:
-        if config.RERUN_MODE == "serve":
-            rr.init("lego_robot")
+        if config.RERUN_CONNECT:
+            rr.init("lego_robot", recording_id="lego_robot_session")
+            rr.connect_grpc(config.RERUN_ADDR)
+        elif config.RERUN_MODE == "serve":
+            rr.init("lego_robot", recording_id="lego_robot_session")
             uri = rr.serve_grpc()
             rr.serve_web_viewer(connect_to=uri)
         else:
-            rr.init("lego_robot")
+            rr.init("lego_robot", recording_id="lego_robot_session")
             try:
                 rr.spawn(executable_path=_venv_rerun())
             except RuntimeError as exc:
@@ -58,6 +77,7 @@ def _ensure_init() -> bool:
                       "Use RERUN_MODE=serve or run: pip install rerun-sdk")
                 _init_failed = True
                 return False
+        _send_blueprint()
         _initialized = True
     return True
 
@@ -129,7 +149,7 @@ def log_motor_positions(positions: dict) -> None:
         if isinstance(deg, (int, float)):
             entity = f"motors/{port}"
             if entity not in _motor_series_logged:
-                rr.log(entity, rr.SeriesLines(name=port), static=True)
+                rr.log(entity, rr.SeriesLines(names=[port]), static=True)
                 _motor_series_logged.add(entity)
             rr.log(entity, rr.Scalars(float(deg)))
 

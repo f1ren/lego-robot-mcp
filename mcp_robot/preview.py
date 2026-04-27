@@ -1,0 +1,68 @@
+"""
+Standalone preview: camera stream + motor positions in Rerun viewer.
+
+No MCP server needed — runs directly against the RPi over SSH.
+
+Usage:
+    .venv/bin/python3 -m mcp_robot.preview
+    .venv/bin/python3 -m mcp_robot.preview --fps 3 --motor-hz 1
+    RERUN_MODE=serve .venv/bin/python3 -m mcp_robot.preview
+
+Ctrl-C to stop.
+"""
+import argparse
+import signal
+import threading
+
+from mcp_robot import camera, config, robot, viz
+
+# This script's only job is visualization — force Rerun on.
+config.RERUN_ENABLED = True
+
+
+def _poll_motors(stop: threading.Event, interval: float) -> None:
+    while not stop.is_set():
+        try:
+            robot.get_all_positions()
+        except Exception as exc:
+            print(f"[motors] {exc}")
+        stop.wait(interval)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Camera + motor preview in Rerun")
+    parser.add_argument("--fps", type=float, default=5.0, help="Camera frame rate (default 5)")
+    parser.add_argument("--motor-hz", type=float, default=2.0, help="Motor poll rate in Hz (default 2)")
+    args = parser.parse_args()
+
+    stop = threading.Event()
+    signal.signal(signal.SIGINT,  lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+
+    # Seed one motor read so Rerun initializes before the camera stream starts.
+    try:
+        robot.get_all_positions()
+    except Exception as exc:
+        print(f"[motors] initial read failed: {exc}")
+
+    motor_thread = threading.Thread(
+        target=_poll_motors, args=(stop, 1.0 / args.motor_hz), daemon=True,
+    )
+    motor_thread.start()
+
+    print(f"Camera {args.fps} fps  |  Motors {args.motor_hz:.0f} Hz  —  Ctrl-C to stop")
+    try:
+        camera.stream_live(fps=args.fps, stop_event=stop)
+    except RuntimeError as exc:
+        print(f"Stream error: {exc}")
+        raise SystemExit(1)
+    finally:
+        stop.set()
+        motor_thread.join(timeout=2)
+
+    viz.flush()
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
