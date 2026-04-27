@@ -12,7 +12,6 @@ Ctrl-C to stop.
 """
 import argparse
 import logging
-import signal
 import threading
 
 from mcp_robot import camera, config, robot, viz
@@ -37,8 +36,6 @@ def main() -> None:
     args = parser.parse_args()
 
     stop = threading.Event()
-    signal.signal(signal.SIGINT,  lambda *_: stop.set())
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     # Seed one motor read so Rerun initializes before the camera stream starts.
     log.info("Initializing motors...")
@@ -62,6 +59,8 @@ def main() -> None:
     log.info("Camera %.0f fps  |  Motors %.0f Hz  —  Ctrl-C to stop", args.fps, args.motor_hz)
     try:
         camera.stream_live(fps=args.fps, stop_event=stop)
+    except KeyboardInterrupt:
+        log.info("Interrupted.")
     except RuntimeError as exc:
         log.error("Stream error: %s", exc)
         raise SystemExit(1)
