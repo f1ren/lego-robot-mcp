@@ -1,12 +1,13 @@
 {
   "mcpServers": {
     "lego-robot": {
-      "command": ".venv/bin/python3",
-      "args": ["-m", "mcp_robot.server"],
+      "command": ".venv/bin/mcpmon",
+      "args": ["--watch", "mcp_robot", "--", ".venv/bin/python3", "-m", "mcp_robot.server"],
       "env": {
         "ROBOT_HOST": "rpi.local",
         "ROBOT_USER": "rpi",
-        "RERUN_ENABLED": "1"
+        "RERUN_ENABLED": "1",
+        "PYTHONUNBUFFERED": "1"
       }
     }
   }

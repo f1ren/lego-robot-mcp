@@ -329,15 +329,15 @@ def _shutdown() -> None:
 
 def main() -> None:
     log_file = config.LOG_FILE
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    # basicConfig is a no-op if any handler already exists (FastMCP sets one up
+    # during __init__ at module level), so explicitly add the FileHandler instead.
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=handlers,
-    )
-    if log_file:
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
         log.info("Logging to %s", log_file)
     if config.RERUN_ENABLED:
         _start_background_streams()
