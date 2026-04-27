@@ -38,7 +38,7 @@ CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
 CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.106:4747/video")
+DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", "/tmp/lego-robot-mcp.log")

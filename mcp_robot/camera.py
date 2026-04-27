@@ -280,6 +280,24 @@ def stream_droidcam(
     if on_frame is None:
         on_frame = viz.log_droidcam_frame
 
+    # Pre-flight: detect "DroidCam is Busy" before handing the URL to OpenCV,
+    # which would just silently fail to open the stream.
+    try:
+        import urllib.request
+        with urllib.request.urlopen(config.DROIDCAM_URL, timeout=3) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "text/html" in content_type:
+                body = resp.read(512).decode(errors="replace")
+                if "busy" in body.lower():
+                    raise RuntimeError(
+                        f"DroidCam is busy (another client is connected). "
+                        f"Close the other viewer and retry. URL: {config.DROIDCAM_URL}"
+                    )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass  # let OpenCV handle connection errors in the normal path
+
     cap = cv2.VideoCapture(config.DROIDCAM_URL)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open DroidCam stream at {config.DROIDCAM_URL}")
