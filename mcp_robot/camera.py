@@ -4,6 +4,8 @@ Camera helpers: capture a still or a short video clip from the RPi OV5647.
 All capture happens on the RPi via SSH. Frames are returned as base64 JPEG
 strings so they can be embedded directly in MCP ImageContent responses.
 """
+import base64
+import time
 import threading
 from mcp_robot import config, viz
 from mcp_robot.rpi_client import get_client
@@ -178,3 +180,37 @@ def stream_live(
             on_frame(data["frame"], data.get("ts", 0.0))
 
     get_client().stream_python(script, _on_line, stop_event)
+
+
+def stream_droidcam(
+    stop_event: threading.Event | None = None,
+    on_frame=None,
+) -> None:
+    """
+    Stream frames from DroidCam over HTTP until stop_event is set.
+
+    Reads from config.DROIDCAM_URL using OpenCV (no SSH needed).
+
+    Args:
+        stop_event: Set this to stop the stream.
+        on_frame:   Optional callback(frame_b64: str, timestamp: float).
+                    Defaults to viz.log_droidcam_frame.
+    """
+    import cv2
+
+    if on_frame is None:
+        on_frame = viz.log_droidcam_frame
+
+    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open DroidCam stream at {config.DROIDCAM_URL}")
+    try:
+        while stop_event is None or not stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                break
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            b64 = base64.b64encode(buf.tobytes()).decode()
+            on_frame(b64, time.time())
+    finally:
+        cap.release()

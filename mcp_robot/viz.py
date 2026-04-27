@@ -42,7 +42,10 @@ def _send_blueprint() -> None:
     rr = _rr()
     blueprint = rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial2DView(name="Camera", origin="camera"),
+            rrb.Vertical(
+                rrb.Spatial2DView(name="Pi Camera", origin="camera/rpi"),
+                rrb.Spatial2DView(name="DroidCam", origin="camera/droidcam"),
+            ),
             rrb.Vertical(
                 rrb.TimeSeriesView(name="Motors", origin="motors"),
                 rrb.TextLogView(name="Vision log", origin="vision"),
@@ -88,11 +91,11 @@ def _b64_to_numpy(b64: str):
     return np.asarray(Image.open(BytesIO(base64.b64decode(b64))).convert("RGB"))
 
 
-def _log_camera(frame_b64: str, ts: float | None = None) -> None:
-    """Log one frame to the single camera entity with a wall-clock timestamp."""
+def _log_camera(frame_b64: str, ts: float | None = None, entity: str = "camera/rpi") -> None:
+    """Log one frame to the given camera entity with a wall-clock timestamp."""
     rr = _rr()
     rr.set_time("time", timestamp=ts if ts is not None else time.time())
-    rr.log("camera", rr.Image(_b64_to_numpy(frame_b64)))
+    rr.log(entity, rr.Image(_b64_to_numpy(frame_b64)))
 
 
 def log_frame(frame_b64: str, timestamp: float) -> None:
@@ -117,6 +120,13 @@ def log_clip(clip_dict: dict) -> None:
     count = len(clip_dict["frames"])
     for i, frame_b64 in enumerate(clip_dict["frames"]):
         _log_camera(frame_b64, now - (count - 1 - i) * 0.5)
+
+
+def log_droidcam_frame(frame_b64: str, timestamp: float) -> None:
+    """Log a DroidCam frame."""
+    if not _ensure_init():
+        return
+    _log_camera(frame_b64, timestamp, entity="camera/droidcam")
 
 
 def log_verify(before_b64: str, after_b64: str, result: dict) -> None:

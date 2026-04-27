@@ -50,6 +50,15 @@ def main() -> None:
     )
     motor_thread.start()
 
+    def _run_droidcam() -> None:
+        try:
+            camera.stream_droidcam(stop_event=stop)
+        except Exception as exc:
+            print(f"[droidcam] {exc}")
+
+    droidcam_thread = threading.Thread(target=_run_droidcam, daemon=True)
+    droidcam_thread.start()
+
     print(f"Camera {args.fps} fps  |  Motors {args.motor_hz:.0f} Hz  —  Ctrl-C to stop")
     try:
         camera.stream_live(fps=args.fps, stop_event=stop)
@@ -59,6 +68,7 @@ def main() -> None:
     finally:
         stop.set()
         motor_thread.join(timeout=2)
+        droidcam_thread.join(timeout=2)
 
     viz.flush()
     print("Done.")

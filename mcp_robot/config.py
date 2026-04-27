@@ -37,6 +37,9 @@ CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
 CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
 CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 
+# ── DroidCam ──────────────────────────────────────────────────────────────────
+DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.106:4747/video")
+
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
