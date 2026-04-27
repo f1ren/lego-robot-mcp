@@ -40,3 +40,9 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 # ── Gemini ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
+
+# ── Rerun visualization (optional) ───────────────────────────────────────────
+# Set RERUN_ENABLED=1 and install rerun-sdk to stream frames to the viewer.
+# RERUN_MODE=spawn (default) launches the desktop app; =serve opens a browser.
+RERUN_ENABLED = bool(os.getenv("RERUN_ENABLED", ""))
+RERUN_MODE    = os.getenv("RERUN_MODE", "spawn")

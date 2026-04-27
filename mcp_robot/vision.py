@@ -18,7 +18,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
-from mcp_robot import config
+from mcp_robot import config, viz
 
 
 def _client() -> genai.Client:
@@ -126,6 +126,8 @@ def verify_action(
     text = re.sub(r"^```[a-z]*\n?", "", text)
     text = re.sub(r"\n?```$", "", text)
     try:
-        return json.loads(text)
+        result = json.loads(text)
     except json.JSONDecodeError:
-        return {"success": None, "confidence": "low", "explanation": text}
+        result = {"success": None, "confidence": "low", "explanation": text}
+    viz.log_verify(before_b64, after_b64, result)
+    return result

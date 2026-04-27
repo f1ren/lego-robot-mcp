@@ -41,6 +41,9 @@ class RPiClient:
             look_for_keys=True,
             allow_agent=True,
         )
+        # SSH_TIMEOUT is for the TCP handshake only. Clear it so slow RPi
+        # commands (e.g. BuildHat init) don't trigger a socket timeout.
+        client.get_transport().sock.settimeout(None)
         self._ssh = client
 
     def _ensure_connected(self) -> paramiko.SSHClient:
@@ -98,6 +101,67 @@ class RPiClient:
                     f"RPi script raised: {result['__error__']}\n{result.get('__trace__', '')}"
                 )
             return result
+
+    def stream_python(
+        self,
+        script: str,
+        on_line,
+        stop_event: "threading.Event | None" = None,
+    ) -> None:
+        """
+        Run *script* on the RPi over a *separate* SSH connection, calling
+        on_line(dict) for each newline-delimited JSON object it prints.
+
+        Blocks until the remote process exits or stop_event is set.
+        Uses its own connection so it never contends with run_python's lock.
+        """
+        # Fresh connection — don't share with the command singleton.
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            self.host,
+            username=self.user,
+            timeout=config.SSH_TIMEOUT,
+            look_for_keys=True,
+            allow_agent=True,
+        )
+        transport = ssh.get_transport()
+        # Clear the connect-phase timeout so slow camera init doesn't abort mid-stream.
+        transport.sock.settimeout(None)
+        # Keepalive so the SSH server detects a dead client within ~30 s instead of hours.
+        transport.set_keepalive(15)
+
+        # Release any stale camera session left by a previous crashed stream.
+        _, _so, _ = ssh.exec_command(
+            "fuser -k -TERM /dev/video0 /dev/video1 /dev/media0 /dev/media1 /dev/media2"
+            " 2>/dev/null; sleep 0.4"
+        )
+        _so.channel.recv_exit_status()  # wait for cleanup to finish
+
+        preamble = "import os; os.dup2(os.open('/dev/null', os.O_WRONLY), 2)\n"
+        try:
+            stdin, stdout, _ = ssh.exec_command("python3 -", timeout=None)
+            stdin.write((preamble + textwrap.dedent(script)).encode())
+            stdin.channel.shutdown_write()
+            frame_count = 0
+            for raw in stdout:
+                if stop_event and stop_event.is_set():
+                    break
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    on_line(json.loads(raw))
+                    frame_count += 1
+                except (json.JSONDecodeError, Exception):
+                    pass
+            if frame_count == 0:
+                raise RuntimeError(
+                    "RPi stream script exited without producing any frames. "
+                    "Check camera availability and that picamera2/Pillow are installed on the RPi."
+                )
+        finally:
+            ssh.close()
 
     def close(self) -> None:
         if self._ssh:

@@ -12,7 +12,7 @@ On error they raise RuntimeError (caught and wrapped by the MCP server).
 """
 from __future__ import annotations
 
-from mcp_robot import config
+from mcp_robot import config, viz
 from mcp_robot.rpi_client import get_client
 
 # ── RPi script templates ──────────────────────────────────────────────────────
@@ -83,13 +83,15 @@ def get_all_positions() -> dict:
         config.PORT_GRIPPER,
     ]
     raw = get_client().run_python(_GET_ALL_POSITIONS.format(ports=ports))
-    return {
+    positions = {
         "left_wheel":  raw.get(config.PORT_LEFT_WHEEL),
         "right_wheel": raw.get(config.PORT_RIGHT_WHEEL),
         "arm":         raw.get(config.PORT_ARM),
         "gripper":     raw.get(config.PORT_GRIPPER),
         "ports":       raw,
     }
+    viz.log_motor_positions(positions)
+    return positions
 
 
 def move_motor(port: str, degrees: int, speed: int) -> dict:
