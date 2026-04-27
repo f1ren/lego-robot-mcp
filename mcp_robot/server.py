@@ -36,12 +36,20 @@ Run with:
 """
 from __future__ import annotations
 
+import atexit
+import logging
+import threading
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
 import mcp_robot.vision as vision_mod
+from mcp_robot import config, viz
+
+log = logging.getLogger(__name__)
+_stop = threading.Event()
 
 mcp = FastMCP(
     "lego-robot",
@@ -343,9 +351,77 @@ def get_robot_state() -> list[ImageContent | TextContent]:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
+# ── background streaming ──────────────────────────────────────────────────────
+
+def _poll_motors() -> None:
+    interval = 0.5
+    while not _stop.is_set():
+        try:
+            robot_mod.get_all_positions()
+        except Exception as exc:
+            log.warning("Motor poll failed: %s", exc)
+        _stop.wait(interval)
+
+
+def _run_pi_camera() -> None:
+    backoff = 1.0
+    while not _stop.is_set():
+        try:
+            cam_mod.stream_live(fps=5.0, stop_event=_stop)
+        except Exception as exc:
+            log.warning("Pi Camera stream ended: %s", exc)
+        if not _stop.is_set():
+            log.info("Pi Camera reconnecting in %.0fs...", backoff)
+            _stop.wait(backoff)
+            backoff = min(backoff * 2, 30.0)
+        else:
+            break
+
+
+def _run_droidcam() -> None:
+    backoff = 1.0
+    while not _stop.is_set():
+        try:
+            cam_mod.stream_droidcam(stop_event=_stop)
+        except Exception as exc:
+            log.warning("DroidCam stream ended: %s", exc)
+        if not _stop.is_set():
+            log.info("DroidCam reconnecting in %.0fs...", backoff)
+            _stop.wait(backoff)
+            backoff = min(backoff * 2, 30.0)
+        else:
+            break
+
+
+def _start_background_streams() -> None:
+    log.info("Initializing motors...")
+    try:
+        robot_mod.get_all_positions()
+        log.info("Motors ready.")
+    except Exception as exc:
+        log.warning("Motor init failed (%s) — continuing without motor data.", exc)
+
+    for target, name in [
+        (_poll_motors,    "motor-poll"),
+        (_run_pi_camera,  "pi-camera"),
+        (_run_droidcam,   "droidcam"),
+    ]:
+        threading.Thread(target=target, name=name, daemon=True).start()
+
+    atexit.register(_shutdown)
+
+
+def _shutdown() -> None:
+    _stop.set()
+    viz.flush()
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if config.RERUN_ENABLED:
+        _start_background_streams()
     mcp.run()
 
 
