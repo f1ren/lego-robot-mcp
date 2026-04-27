@@ -15,10 +15,12 @@ from mcp_robot.rpi_client import get_client
 _CAPTURE_STILL = """
 import json, base64, io, time
 from picamera2 import Picamera2
+from libcamera import Transform
 
 cam = Picamera2()
 cam.configure(cam.create_still_configuration(
-    main={{'size': ({w}, {h})}}
+    main={{'size': ({w}, {h})}},
+    transform=Transform(hflip=True, vflip=True),
 ))
 cam.start()
 time.sleep({warmup})
@@ -38,10 +40,12 @@ _CAPTURE_CLIP = """
 import json, base64, io, time
 from picamera2 import Picamera2
 from PIL import Image
+from libcamera import Transform
 
 cam = Picamera2()
 cam.configure(cam.create_video_configuration(
-    main={{'size': ({w}, {h}), 'format': 'RGB888'}}
+    main={{'size': ({w}, {h}), 'format': 'RGB888'}},
+    transform=Transform(hflip=True, vflip=True),
 ))
 cam.start()
 time.sleep({warmup})
@@ -70,11 +74,13 @@ _STREAM_FRAMES = """
 import json, base64, io, time
 from picamera2 import Picamera2
 from PIL import Image
+from libcamera import Transform
 
 fps = {fps}
 cam = Picamera2()
 cam.configure(cam.create_video_configuration(
-    main={{'size': ({w}, {h}), 'format': 'RGB888'}}
+    main={{'size': ({w}, {h}), 'format': 'RGB888'}},
+    transform=Transform(hflip=True, vflip=True),
 ))
 cam.start()
 time.sleep({warmup})
