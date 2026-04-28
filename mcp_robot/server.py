@@ -51,7 +51,7 @@ mcp = FastMCP(
     "lego-robot",
     instructions=(
         "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
-        "Motors: left_wheel (A), right_wheel (B), arm (C), gripper (D). "
+        "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
         "Always call get_robot_state before planning a sequence of actions. "
         "After each action call capture_image or capture_video_clip to confirm the outcome visually. "
         "Stop and report to the user if a motor or camera tool raises an error."

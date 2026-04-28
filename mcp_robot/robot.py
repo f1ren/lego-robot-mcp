@@ -4,8 +4,8 @@ Robot motor control — primitives and high-level actions.
 Motor layout (configure via env vars if different):
   A = left wheel
   B = right wheel
-  C = arm  (up/down)
-  D = gripper (open/close)
+  C = gripper (open/close)
+  D = arm  (up/down)
 
 All functions return a dict with at least {"ok": bool}.
 On error they raise RuntimeError (caught and wrapped by the MCP server).
