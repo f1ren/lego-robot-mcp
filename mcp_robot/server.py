@@ -78,20 +78,25 @@ def _image_content(frame_b64: str) -> ImageContent:
     return ImageContent(type="image", data=frame_b64, mimeType="image/jpeg")
 
 
-def _capture_pair() -> list[tuple[str, str]]:
-    """Snap one frame from each available camera. Returns [(label, b64), ...]."""
+def _capture_pair(tag: str = "frame") -> tuple[list[tuple[str, str]], list[str | None]]:
+    """Snap one frame from each available camera. Returns (frames, paths)."""
     frames: list[tuple[str, str]] = []
+    paths: list[str | None] = []
     try:
         pi = cam_mod.capture_still()
-        frames.append(("pi_camera", pi["frame"]))
+        b64 = pi["frame"]
+        frames.append(("pi_camera", b64))
+        paths.append(cam_mod._save_snapshot(b64, f"{tag}_pi_camera"))
     except Exception as exc:
         log.warning("Pi camera capture failed during action wrap: %s", exc)
     try:
         droid = cam_mod.capture_droidcam_still()
-        frames.append(("droidcam", droid["frame"]))
+        b64 = droid["frame"]
+        frames.append(("droidcam", b64))
+        paths.append(cam_mod._save_snapshot(b64, f"{tag}_droidcam"))
     except Exception as exc:
         log.debug("DroidCam unavailable during action wrap: %s", exc)
-    return frames
+    return frames, paths
 
 
 def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
@@ -103,13 +108,15 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
     On action error, returns _err(...) and skips the after-capture / Gemini call.
     On vision failure, the action result is still returned (description omitted).
     """
-    before = _capture_pair()
+    before, before_paths = _capture_pair("before")
     try:
         result = action_fn()
     except Exception as exc:
         return _err(str(exc))
-    after = _capture_pair()
-    description = vision.describe_change(action_desc, expected, before, after)
+    after, after_paths = _capture_pair("after")
+    description = vision.describe_change(
+        action_desc, expected, before, after, before_paths, after_paths
+    )
     out = _ok(result)
     if description:
         out["change_description"] = description

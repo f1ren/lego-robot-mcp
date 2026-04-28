@@ -67,6 +67,8 @@ def describe_change(
     expected: str,
     before: Sequence[tuple[str, str]],
     after: Sequence[tuple[str, str]],
+    before_paths: Sequence[str | None] | None = None,
+    after_paths: Sequence[str | None] | None = None,
 ) -> str:
     """
     Ask Gemini whether the *expected* outcome of an action was achieved, and
@@ -104,8 +106,11 @@ def describe_change(
         parts.append(_image_part(b64))
 
     log.info(
-        "Gemini query: action=%r expected=%r before_frames=%d after_frames=%d",
+        "Gemini query: action=%r expected=%r before_frames=%d after_frames=%d"
+        "\n  before_paths=%s\n  after_paths=%s",
         action, expected, len(before), len(after),
+        list(before_paths) if before_paths else [],
+        list(after_paths) if after_paths else [],
     )
     try:
         resp = client.models.generate_content(
