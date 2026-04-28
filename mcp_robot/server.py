@@ -42,7 +42,7 @@ from mcp.types import ImageContent, TextContent
 
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
-from mcp_robot import config, viz
+from mcp_robot import config, viz, vision
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -53,7 +53,12 @@ mcp = FastMCP(
         "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
         "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
         "Always call get_robot_state before planning a sequence of actions. "
-        "After each action call capture_image or capture_video_clip to confirm the outcome visually. "
+        "Motor-action tools (move_motor, drive, move_arm, control_gripper, "
+        "grasp, put) automatically capture before/after images and return a "
+        "Gemini-generated `change_description` summarising what changed — "
+        "you do NOT need to call capture_image afterwards to verify them. "
+        "Use capture_image / capture_video_clip / get_robot_state when you "
+        "explicitly need to see the scene. "
         "Stop and report to the user if a motor or camera tool raises an error."
     ),
 )
@@ -73,6 +78,44 @@ def _image_content(frame_b64: str) -> ImageContent:
     return ImageContent(type="image", data=frame_b64, mimeType="image/jpeg")
 
 
+def _capture_pair() -> list[tuple[str, str]]:
+    """Snap one frame from each available camera. Returns [(label, b64), ...]."""
+    frames: list[tuple[str, str]] = []
+    try:
+        pi = cam_mod.capture_still()
+        frames.append(("pi_camera", pi["frame"]))
+    except Exception as exc:
+        log.warning("Pi camera capture failed during action wrap: %s", exc)
+    try:
+        droid = cam_mod.capture_droidcam_still()
+        frames.append(("droidcam", droid["frame"]))
+    except Exception as exc:
+        log.debug("DroidCam unavailable during action wrap: %s", exc)
+    return frames
+
+
+def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
+    """
+    Capture before-frames, run *action_fn*, capture after-frames, and return
+    the action result merged with a Gemini-generated `change_description`
+    that includes a verdict on whether *expected* was achieved.
+
+    On action error, returns _err(...) and skips the after-capture / Gemini call.
+    On vision failure, the action result is still returned (description omitted).
+    """
+    before = _capture_pair()
+    try:
+        result = action_fn()
+    except Exception as exc:
+        return _err(str(exc))
+    after = _capture_pair()
+    description = vision.describe_change(action_desc, expected, before, after)
+    out = _ok(result)
+    if description:
+        out["change_description"] = description
+    return out
+
+
 # ── motor primitives ──────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -89,6 +132,9 @@ def move_motor(port: str, degrees: int, speed: int = 50) -> dict:
     """
     Move a single motor port by the given number of degrees.
 
+    Captures before/after images from both cameras and returns a
+    Gemini-generated `change_description` alongside motor positions.
+
     Args:
         port:    BuildHat port — "A", "B", "C", or "D".
         degrees: Positive = one direction, negative = opposite.
@@ -99,10 +145,19 @@ def move_motor(port: str, degrees: int, speed: int = 50) -> dict:
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
     if not (1 <= abs(speed) <= 100):
         return _err("speed must be between 1 and 100.")
-    try:
-        return _ok(robot_mod.move_motor(port.upper(), degrees, speed))
-    except Exception as exc:
-        return _err(str(exc))
+    p = port.upper()
+    role = {
+        config.PORT_LEFT_WHEEL:  "left wheel turns (may translate or pivot the robot)",
+        config.PORT_RIGHT_WHEEL: "right wheel turns (may translate or pivot the robot)",
+        config.PORT_ARM:         "arm moves (positive=down, negative=up)",
+        config.PORT_GRIPPER:     "gripper jaws move (positive=close, negative=open)",
+    }.get(p, "the connected motor rotates")
+    expected = f"motor on port {p} rotates by ~{degrees}°; visually: {role}"
+    return _with_change_analysis(
+        f"move_motor port={p} degrees={degrees} speed={speed}",
+        expected,
+        lambda: robot_mod.move_motor(p, degrees, speed),
+    )
 
 
 # ── wheel driving ─────────────────────────────────────────────────────────────
@@ -114,17 +169,29 @@ def drive(
     speed: int = 50,
 ) -> dict:
     """
-    Drive the robot.
+    Drive the robot. Captures before/after images and returns a Gemini-generated
+    `change_description` alongside motor positions.
 
     Args:
         direction: "forward" | "backward" | "left" | "right" | "stop"
         duration_s: How long to run the wheels (seconds). Ignored for "stop".
         speed:      Wheel speed, 1–100.
     """
-    try:
-        return _ok(robot_mod.drive(direction, duration_s, speed))
-    except Exception as exc:
-        return _err(str(exc))
+    desc = (
+        f"drive {direction}"
+        if direction == "stop"
+        else f"drive {direction} for {duration_s}s at speed {speed}"
+    )
+    expected = {
+        "forward":  "robot translates forward — droidcam shows the body moving forward; pi_camera front view shifts to show new content ahead; gripper/arm unchanged",
+        "backward": "robot translates backward — droidcam shows the body moving backward; pi_camera front view shifts to show what was previously behind; gripper/arm unchanged",
+        "left":     "robot pivots left in place — droidcam shows orientation rotating counter-clockwise; pi_camera view pans accordingly",
+        "right":    "robot pivots right in place — droidcam shows orientation rotating clockwise; pi_camera view pans accordingly",
+        "stop":     "robot stops — no visible position or orientation change between frames",
+    }.get(direction, f"robot performs {direction!r} motion")
+    return _with_change_analysis(
+        desc, expected, lambda: robot_mod.drive(direction, duration_s, speed),
+    )
 
 
 # ── arm ───────────────────────────────────────────────────────────────────────
@@ -132,17 +199,24 @@ def drive(
 @mcp.tool()
 def move_arm(degrees: int, speed: int = 30) -> dict:
     """
-    Move the robot arm by the given number of degrees.
+    Move the robot arm by the given number of degrees. Captures before/after
+    images and returns a Gemini-generated `change_description`.
 
     Args:
         degrees: How far to move. Positive = down, negative = up.
                  Start with values like ±30–90 and adjust based on results.
         speed:   Motor speed, 1–100.
     """
-    try:
-        return _ok(robot_mod.move_arm(degrees, speed))
-    except Exception as exc:
-        return _err(str(exc))
+    direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
+    expected = (
+        f"arm moves {direction} by ~{abs(degrees)}° — visible in droidcam (arm angle "
+        f"changes); pi_camera view may tilt as the arm pose shifts; wheels and gripper unchanged"
+    )
+    return _with_change_analysis(
+        f"move arm by {degrees}° (positive=down, negative=up) at speed {speed}",
+        expected,
+        lambda: robot_mod.move_arm(degrees, speed),
+    )
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
@@ -150,16 +224,23 @@ def move_arm(degrees: int, speed: int = 30) -> dict:
 @mcp.tool()
 def control_gripper(action: str, speed: int = 25) -> dict:
     """
-    Open or close the gripper.
+    Open or close the gripper. Captures before/after images and returns a
+    Gemini-generated `change_description`.
 
     Args:
         action: "open" or "close".
         speed:  Motor speed, 1–100.
     """
-    try:
-        return _ok(robot_mod.control_gripper(action, speed))
-    except Exception as exc:
-        return _err(str(exc))
+    expected = (
+        "gripper jaws open (visibly wider gap between fingers); robot pose and arm unchanged"
+        if action == "open"
+        else "gripper jaws close (gap narrows; if an object is between them, it is now grasped); robot pose and arm unchanged"
+    )
+    return _with_change_analysis(
+        f"{action} gripper at speed {speed}",
+        expected,
+        lambda: robot_mod.control_gripper(action, speed),
+    )
 
 
 # ── compound actions ──────────────────────────────────────────────────────────
@@ -167,25 +248,33 @@ def control_gripper(action: str, speed: int = 25) -> dict:
 @mcp.tool()
 def grasp() -> dict:
     """
-    High-level GRASP: lower arm then close gripper.
-    Call verify_action or analyze_scene afterwards to confirm grip.
+    High-level GRASP: lower arm then close gripper. Captures before/after
+    images and returns a Gemini-generated `change_description` confirming
+    whether the grip succeeded.
     """
-    try:
-        return _ok(robot_mod.grasp())
-    except Exception as exc:
-        return _err(str(exc))
+    return _with_change_analysis(
+        "grasp (lower arm + close gripper)",
+        "arm lowers toward an object directly in front of the robot, then gripper "
+        "jaws close around it — in the AFTER frames the gripper should be closed "
+        "and (if an object was present) the object should appear held between the jaws",
+        robot_mod.grasp,
+    )
 
 
 @mcp.tool()
 def put() -> dict:
     """
-    High-level PUT: open gripper then raise arm.
-    Call verify_action or analyze_scene afterwards to confirm release.
+    High-level PUT: open gripper then raise arm. Captures before/after
+    images and returns a Gemini-generated `change_description` confirming
+    whether the object was released.
     """
-    try:
-        return _ok(robot_mod.put())
-    except Exception as exc:
-        return _err(str(exc))
+    return _with_change_analysis(
+        "put (open gripper + raise arm)",
+        "gripper jaws open (releasing any held object so it sits on the surface "
+        "in front of the robot), then arm raises — in the AFTER frames the gripper "
+        "should be open and the arm should be in its raised position",
+        robot_mod.put,
+    )
 
 
 # ── camera ────────────────────────────────────────────────────────────────────
