@@ -87,6 +87,32 @@ class _PiFrameCache:
 
 _pi_cache = _PiFrameCache()
 
+
+# ── DroidCam frame cache ──────────────────────────────────────────────────────
+
+class _DroidCamFrameCache:
+    """Thread-safe holder for the latest DroidCam frame."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest: dict | None = None
+
+    def put(self, frame_b64: str, ts: float) -> None:
+        entry = {
+            "frame": frame_b64,
+            "ts": ts,
+            "bytes": len(frame_b64) * 3 // 4,
+        }
+        with self._lock:
+            self._latest = entry
+
+    def latest(self) -> dict | None:
+        with self._lock:
+            return self._latest
+
+
+_droidcam_cache = _DroidCamFrameCache()
+
 # ── RPi-side scripts ──────────────────────────────────────────────────────────
 
 _CAPTURE_STILL = """
@@ -343,6 +369,42 @@ def stream_droidcam(
                 break
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             b64 = base64.b64encode(buf.tobytes()).decode()
-            on_frame(b64, time.time())
+            ts = time.time()
+            _droidcam_cache.put(b64, ts)
+            on_frame(b64, ts)
+    finally:
+        cap.release()
+
+
+def capture_droidcam_still() -> dict:
+    """
+    Return the most recent DroidCam frame.
+
+    DroidCam allows only one client at a time, so we read from the cache
+    populated by stream_droidcam(). If no stream is running, opens a
+    short-lived cv2.VideoCapture to grab a single frame.
+
+    Returns:
+        {"frame": "<base64>", "ts": float, "bytes": int}
+    """
+    cached = _droidcam_cache.latest()
+    if cached is not None:
+        _save_snapshot(cached["frame"], "droidcam")
+        return cached
+
+    import cv2
+
+    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    if not cap.isOpened():
+        raise RuntimeError(_droidcam_failure_reason())
+    try:
+        ok, frame = cap.read()
+        if not ok:
+            raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        b64 = base64.b64encode(buf.tobytes()).decode()
+        result = {"frame": b64, "ts": time.time(), "bytes": len(buf)}
+        _save_snapshot(b64, "droidcam")
+        return result
     finally:
         cap.release()

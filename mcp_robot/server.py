@@ -239,12 +239,13 @@ def capture_video_clip(
 @mcp.tool()
 def get_robot_state() -> list[ImageContent | TextContent]:
     """
-    One-shot state snapshot: all motor positions + a live camera frame.
+    One-shot state snapshot: all motor positions + live frames from both
+    cameras (Pi Camera = front view; DroidCam = wider third-person view).
     Call this before planning any sequence of actions.
     """
     try:
         positions = robot_mod.get_all_positions()
-        frame_data = cam_mod.capture_still()
+        pi_frame = cam_mod.capture_still()
         summary = (
             f"Motor positions — "
             f"left_wheel: {positions['left_wheel']}°, "
@@ -252,10 +253,18 @@ def get_robot_state() -> list[ImageContent | TextContent]:
             f"arm: {positions['arm']}°, "
             f"gripper: {positions['gripper']}°"
         )
-        return [
-            _image_content(frame_data["frame"]),
-            TextContent(type="text", text=summary),
+        content: list[ImageContent | TextContent] = [
+            TextContent(type="text", text="Pi Camera (front view):"),
+            _image_content(pi_frame["frame"]),
         ]
+        try:
+            droid_frame = cam_mod.capture_droidcam_still()
+            content.append(TextContent(type="text", text="DroidCam (third-person view):"))
+            content.append(_image_content(droid_frame["frame"]))
+        except Exception as exc:
+            content.append(TextContent(type="text", text=f"DroidCam unavailable: {exc}"))
+        content.append(TextContent(type="text", text=summary))
+        return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
