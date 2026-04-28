@@ -15,11 +15,21 @@ All scripts must write a single JSON object to stdout.
 stderr (libcamera logs, etc.) is suppressed on the RPi side.
 """
 import json
+import logging
 import threading
 import textwrap
 import paramiko
 
 from mcp_robot import config
+
+log = logging.getLogger(__name__)
+
+
+_HAT_RESET_CMD = (
+    "sudo lsof -t /dev/ttyS0 /dev/serial0 2>/dev/null | xargs -r sudo kill -9; "
+    "sleep 0.3; "
+    "gpioset gpiochip0 4=0 && sleep 0.1 && gpioset gpiochip0 4=1 && sleep 0.5"
+)
 
 
 class RPiClient:
@@ -61,7 +71,21 @@ class RPiClient:
         The script must print exactly one JSON-serialisable object to stdout.
         libcamera / BuildHat noise on stderr is discarded.
         Raises RuntimeError if no JSON output is received.
+
+        Recovers automatically from "HAT not found": runs a kill+GPIO-reset
+        sequence on the RPi and retries once.
         """
+        try:
+            return self._run_python_once(script, timeout)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "HAT not found" not in msg and "BuildHAT may be missing" not in msg:
+                raise
+            log.warning("BuildHAT unresponsive (%s) — running reset and retrying once.", msg.splitlines()[0])
+            self._reset_hat()
+            return self._run_python_once(script, timeout)
+
+    def _run_python_once(self, script: str, timeout: int) -> dict:
         # Wrap the script so any uncaught exception is emitted as JSON to stdout
         # (otherwise it would silently vanish if stderr is suppressed).
         # We also redirect C-level fd-2 so libcamera INFO noise doesn't corrupt output.
@@ -111,6 +135,21 @@ class RPiClient:
                     f"RPi script raised: {result['__error__']}\n{result.get('__trace__', '')}"
                 )
             return result
+
+    def _reset_hat(self) -> None:
+        """
+        Recover from "HAT not found": kill any process holding the serial port,
+        then pulse GPIO 4 low/high to reset the BuildHAT.
+        """
+        with self._lock:
+            ssh = self._ensure_connected()
+            _, stdout, stderr = ssh.exec_command(_HAT_RESET_CMD, timeout=15)
+            exit_code = stdout.channel.recv_exit_status()
+            if exit_code != 0:
+                err = stderr.read().decode().strip()
+                log.warning("HAT reset exited with status %d: %s", exit_code, err)
+            else:
+                log.info("HAT reset completed.")
 
     def stream_python(
         self,

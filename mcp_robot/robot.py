@@ -94,12 +94,23 @@ def get_all_positions() -> dict:
     return positions
 
 
+_PORT_TO_NAME = {
+    config.PORT_LEFT_WHEEL:  "left_wheel",
+    config.PORT_RIGHT_WHEEL: "right_wheel",
+    config.PORT_ARM:         "arm",
+    config.PORT_GRIPPER:     "gripper",
+}
+
+
 def move_motor(port: str, degrees: int, speed: int) -> dict:
     """Move a single motor by *degrees* at *speed*. Returns start/end positions."""
     result = get_client().run_python(
         _MOVE_SINGLE_MOTOR.format(port=port, degrees=degrees, speed=speed),
         timeout=max(30, abs(degrees) // 10 + 5),
     )
+    name = _PORT_TO_NAME.get(port, port)
+    viz.log_motor_positions({name: result["start"]})
+    viz.log_motor_positions({name: result["end"]})
     return result
 
 
@@ -128,12 +139,17 @@ def drive(
         speed: Motor speed 1–100.
     """
     if direction == "stop":
-        return get_client().run_python(
+        result = get_client().run_python(
             _STOP_WHEELS.format(
                 left_port=config.PORT_LEFT_WHEEL,
                 right_port=config.PORT_RIGHT_WHEEL,
             )
         )
+        viz.log_motor_positions({
+            "left_wheel":  result.get("left"),
+            "right_wheel": result.get("right"),
+        })
+        return result
 
     if direction not in _WHEEL_DIRECTIONS:
         raise ValueError(
@@ -153,6 +169,10 @@ def drive(
         timeout=int(duration_s + 10),
     )
     result["direction"] = direction
+    viz.log_motor_positions({
+        "left_wheel":  result.get("left"),
+        "right_wheel": result.get("right"),
+    })
     return result
 
 

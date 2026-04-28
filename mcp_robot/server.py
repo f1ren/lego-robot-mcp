@@ -271,16 +271,6 @@ def get_robot_state() -> list[ImageContent | TextContent]:
 
 # ── background streaming ──────────────────────────────────────────────────────
 
-def _poll_motors() -> None:
-    interval = 0.5
-    while not _stop.is_set():
-        try:
-            robot_mod.get_all_positions()
-        except Exception as exc:
-            log.warning("Motor poll failed: %s", exc)
-        _stop.wait(interval)
-
-
 def _run_pi_camera() -> None:
     backoff = 1.0
     while not _stop.is_set():
@@ -320,7 +310,6 @@ def _start_background_streams() -> None:
         log.warning("Motor init failed (%s) — continuing without motor data.", exc)
 
     for target, name in [
-        (_poll_motors,    "motor-poll"),
         (_run_pi_camera,  "pi-camera"),
         (_run_droidcam,   "droidcam"),
     ]:
