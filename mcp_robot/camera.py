@@ -8,10 +8,39 @@ When stream_live() is running, capture_still() and capture_clip() read from
 the shared frame cache instead of opening a second picamera2 session.
 """
 import base64
+import logging
+import os
 import time
 import threading
 from mcp_robot import config, viz
 from mcp_robot.rpi_client import get_client
+
+log = logging.getLogger(__name__)
+
+
+def _save_snapshot(frame_b64: str, label: str, index: int | None = None) -> str | None:
+    """
+    Decode frame_b64 and write it to SNAPSHOT_DIR as a JPEG.
+
+    Returns the file path on success, None if saving is disabled or fails.
+    label:  "still" or "clip"
+    index:  frame index within a clip (None for stills)
+    """
+    if not config.SNAPSHOT_DIR:
+        return None
+    try:
+        os.makedirs(config.SNAPSHOT_DIR, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        ms = int((time.time() % 1) * 1000)
+        suffix = f"_f{index:02d}" if index is not None else ""
+        path = os.path.join(config.SNAPSHOT_DIR, f"{label}_{ts}_{ms:03d}{suffix}.jpg")
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(frame_b64))
+        log.info("Snapshot saved: %s", path)
+        return path
+    except Exception as exc:
+        log.warning("Failed to save snapshot: %s", exc)
+        return None
 
 
 # ── Pi Camera frame cache ──────────────────────────────────────────────────────
@@ -171,6 +200,7 @@ def capture_still() -> dict:
     """
     cached = _pi_cache.latest()
     if cached is not None:
+        _save_snapshot(cached["frame"], "still")
         viz.log_still(cached)
         return cached
 
@@ -180,6 +210,7 @@ def capture_still() -> dict:
         warmup=config.CAMERA_WARMUP,
     )
     result = get_client().run_python(script, timeout=15)
+    _save_snapshot(result["frame"], "still")
     viz.log_still(result)
     return result
 
@@ -203,6 +234,8 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             "width": clip_frames[0]["width"],
             "height": clip_frames[0]["height"],
         }
+        for i, frame_b64 in enumerate(result["frames"]):
+            _save_snapshot(frame_b64, "clip", index=i)
         viz.log_clip(result)
         return result
 
@@ -217,6 +250,8 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     )
     timeout = int(duration_s + 10)
     result = get_client().run_python(script, timeout=timeout)
+    for i, frame_b64 in enumerate(result["frames"]):
+        _save_snapshot(frame_b64, "clip", index=i)
     viz.log_clip(result)
     return result
 
@@ -261,6 +296,21 @@ def stream_live(
     get_client().stream_python(script, _on_line, stop_event)
 
 
+def _droidcam_failure_reason() -> str:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(config.DROIDCAM_URL, timeout=3) as resp:
+            if "text/html" in resp.headers.get("Content-Type", ""):
+                if "busy" in resp.read().decode(errors="replace").lower():
+                    return (
+                        f"DroidCam is busy (another client is connected). "
+                        f"Close the other viewer and retry. URL: {config.DROIDCAM_URL}"
+                    )
+    except Exception as exc:
+        return f"Cannot reach DroidCam at {config.DROIDCAM_URL}: {exc}"
+    return f"Cannot open DroidCam stream at {config.DROIDCAM_URL}"
+
+
 def stream_droidcam(
     stop_event: threading.Event | None = None,
     on_frame=None,
@@ -280,27 +330,12 @@ def stream_droidcam(
     if on_frame is None:
         on_frame = viz.log_droidcam_frame
 
-    # Pre-flight: detect "DroidCam is Busy" before handing the URL to OpenCV,
-    # which would just silently fail to open the stream.
-    try:
-        import urllib.request
-        with urllib.request.urlopen(config.DROIDCAM_URL, timeout=3) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            if "text/html" in content_type:
-                body = resp.read(512).decode(errors="replace")
-                if "busy" in body.lower():
-                    raise RuntimeError(
-                        f"DroidCam is busy (another client is connected). "
-                        f"Close the other viewer and retry. URL: {config.DROIDCAM_URL}"
-                    )
-    except RuntimeError:
-        raise
-    except Exception:
-        pass  # let OpenCV handle connection errors in the normal path
-
     cap = cv2.VideoCapture(config.DROIDCAM_URL)
     if not cap.isOpened():
-        raise RuntimeError(f"Cannot open DroidCam stream at {config.DROIDCAM_URL}")
+        # Probe the URL to distinguish "busy" from a real connection failure.
+        # Done only on failure — probing before VideoCapture opens triggers
+        # DroidCam's single-client lockout and breaks the next connect.
+        raise RuntimeError(_droidcam_failure_reason())
     try:
         while stop_event is None or not stop_event.is_set():
             ok, frame = cap.read()

@@ -43,6 +43,11 @@ DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", "/tmp/lego-robot-mcp.log")
 
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+# Directory where captured images are saved before being sent to the model.
+# Set SNAPSHOT_DIR="" to disable saving.
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/tmp/lego-robot-snapshots")
+
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging
 # RERUN_MODE=spawn         launch the desktop viewer (default)
