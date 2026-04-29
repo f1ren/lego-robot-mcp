@@ -12,7 +12,8 @@
       }
     },
     "experience-memory": {
-      "command": ".venv/bin/mcp-memory-server",
+      "command": ".venv/bin/python3",
+      "args": ["-m", "mcp_memory_service.server"],
       "env": {
         "MCP_MEMORY_SQLITE_PATH": "/home/navatm/Projects/lego-robot-mcp/memory/experiences.db",
         "MCP_MEMORY_BASE_DIR": "/home/navatm/Projects/lego-robot-mcp/memory",
