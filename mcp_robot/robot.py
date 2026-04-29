@@ -186,7 +186,7 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
         degrees: How far to move. Positive = down, negative = up.
         speed:   Motor speed 1–100.
     """
-    return move_motor(config.PORT_ARM, degrees, speed)
+    return move_motor(config.PORT_ARM, -degrees, speed)  # motor is physically inverted; negate so positive=down as documented
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
