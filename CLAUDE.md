@@ -2,10 +2,13 @@
 
 It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HAT and OV5647 Pi Camera.
 
+Don't trust the MCP as is. It is a work in progress and should keep on changing. Be skeptic. Did the robot move as expected? Does the motors, mechanincs, and code align as expected? Prefer the vision model results over the sensors input, as it is more robust and data rich.
+
 ## Tool use and Code synthesis
 1. The agentic coder should prefer using the MCP server to control the robot, as it should be more reliable and consistent.
 2. If no appropriate function or tool is missing, the agentic coder should modify the MCP server code itself while testing. For instance, if you want the robot to grasp something, and the function does not exist, you should add the function to the MCP server code and test it.
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
+4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 
 ## Technical Details
 
