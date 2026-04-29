@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 _client: genai.Client | None = None
 _client_lock = threading.Lock()
+_active_model: str | None = None  # set on first use; switches to fallback on quota exhaustion
+_model_lock = threading.Lock()
 
 
 def is_available() -> bool:
@@ -29,7 +31,7 @@ def is_available() -> bool:
 
 
 def _get_client() -> genai.Client | None:
-    global _client
+    global _client, _active_model
     if _client is not None:
         return _client
     if not config.GEMINI_API_KEY:
@@ -37,7 +39,32 @@ def _get_client() -> genai.Client | None:
     with _client_lock:
         if _client is None:
             _client = genai.Client(api_key=config.GEMINI_API_KEY)
+            _active_model = config.GEMINI_MODEL
     return _client
+
+
+def _get_active_model() -> str:
+    global _active_model
+    if _active_model is None:
+        _active_model = config.GEMINI_MODEL
+    return _active_model
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("resource_exhausted", "quota", "429", "ratelimitexceeded", "requests per day"))
+
+
+def _switch_to_fallback() -> str:
+    global _active_model
+    with _model_lock:
+        if _active_model != config.GEMINI_FALLBACK_MODEL:
+            _active_model = config.GEMINI_FALLBACK_MODEL
+            log.warning(
+                "Gemini quota exhausted — switching to fallback model: %s (RPD resets at midnight PT)",
+                config.GEMINI_FALLBACK_MODEL,
+            )
+    return _active_model
 
 
 def _image_part(b64: str) -> types.Part:
@@ -112,14 +139,30 @@ def describe_change(
         list(before_paths) if before_paths else [],
         list(after_paths) if after_paths else [],
     )
+    model = _get_active_model()
     try:
+        log.info("Using Gemini model: %s", model)
         resp = client.models.generate_content(
-            model=config.GEMINI_MODEL,
+            model=model,
             contents=[types.Content(role="user", parts=parts)],
         )
         text = (resp.text or "").strip()
         log.info("Gemini response: %s", text)
         return text
     except Exception as exc:
+        if _is_quota_error(exc) and model != config.GEMINI_FALLBACK_MODEL:
+            fallback = _switch_to_fallback()
+            log.info("Retrying with fallback model: %s", fallback)
+            try:
+                resp = client.models.generate_content(
+                    model=fallback,
+                    contents=[types.Content(role="user", parts=parts)],
+                )
+                text = (resp.text or "").strip()
+                log.info("Gemini fallback response: %s", text)
+                return text
+            except Exception as exc2:
+                log.warning("Gemini fallback also failed: %s", exc2)
+                return f"(vision analysis failed: {exc2})"
         log.warning("Gemini describe_change failed: %s", exc)
         return f"(vision analysis failed: {exc})"
