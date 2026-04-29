@@ -10,6 +10,15 @@
         "PYTHONUNBUFFERED": "1",
         "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
+    },
+    "experience-memory": {
+      "command": ".venv/bin/mcp-memory-server",
+      "env": {
+        "MCP_MEMORY_SQLITE_PATH": "/home/navatm/Projects/lego-robot-mcp/memory/experiences.db",
+        "MCP_MEMORY_BASE_DIR": "/home/navatm/Projects/lego-robot-mcp/memory",
+        "MCP_CONSOLIDATION_ENABLED": "true",
+        "PYTHONUNBUFFERED": "1"
+      }
     }
   }
 }

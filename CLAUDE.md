@@ -10,6 +10,23 @@ Don't trust the MCP as is. It is a work in progress and should keep on changing.
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
 4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 
+## Experience Memory Workflow
+
+This project uses `mcp-memory-service` (`experience-memory` MCP server) to accumulate robot learnings across sessions. The DB lives at `memory/experiences.db`.
+
+**Before any task or code change:** call `memory_search` with keywords relevant to what you're about to do (e.g., `"gripper close"`, `"arm calibration"`, `"drive forward"`). If past experiences exist, let them inform your plan.
+
+**When changing code:** if a past experience informed the change, add an inline comment on the changed line(s) with the experience ID and the lesson — e.g. `# exp:abc123 — gripper stalls above 50% speed when arm is extended`. Include the same ID in the commit message. When storing the resulting `code_fix` experience, include the file path and function name in the content so future searches surface it.
+
+**After every task, failure, code fix, or user feedback:** call `memory_store` with:
+- `content`: one clear paragraph — what you tried, what happened, what you learned
+- `tags`: robot body (e.g. `3-wheel-gripper`) + component (`gripper`, `arm`, `drive`, `camera`, `vision`, `buildhat`) + event (`failure`, `success`, `code_fix`, `feedback`)
+- `memory_type`: `"learning"` (lesson from outcome), `"error"` (failure + root cause), `"observation"` (factual discovery), or `"decision"` (deliberate design choice)
+
+**Consolidation:** periodically run `memory_consolidate` with `action="run"` and `time_horizon="weekly"` to cluster and compress accumulated entries into higher-level patterns.
+
+**Skill extraction:** when you have enough consolidated learnings, use `memory_list` to pull recent memories and synthesize the patterns. Prefer encoding the lesson as **code** (more precise, cheaper to run). Only create a **skill** when code can't solve it — i.e. when the lesson is a playbook: a class of situations requiring judgment, reflection, or a sequence of code changes rather than a single repeatable action.
+
 ## Technical Details
 
 1. The MCP runs in virtual environment.
