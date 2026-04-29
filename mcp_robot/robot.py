@@ -225,17 +225,6 @@ def control_gripper(
 
 # ── high-level compound actions ───────────────────────────────────────────────
 
-def grasp(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
-    """Lower arm then close gripper."""
-    arm_deg        = config.ARM_DOWN_DEG - config.ARM_UP_DEG
-    arm_result     = move_arm(arm_deg, speed=config.DEFAULT_ARM_SPEED)
-    gripper_result = control_gripper("close", speed=speed)
-    return {
-        "action":  "grasp",
-        "arm":     arm_result,
-        "gripper": gripper_result,
-    }
-
 
 def put(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
     """Open gripper then raise arm."""

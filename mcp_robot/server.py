@@ -20,7 +20,6 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   High-level actions
   ──────────────────
-  grasp                  Lower arm + close gripper
   put                    Open gripper + raise arm
 
   Camera
@@ -54,7 +53,7 @@ mcp = FastMCP(
         "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
         "Always call get_robot_state before planning a sequence of actions. "
         "Motor-action tools (move_motor, drive, move_arm, control_gripper, "
-        "grasp, put) automatically capture before/after images and return a "
+        "put) automatically capture before/after images and return a "
         "Gemini-generated `change_description` summarising what changed — "
         "you do NOT need to call capture_image afterwards to verify them. "
         "Use capture_image / capture_video_clip / get_robot_state when you "
@@ -251,21 +250,6 @@ def control_gripper(action: str, speed: int = 25) -> dict:
 
 
 # ── compound actions ──────────────────────────────────────────────────────────
-
-@mcp.tool()
-def grasp() -> dict:
-    """
-    High-level GRASP: lower arm then close gripper. Captures before/after
-    images and returns a Gemini-generated `change_description` confirming
-    whether the grip succeeded.
-    """
-    return _with_change_analysis(
-        "grasp (lower arm + close gripper)",
-        "arm lowers toward an object directly in front of the robot, then gripper "
-        "jaws close around it — in the AFTER frames the gripper should be closed "
-        "and (if an object was present) the object should appear held between the jaws",
-        robot_mod.grasp,
-    )
 
 
 @mcp.tool()
