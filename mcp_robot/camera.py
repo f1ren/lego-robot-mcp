@@ -91,11 +91,12 @@ _pi_cache = _PiFrameCache()
 # ── DroidCam frame cache ──────────────────────────────────────────────────────
 
 class _DroidCamFrameCache:
-    """Thread-safe holder for the latest DroidCam frame."""
+    """Thread-safe ring buffer for DroidCam frames."""
+    _BUFFER_S = 30
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._latest: dict | None = None
+        self._buf: list[dict] = []
 
     def put(self, frame_b64: str, ts: float) -> None:
         entry = {
@@ -104,11 +105,27 @@ class _DroidCamFrameCache:
             "bytes": len(frame_b64) * 3 // 4,
         }
         with self._lock:
-            self._latest = entry
+            self._buf.append(entry)
+            cutoff = ts - self._BUFFER_S
+            while self._buf and self._buf[0]["ts"] < cutoff:
+                self._buf.pop(0)
 
     def latest(self) -> dict | None:
         with self._lock:
-            return self._latest
+            return self._buf[-1] if self._buf else None
+
+    def clip(self, duration_s: float, fps: float) -> list[dict] | None:
+        """Return a subsampled slice of the buffer, or None if empty."""
+        with self._lock:
+            if not self._buf:
+                return None
+            cutoff = time.time() - duration_s
+            frames = [f for f in self._buf if f["ts"] >= cutoff] or list(self._buf)
+            target_n = max(1, round(duration_s * fps))
+            if len(frames) <= target_n:
+                return list(frames)
+            indices = [round(i * (len(frames) - 1) / (target_n - 1)) for i in range(target_n)]
+            return [frames[i] for i in indices]
 
 
 _droidcam_cache = _DroidCamFrameCache()
@@ -372,6 +389,52 @@ def stream_droidcam(
             ts = time.time()
             _droidcam_cache.put(b64, ts)
             on_frame(b64, ts)
+    finally:
+        cap.release()
+
+
+def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
+    """
+    Return a short DroidCam clip as a list of JPEG frames.
+
+    Reads from the cache populated by stream_droidcam(). If no stream is
+    running, opens a short-lived cv2.VideoCapture to grab frames directly.
+
+    Returns:
+        {"frames": ["<base64>", ...], "count": int}
+    """
+    clip_frames = _droidcam_cache.clip(duration_s, fps)
+    if clip_frames is not None:
+        result = {
+            "frames": [f["frame"] for f in clip_frames],
+            "count": len(clip_frames),
+        }
+        for i, frame_b64 in enumerate(result["frames"]):
+            _save_snapshot(frame_b64, "droidcam_clip", index=i)
+        return result
+
+    import cv2
+
+    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    if not cap.isOpened():
+        raise RuntimeError(_droidcam_failure_reason())
+    try:
+        n_frames = max(1, round(duration_s * fps))
+        interval = 1.0 / fps
+        frames = []
+        for i in range(n_frames):
+            t0 = time.time()
+            ok, frame = cap.read()
+            if not ok:
+                break
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            b64 = base64.b64encode(buf.tobytes()).decode()
+            frames.append(b64)
+            _save_snapshot(b64, "droidcam_clip", index=i)
+            slack = interval - (time.time() - t0)
+            if slack > 0 and i < n_frames - 1:
+                time.sleep(slack)
+        return {"frames": frames, "count": len(frames)}
     finally:
         cap.release()
 

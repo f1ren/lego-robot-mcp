@@ -53,7 +53,7 @@ SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/tmp/lego-robot-snapshots")
 # instead of shipping images back to the MCP client.
 GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL         = os.getenv("GEMINI_MODEL",         "gemini-robotics-er-1.6-preview")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro-preview-05-06")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging

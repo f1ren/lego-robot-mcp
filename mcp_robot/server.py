@@ -24,8 +24,10 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Camera
   ──────
-  capture_image          Capture one still frame (returns ImageContent)
-  capture_video_clip     Capture N-second clip, return frames as images
+  get_front_camera_image      Capture one still from Pi Camera (front/robot-eye view)
+  get_external_camera_image   Capture one still from DroidCam (third-person view)
+  capture_front_video_clip    Capture N-second clip from Pi Camera
+  capture_external_video_clip Capture N-second clip from DroidCam
 
 Run with:
     python3 -m mcp_robot.server
@@ -56,8 +58,9 @@ mcp = FastMCP(
         "put) automatically capture before/after images and return a "
         "Gemini-generated `change_description` summarising what changed — "
         "you do NOT need to call capture_image afterwards to verify them. "
-        "Use capture_image / capture_video_clip / get_robot_state when you "
-        "explicitly need to see the scene. "
+        "Use get_front_camera_image / get_external_camera_image / "
+        "capture_front_video_clip / capture_external_video_clip / get_robot_state "
+        "when you explicitly need to see the scene. "
         "Stop and report to the user if a motor or camera tool raises an error."
     ),
 )
@@ -267,10 +270,10 @@ def put() -> dict:
 # ── camera ────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def capture_image() -> list[ImageContent | TextContent]:
+def get_front_camera_image() -> list[ImageContent | TextContent]:
     """
-    Capture a single still frame from the Pi Camera.
-    Returns the image so you can inspect the scene visually.
+    Capture a single still frame from the Pi Camera (front/robot-eye view).
+    Returns the image so you can inspect what the robot sees directly ahead.
     """
     try:
         result = cam_mod.capture_still()
@@ -278,7 +281,7 @@ def capture_image() -> list[ImageContent | TextContent]:
             _image_content(result["frame"]),
             TextContent(
                 type="text",
-                text=f"Captured {result['width']}×{result['height']} JPEG ({result['bytes']} bytes)",
+                text=f"Pi Camera — {result['width']}×{result['height']} JPEG ({result['bytes']} bytes)",
             ),
         ]
     except Exception as exc:
@@ -286,12 +289,28 @@ def capture_image() -> list[ImageContent | TextContent]:
 
 
 @mcp.tool()
-def capture_video_clip(
+def get_external_camera_image() -> list[ImageContent | TextContent]:
+    """
+    Capture a single still frame from the DroidCam (third-person/overhead view).
+    Useful for observing the robot's position and surroundings from outside.
+    """
+    try:
+        result = cam_mod.capture_droidcam_still()
+        return [
+            _image_content(result["frame"]),
+            TextContent(type="text", text="DroidCam — external/third-person view"),
+        ]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+@mcp.tool()
+def capture_front_video_clip(
     duration_s: float = 2.0,
     fps: float = 2.0,
 ) -> list[ImageContent | TextContent]:
     """
-    Capture a short video clip as a sequence of JPEG frames.
+    Capture a short clip from the Pi Camera (front/robot-eye view).
 
     Args:
         duration_s: Clip length in seconds (1–10 recommended).
@@ -302,7 +321,34 @@ def capture_video_clip(
         content: list[ImageContent | TextContent] = [
             TextContent(
                 type="text",
-                text=f"Captured {result['count']} frames at {fps:.1f} fps — {duration_s}s clip",
+                text=f"Pi Camera — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
+            )
+        ]
+        for frame_b64 in result["frames"]:
+            content.append(_image_content(frame_b64))
+        return content
+    except Exception as exc:
+        return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+@mcp.tool()
+def capture_external_video_clip(
+    duration_s: float = 2.0,
+    fps: float = 2.0,
+) -> list[ImageContent | TextContent]:
+    """
+    Capture a short clip from the DroidCam (third-person/overhead view).
+
+    Args:
+        duration_s: Clip length in seconds (1–10 recommended).
+        fps:        Frames per second (1–5 recommended).
+    """
+    try:
+        result = cam_mod.capture_droidcam_clip(duration_s, fps)
+        content: list[ImageContent | TextContent] = [
+            TextContent(
+                type="text",
+                text=f"DroidCam — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
             )
         ]
         for frame_b64 in result["frames"]:
