@@ -11,7 +11,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Wheel driving
   ─────────────
-  drive                  forward / backward / left / right / stop
+  drive                  left_speed, right_speed, duration_s (raw — directions uncalibrated)
 
   Arm & gripper
   ─────────────
@@ -170,33 +170,29 @@ def move_motor(port: str, degrees: int, speed: int = 50) -> dict:
 
 @mcp.tool()
 def drive(
-    direction: str,
+    left_speed: int,
+    right_speed: int,
     duration_s: float = 1.0,
-    speed: int = 50,
 ) -> dict:
     """
-    Drive the robot. Captures before/after images and returns a Gemini-generated
-    `change_description` alongside motor positions.
+    Drive the robot wheels directly. Captures before/after images and returns a
+    Gemini-generated `change_description` alongside motor positions.
 
     Args:
-        direction: "forward" | "backward" | "left" | "right" | "stop"
-        duration_s: How long to run the wheels (seconds). Ignored for "stop".
-        speed:      Wheel speed, 1–100.
+        left_speed:  Speed for the left wheel, -100 to 100. The sign convention
+                     (which value moves the robot forward vs backward) must be
+                     determined empirically — it has not been calibrated yet.
+        right_speed: Speed for the right wheel, -100 to 100.
+        duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
     """
     desc = (
-        f"drive {direction}"
-        if direction == "stop"
-        else f"drive {direction} for {duration_s}s at speed {speed}"
+        "stop wheels"
+        if duration_s == 0
+        else f"drive left={left_speed} right={right_speed} for {duration_s}s"
     )
-    expected = {
-        "forward":  "robot translates forward — droidcam shows the body moving forward; pi_camera front view shifts to show new content ahead; gripper/arm unchanged",
-        "backward": "robot translates backward — droidcam shows the body moving backward; pi_camera front view shifts to show what was previously behind; gripper/arm unchanged",
-        "left":     "robot pivots left in place — droidcam shows orientation rotating counter-clockwise; pi_camera view pans accordingly",
-        "right":    "robot pivots right in place — droidcam shows orientation rotating clockwise; pi_camera view pans accordingly",
-        "stop":     "robot stops — no visible position or orientation change between frames",
-    }.get(direction, f"robot performs {direction!r} motion")
+    expected = "wheels spin as commanded; observe droidcam for resulting robot motion"
     return _with_change_analysis(
-        desc, expected, lambda: robot_mod.drive(direction, duration_s, speed),
+        desc, expected, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
     )
 
 

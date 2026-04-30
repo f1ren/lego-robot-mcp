@@ -116,29 +116,21 @@ def move_motor(port: str, degrees: int, speed: int) -> dict:
 
 # ── wheel driving ─────────────────────────────────────────────────────────────
 
-_WHEEL_DIRECTIONS = {
-    # (left_speed_sign, right_speed_sign)
-    "forward":  ( 1,  1),
-    "backward": (-1, -1),
-    "left":     (-1,  1),
-    "right":    ( 1, -1),
-}
-
-
 def drive(
-    direction: str,
+    left_speed: int,
+    right_speed: int,
     duration_s: float = 1.0,
-    speed: int = config.DEFAULT_WHEEL_SPEED,
 ) -> dict:
     """
-    Drive the robot wheels.
+    Drive the robot wheels directly.
 
     Args:
-        direction: "forward" | "backward" | "left" | "right" | "stop"
-        duration_s: How long to run (seconds).
-        speed: Motor speed 1–100.
+        left_speed:  Speed for the left wheel, -100 to 100. Positive/negative
+                     direction must be determined empirically.
+        right_speed: Speed for the right wheel, -100 to 100.
+        duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
     """
-    if direction == "stop":
+    if duration_s == 0:
         result = get_client().run_python(
             _STOP_WHEELS.format(
                 left_port=config.PORT_LEFT_WHEEL,
@@ -151,24 +143,16 @@ def drive(
         })
         return result
 
-    if direction not in _WHEEL_DIRECTIONS:
-        raise ValueError(
-            f"Unknown direction {direction!r}. "
-            f"Use: {list(_WHEEL_DIRECTIONS)}"
-        )
-
-    ls, rs = _WHEEL_DIRECTIONS[direction]
     result = get_client().run_python(
         _DRIVE_WHEELS.format(
             left_port=config.PORT_LEFT_WHEEL,
             right_port=config.PORT_RIGHT_WHEEL,
-            left_speed=ls * speed,
-            right_speed=rs * speed,
+            left_speed=left_speed,
+            right_speed=right_speed,
             duration=duration_s,
         ),
         timeout=int(duration_s + 10),
     )
-    result["direction"] = direction
     viz.log_motor_positions({
         "left_wheel":  result.get("left"),
         "right_wheel": result.get("right"),
