@@ -1,6 +1,7 @@
 mcp[cli]>=1.0
 paramiko>=3.4
 google-genai>=1.0
+ollama>=0.3
 Pillow>=10.4
 # Optional visualization — install with: pip install rerun-sdk numpy
 # rerun-sdk>=0.16

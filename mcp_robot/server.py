@@ -37,6 +37,7 @@ from __future__ import annotations
 import atexit
 import logging
 import threading
+import time
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -115,6 +116,7 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
         result = action_fn()
     except Exception as exc:
         return _err(str(exc))
+    time.sleep(config.POST_ACTION_SETTLE)  # let robot settle before capturing after-frame
     after, after_paths = _capture_pair("after")
     description = vision.describe_change(
         action_desc, expected, before, after, before_paths, after_paths
@@ -277,11 +279,12 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
     """
     try:
         result = cam_mod.capture_still()
+        path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
             TextContent(
                 type="text",
-                text=f"Pi Camera — {result['width']}×{result['height']} JPEG ({result['bytes']} bytes)",
+                text=f"Pi Camera — {result['width']}×{result['height']} JPEG ({result['bytes']} bytes){path_info}",
             ),
         ]
     except Exception as exc:
@@ -296,9 +299,10 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
     try:
         result = cam_mod.capture_droidcam_still()
+        path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
-            TextContent(type="text", text="DroidCam — external/third-person view"),
+            TextContent(type="text", text=f"DroidCam — external/third-person view{path_info}"),
         ]
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
@@ -326,6 +330,9 @@ def capture_front_video_clip(
         ]
         for frame_b64 in result["frames"]:
             content.append(_image_content(frame_b64))
+        vqa = vision.describe_clip("pi_camera", result["frames"], result.get("paths"))
+        if vqa:
+            content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
@@ -353,6 +360,9 @@ def capture_external_video_clip(
         ]
         for frame_b64 in result["frames"]:
             content.append(_image_content(frame_b64))
+        vqa = vision.describe_clip("droidcam", result["frames"], result.get("paths"))
+        if vqa:
+            content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]

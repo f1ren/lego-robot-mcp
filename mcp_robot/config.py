@@ -36,6 +36,7 @@ DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
 CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
 CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
+POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
 DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
@@ -48,12 +49,19 @@ LOG_FILE = os.getenv("LOG_FILE", "/tmp/lego-robot-mcp.log")
 # Set SNAPSHOT_DIR="" to disable saving.
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/tmp/lego-robot-snapshots")
 
+# ── Vision backend ────────────────────────────────────────────────────────────
+# VISION_BACKEND: "gemini" | "ollama" | "auto"
+#   auto = try Gemini first, fall back to Ollama on failure/quota exhaustion
+VISION_BACKEND = os.getenv("VISION_BACKEND", "auto")
+
 # ── Gemini vision (Robotics-ER) ──────────────────────────────────────────────
-# Used by motor-action tools to describe before/after frame pairs server-side
-# instead of shipping images back to the MCP client.
-GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL         = os.getenv("GEMINI_MODEL",         "gemini-robotics-er-1.6-preview")
+GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL          = os.getenv("GEMINI_MODEL",          "gemini-robotics-er-1.6-preview")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
+
+# ── Ollama local vision ───────────────────────────────────────────────────────
+OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging

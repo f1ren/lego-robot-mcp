@@ -239,13 +239,13 @@ def capture_still() -> dict:
     opening a second picamera2 session. Falls back to a fresh SSH capture.
 
     Returns:
-        {"frame": "<base64>", "width": int, "height": int, "bytes": int}
+        {"frame": "<base64>", "width": int, "height": int, "bytes": int, "path": str | None}
     """
     cached = _pi_cache.latest()
     if cached is not None:
-        _save_snapshot(cached["frame"], "still")
+        path = _save_snapshot(cached["frame"], "still")
         viz.log_still(cached)
-        return cached
+        return {**cached, "path": path}
 
     script = _CAPTURE_STILL.format(
         w=config.CAMERA_WIDTH,
@@ -253,9 +253,9 @@ def capture_still() -> dict:
         warmup=config.CAMERA_WARMUP,
     )
     result = get_client().run_python(script, timeout=15)
-    _save_snapshot(result["frame"], "still")
+    path = _save_snapshot(result["frame"], "still")
     viz.log_still(result)
-    return result
+    return {**result, "path": path}
 
 
 def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
@@ -277,8 +277,8 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             "width": clip_frames[0]["width"],
             "height": clip_frames[0]["height"],
         }
-        for i, frame_b64 in enumerate(result["frames"]):
-            _save_snapshot(frame_b64, "clip", index=i)
+        paths = [_save_snapshot(f, "clip", index=i) for i, f in enumerate(result["frames"])]
+        result["paths"] = paths
         viz.log_clip(result)
         return result
 
@@ -293,8 +293,8 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     )
     timeout = int(duration_s + 10)
     result = get_client().run_python(script, timeout=timeout)
-    for i, frame_b64 in enumerate(result["frames"]):
-        _save_snapshot(frame_b64, "clip", index=i)
+    paths = [_save_snapshot(f, "clip", index=i) for i, f in enumerate(result["frames"])]
+    result["paths"] = paths
     viz.log_clip(result)
     return result
 
@@ -409,8 +409,8 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             "frames": [f["frame"] for f in clip_frames],
             "count": len(clip_frames),
         }
-        for i, frame_b64 in enumerate(result["frames"]):
-            _save_snapshot(frame_b64, "droidcam_clip", index=i)
+        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(result["frames"])]
+        result["paths"] = paths
         return result
 
     import cv2
@@ -421,7 +421,8 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     try:
         n_frames = max(1, round(duration_s * fps))
         interval = 1.0 / fps
-        frames = []
+        frames: list[str] = []
+        paths: list[str | None] = []
         for i in range(n_frames):
             t0 = time.time()
             ok, frame = cap.read()
@@ -430,11 +431,11 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             b64 = base64.b64encode(buf.tobytes()).decode()
             frames.append(b64)
-            _save_snapshot(b64, "droidcam_clip", index=i)
+            paths.append(_save_snapshot(b64, "droidcam_clip", index=i))
             slack = interval - (time.time() - t0)
             if slack > 0 and i < n_frames - 1:
                 time.sleep(slack)
-        return {"frames": frames, "count": len(frames)}
+        return {"frames": frames, "count": len(frames), "paths": paths}
     finally:
         cap.release()
 
@@ -448,12 +449,12 @@ def capture_droidcam_still() -> dict:
     short-lived cv2.VideoCapture to grab a single frame.
 
     Returns:
-        {"frame": "<base64>", "ts": float, "bytes": int}
+        {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None}
     """
     cached = _droidcam_cache.latest()
     if cached is not None:
-        _save_snapshot(cached["frame"], "droidcam")
-        return cached
+        path = _save_snapshot(cached["frame"], "droidcam")
+        return {**cached, "path": path}
 
     import cv2
 
@@ -466,8 +467,7 @@ def capture_droidcam_still() -> dict:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         b64 = base64.b64encode(buf.tobytes()).decode()
-        result = {"frame": b64, "ts": time.time(), "bytes": len(buf)}
-        _save_snapshot(b64, "droidcam")
-        return result
+        path = _save_snapshot(b64, "droidcam")
+        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path}
     finally:
         cap.release()
