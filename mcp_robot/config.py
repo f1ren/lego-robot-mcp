@@ -61,7 +61,7 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging
