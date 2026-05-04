@@ -340,8 +340,6 @@ def _ollama_describe_video(
     prompt_text = _VIDEO_PROMPT.format(
         action=action, expected=expected, n_frames=len(labeled_frames)
     )
-    for label, _ in labeled_frames:
-        prompt_text += f"\n[{label}]"
 
     images = [base64.b64decode(b64) for _, b64 in labeled_frames]
 
