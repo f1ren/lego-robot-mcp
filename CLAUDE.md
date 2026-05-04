@@ -10,6 +10,7 @@ Don't trust the MCP as is. It is a work in progress and should keep on changing.
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
 4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 5. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
+6. When trying new actions or evaluting the API, start with slower and shorter motions.
 
 ## Experience Memory Workflow
 
