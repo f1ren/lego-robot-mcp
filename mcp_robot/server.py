@@ -219,6 +219,7 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
     video.sort(key=lambda x: x[0])
     labeled = [(label, b64) for _, label, b64 in video]
 
+    frame_paths: list[str | None] = [None] * len(video)
     if video and config.SNAPSHOT_DIR:
         ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
         folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
@@ -228,13 +229,14 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
                 path = os.path.join(folder, f"{i:03d}_{label}.jpg")
                 with open(path, "wb") as fh:
                     fh.write(base64.b64decode(b64))
+                frame_paths[i] = path
             log.info("Action video (%d frames) saved to: %s", len(video), folder)
         except Exception as exc:
             log.warning("Failed to save action video: %s", exc)
 
     out = _ok(result)
     if labeled:
-        description = vision.describe_action_video(action_desc, expected, labeled)
+        description = vision.describe_action_video(action_desc, expected, labeled, frame_paths)
     else:
         # No streaming, DroidCam unreachable — fall back to before/after stills
         before, before_paths = _capture_pair("before")

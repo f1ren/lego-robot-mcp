@@ -148,6 +148,8 @@ def _ollama_describe(
     expected: str,
     before: Sequence[tuple[str, str]],
     after: Sequence[tuple[str, str]],
+    before_paths: Sequence[str | None] | None = None,
+    after_paths: Sequence[str | None] | None = None,
 ) -> str:
     import ollama
 
@@ -162,8 +164,19 @@ def _ollama_describe(
     # Ollama images= accepts raw bytes; we pass all frames in order (before then after)
     images = [base64.b64decode(b64) for _, b64 in list(before) + list(after)]
 
-    log.info("Ollama query model=%s host=%s action=%r frames=%d",
-             config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images))
+    all_labels = [lbl for lbl, _ in list(before) + list(after)]
+    all_paths  = list(before_paths or [None] * len(before)) + list(after_paths or [None] * len(after))
+    image_log  = "\n".join(
+        f"  [{'before' if i < len(before) else 'after'}] {lbl} — {path or '(no path)'}"
+        for i, (lbl, path) in enumerate(zip(all_labels, all_paths))
+    )
+    log.info(
+        "Ollama query model=%s host=%s action=%r frames=%d"
+        "\n--- PROMPT ---\n%s\n--- END PROMPT ---"
+        "\n--- IMAGES ---\n%s\n--- END IMAGES ---",
+        config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images),
+        prompt_text, image_log,
+    )
 
     client = ollama.Client(host=config.OLLAMA_HOST)
     resp = client.chat(
@@ -171,7 +184,7 @@ def _ollama_describe(
         messages=[{"role": "user", "content": prompt_text, "images": images}],
     )
     text = resp["message"]["content"].strip()
-    log.info("Ollama response: %s", text)
+    log.info("Ollama response:\n%s", text)
     return text
 
 
@@ -254,7 +267,7 @@ def describe_change(
 
     if backend == "ollama":
         try:
-            return _ollama_describe(action, expected, before, after)
+            return _ollama_describe(action, expected, before, after, before_paths, after_paths)
         except Exception as exc:
             log.warning("Ollama describe_change failed: %s", exc)
             return f"(vision analysis failed: {exc})"
@@ -269,7 +282,7 @@ def describe_change(
             gemini_exc = exc
 
     try:
-        return _ollama_describe(action, expected, before, after)
+        return _ollama_describe(action, expected, before, after, before_paths, after_paths)
     except Exception as exc:
         log.warning("Ollama fallback also failed: %s", exc)
         primary = str(gemini_exc) if gemini_exc else str(exc)
@@ -320,6 +333,7 @@ def _ollama_describe_video(
     action: str,
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
+    frame_paths: Sequence[str | None] | None = None,
 ) -> str:
     import ollama
 
@@ -331,8 +345,18 @@ def _ollama_describe_video(
 
     images = [base64.b64decode(b64) for _, b64 in labeled_frames]
 
-    log.info("Ollama video query model=%s host=%s action=%r frames=%d",
-             config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images))
+    paths = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
+    image_log = "\n".join(
+        f"  [{i:03d}] {lbl} — {path or '(no path)'}"
+        for i, ((lbl, _), path) in enumerate(zip(labeled_frames, paths))
+    )
+    log.info(
+        "Ollama video query model=%s host=%s action=%r frames=%d"
+        "\n--- PROMPT ---\n%s\n--- END PROMPT ---"
+        "\n--- IMAGES ---\n%s\n--- END IMAGES ---",
+        config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images),
+        prompt_text, image_log,
+    )
 
     client = ollama.Client(host=config.OLLAMA_HOST)
     resp = client.chat(
@@ -340,7 +364,7 @@ def _ollama_describe_video(
         messages=[{"role": "user", "content": prompt_text, "images": images}],
     )
     text = resp["message"]["content"].strip()
-    log.info("Ollama video response: %s", text)
+    log.info("Ollama video response:\n%s", text)
     return text
 
 
@@ -348,6 +372,7 @@ def describe_action_video(
     action: str,
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
+    frame_paths: Sequence[str | None] | None = None,
 ) -> str:
     """
     Ask the vision backend to assess whether *expected* was achieved, given a
@@ -373,7 +398,7 @@ def describe_action_video(
 
     if backend == "ollama":
         try:
-            return _ollama_describe_video(action, expected, labeled_frames)
+            return _ollama_describe_video(action, expected, labeled_frames, frame_paths)
         except Exception as exc:
             log.warning("Ollama describe_action_video failed: %s", exc)
             return f"(vision analysis failed: {exc})"
@@ -386,7 +411,7 @@ def describe_action_video(
             log.warning("Gemini video failed, trying Ollama: %s", exc)
 
     try:
-        return _ollama_describe_video(action, expected, labeled_frames)
+        return _ollama_describe_video(action, expected, labeled_frames, frame_paths)
     except Exception as exc:
         log.warning("Ollama video fallback failed: %s", exc)
         return f"(vision analysis failed: {exc})"
