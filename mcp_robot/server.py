@@ -49,6 +49,27 @@ from mcp_robot import config, viz, vision
 log = logging.getLogger(__name__)
 _stop = threading.Event()
 
+# ── initialization tracker ────────────────────────────────────────────────────
+
+_INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
+_init_status: dict[str, str] = {c: "pending" for c in _INIT_COMPONENTS}
+_init_lock = threading.Lock()
+
+
+def _log_init_progress(component: str, status: str) -> None:
+    with _init_lock:
+        _init_status[component] = status
+        done    = [c for c in _INIT_COMPONENTS if _init_status[c] == "done"]
+        failed  = [c for c in _INIT_COMPONENTS if _init_status[c] == "failed"]
+        pending = [c for c in _INIT_COMPONENTS if _init_status[c] == "pending"]
+        total   = len(_INIT_COMPONENTS)
+        finished = len(done) + len(failed)
+        pct = int(finished / total * 100)
+        log.info(
+            "Initialization %d%% (%d/%d) — done: %s, in-progress: %s, failed: %s",
+            pct, finished, total, done, pending, failed,
+        )
+
 mcp = FastMCP(
     "lego-robot",
     instructions=(
@@ -404,11 +425,21 @@ def get_robot_state() -> list[ImageContent | TextContent]:
 # ── background streaming ──────────────────────────────────────────────────────
 
 def _run_pi_camera() -> None:
+    reported = [False]
+
+    def _on_frame(frame: str, ts: float) -> None:
+        if not reported[0]:
+            reported[0] = True
+            _log_init_progress("picamera", "done")
+        viz.log_frame(frame, ts)
+
     backoff = 1.0
     while not _stop.is_set():
         try:
-            cam_mod.stream_live(fps=5.0, stop_event=_stop)
+            cam_mod.stream_live(fps=5.0, stop_event=_stop, on_frame=_on_frame)
         except Exception as exc:
+            if not reported[0]:
+                _log_init_progress("picamera", "failed")
             log.warning("Pi Camera stream ended: %s", exc)
         if not _stop.is_set():
             log.info("Pi Camera reconnecting in %.0fs...", backoff)
@@ -419,11 +450,21 @@ def _run_pi_camera() -> None:
 
 
 def _run_droidcam() -> None:
+    reported = [False]
+
+    def _on_frame(frame: str, ts: float) -> None:
+        if not reported[0]:
+            reported[0] = True
+            _log_init_progress("droidcam", "done")
+        viz.log_droidcam_frame(frame, ts)
+
     backoff = 1.0
     while not _stop.is_set():
         try:
-            cam_mod.stream_droidcam(stop_event=_stop)
+            cam_mod.stream_droidcam(stop_event=_stop, on_frame=_on_frame)
         except Exception as exc:
+            if not reported[0]:
+                _log_init_progress("droidcam", "failed")
             log.warning("DroidCam stream ended: %s", exc)
         if not _stop.is_set():
             log.info("DroidCam reconnecting in %.0fs...", backoff)
@@ -434,12 +475,14 @@ def _run_droidcam() -> None:
 
 
 def _start_background_streams() -> None:
-    log.info("Initializing motors...")
+    log.info("Initialization 0%% (0/%d) — done: [], in-progress: %s, failed: []",
+             len(_INIT_COMPONENTS), _INIT_COMPONENTS)
     try:
         robot_mod.get_all_positions()
-        log.info("Motors ready.")
+        _log_init_progress("motors", "done")
     except Exception as exc:
         log.warning("Motor init failed (%s) — continuing without motor data.", exc)
+        _log_init_progress("motors", "failed")
 
     for target, name in [
         (_run_pi_camera,  "pi-camera"),
