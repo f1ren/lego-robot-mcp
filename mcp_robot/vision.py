@@ -32,12 +32,12 @@ _PROMPT = (
 )
 
 _VIDEO_PROMPT = (
-    "You are analysing {n_frames} sequential frames captured during a 4-motor "
-    "Lego robot action (left wheel, right wheel, arm, gripper).\n"
+    "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
+    "gripper).\n"
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n\n"
-    "The frames below are in chronological order and show the complete motion. "
-    "Camera labels: pi_camera = robot eye, droidcam = third-person view.\n\n"
+    "Below are sequential frames from two cameras captured during the action.\n"
+    "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
     "Reply in EXACTLY this format on two lines:\n"
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
     "Changes: <1-2 short sentences on what actually happened during the motion>"
@@ -337,23 +337,29 @@ def _ollama_describe_video(
 ) -> str:
     import ollama
 
-    prompt_text = _VIDEO_PROMPT.format(
-        action=action, expected=expected, n_frames=len(labeled_frames)
-    )
-
-    images = [base64.b64decode(b64) for _, b64 in labeled_frames]
-
     paths = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
-    image_log = "\n".join(
-        f"  [{i:03d}] {lbl} — {path or '(no path)'}"
-        for i, ((lbl, _), path) in enumerate(zip(labeled_frames, paths))
-    )
+
+    # Group by camera, preserving chronological order within each camera
+    cameras: dict[str, list[tuple[str, str | None]]] = {}
+    for (label, b64), path in zip(labeled_frames, paths):
+        cameras.setdefault(label, []).append((b64, path))
+
+    prompt_text = _VIDEO_PROMPT.format(action=action, expected=expected)
+    images: list[bytes] = []
+    image_log_lines: list[str] = []
+    for camera, frames in cameras.items():
+        prompt_text += f"\n\n=== {camera} ({len(frames)} frames) ==="
+        for i, (b64, path) in enumerate(frames):
+            images.append(base64.b64decode(b64))
+            image_log_lines.append(f"  [{camera}][{i:03d}] {path or '(no path)'}")
+
     log.info(
-        "Ollama video query model=%s host=%s action=%r frames=%d"
+        "Ollama video query model=%s host=%s action=%r cameras=%s total_frames=%d"
         "\n--- PROMPT ---\n%s\n--- END PROMPT ---"
         "\n--- IMAGES ---\n%s\n--- END IMAGES ---",
-        config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images),
-        prompt_text, image_log,
+        config.OLLAMA_MODEL, config.OLLAMA_HOST, action,
+        list(cameras.keys()), len(images),
+        prompt_text, "\n".join(image_log_lines),
     )
 
     client = ollama.Client(host=config.OLLAMA_HOST)

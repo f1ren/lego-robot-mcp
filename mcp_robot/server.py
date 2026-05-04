@@ -225,8 +225,11 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
         folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
         try:
             os.makedirs(folder, exist_ok=True)
+            cam_counters: dict[str, int] = {}
             for i, (_, label, b64) in enumerate(video):
-                path = os.path.join(folder, f"{i:03d}_{label}.jpg")
+                idx = cam_counters.get(label, 0)
+                cam_counters[label] = idx + 1
+                path = os.path.join(folder, f"{label}_{idx:03d}.jpg")
                 with open(path, "wb") as fh:
                     fh.write(base64.b64decode(b64))
                 frame_paths[i] = path
