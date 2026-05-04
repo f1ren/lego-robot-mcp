@@ -42,32 +42,26 @@ print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
 """
 
 _DRIVE_WHEELS = """
-import json, threading
-from buildhat import Motor
+import json
+from buildhat import Motor, MotorPair
 
+pair = MotorPair({left_port!r}, {right_port!r})
+pair.run_for_seconds({duration}, {left_speed}, {right_speed})
+del pair
 left  = Motor({left_port!r})
 right = Motor({right_port!r})
-results = {{}}
-
-def move(motor, speed, seconds, key):
-    motor.run_for_seconds(seconds, speed=speed)
-    results[key] = motor.get_position()
-
-t1 = threading.Thread(target=move, args=(left,  {left_speed},  {duration}, 'left'))
-t2 = threading.Thread(target=move, args=(right, {right_speed}, {duration}, 'right'))
-t1.start(); t2.start()
-t1.join();  t2.join()
-print(json.dumps(results))
+print(json.dumps({{"left": left.get_position(), "right": right.get_position()}}))
 """
 
 _STOP_WHEELS = """
 import json
-from buildhat import Motor
+from buildhat import Motor, MotorPair
 
+pair = MotorPair({left_port!r}, {right_port!r})
+pair.stop()
+del pair
 left  = Motor({left_port!r})
 right = Motor({right_port!r})
-left.stop()
-right.stop()
 print(json.dumps({{"ok": True, "left": left.get_position(), "right": right.get_position()}}))
 """
 
