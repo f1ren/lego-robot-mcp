@@ -35,7 +35,9 @@ Run with:
 from __future__ import annotations
 
 import atexit
+import base64
 import logging
+import os
 import threading
 import time
 
@@ -77,8 +79,8 @@ mcp = FastMCP(
         "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
         "Always call get_robot_state before planning a sequence of actions. "
         "Motor-action tools (move_motor, drive, move_arm, control_gripper, "
-        "put) automatically capture before/after images and return a "
-        "Gemini-generated `change_description` summarising what changed — "
+        "put) automatically record a video of the motion and return a "
+        "vision-model `change_description` summarising what happened — "
         "you do NOT need to call capture_image afterwards to verify them. "
         "Use get_front_camera_image / get_external_camera_image / "
         "capture_front_video_clip / capture_external_video_clip / get_robot_state "
@@ -123,26 +125,123 @@ def _capture_pair(tag: str = "frame") -> tuple[list[tuple[str, str]], list[str |
     return frames, paths
 
 
+_ACTION_VIDEO_FPS = 3.0  # frames per second collected during action execution
+
+
+def _capture_droidcam_background(
+    frames: list,
+    stop_event: threading.Event,
+    fps: float = _ACTION_VIDEO_FPS,
+) -> None:
+    """Background thread: poll DroidCam and append (ts, b64) pairs to frames."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(config.DROIDCAM_URL)
+        if not cap.isOpened():
+            log.debug("Background DroidCam capture: could not open stream")
+            return
+        interval = 1.0 / fps
+        try:
+            while not stop_event.is_set():
+                t0 = time.time()
+                ok, frame = cap.read()
+                if ok:
+                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    b64 = base64.b64encode(buf.tobytes()).decode()
+                    frames.append((time.time(), b64))
+                slack = interval - (time.time() - t0)
+                if slack > 0:
+                    time.sleep(slack)
+        finally:
+            cap.release()
+    except Exception as exc:
+        log.debug("Background DroidCam capture failed: %s", exc)
+
+
 def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
     """
-    Capture before-frames, run *action_fn*, capture after-frames, and return
-    the action result merged with a Gemini-generated `change_description`
-    that includes a verdict on whether *expected* was achieved.
+    Record a video of the action, then ask the vision model whether the
+    expected outcome was achieved.
 
-    On action error, returns _err(...) and skips the after-capture / Gemini call.
-    On vision failure, the action result is still returned (description omitted).
+    Strategy:
+    - Pi camera: slice frames from the streaming cache (populated by stream_live).
+    - DroidCam: if streaming cache is active use it; otherwise spin up a
+      background cv2 capture thread for the duration of the action.
+    - Fallback: if neither camera yields frames, capture before/after stills.
+
+    On action error, returns _err(...) and skips vision.
+    On vision failure, the action result is returned without change_description.
     """
-    before, before_paths = _capture_pair("before")
+    t_start = time.time()
+
+    # Start background DroidCam capture only when its cache is empty (no existing stream)
+    droid_bg_frames: list[tuple[float, str]] = []
+    stop_event = threading.Event()
+    bg_thread: threading.Thread | None = None
+    if cam_mod._droidcam_cache.latest() is None:
+        bg_thread = threading.Thread(
+            target=_capture_droidcam_background,
+            args=(droid_bg_frames, stop_event),
+            daemon=True,
+        )
+        bg_thread.start()
+
     try:
         result = action_fn()
     except Exception as exc:
+        stop_event.set()
+        if bg_thread:
+            bg_thread.join(timeout=2)
         return _err(str(exc))
-    time.sleep(config.POST_ACTION_SETTLE)  # let robot settle before capturing after-frame
-    after, after_paths = _capture_pair("after")
-    description = vision.describe_change(
-        action_desc, expected, before, after, before_paths, after_paths
-    )
+
+    time.sleep(config.POST_ACTION_SETTLE)
+    stop_event.set()
+    if bg_thread:
+        bg_thread.join(timeout=2)
+
+    # ── collect video frames in chronological order ───────────────────────────
+    video: list[tuple[float, str, str]] = []  # (ts, camera_label, b64)
+
+    pi_clip = cam_mod._pi_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
+    if pi_clip:
+        for f in pi_clip:
+            video.append((f["ts"], "pi_camera", f["frame"]))
+
+    if droid_bg_frames:
+        for ts, b64 in droid_bg_frames:
+            video.append((ts, "droidcam", b64))
+    else:
+        droid_clip = cam_mod._droidcam_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
+        if droid_clip:
+            for f in droid_clip:
+                video.append((f["ts"], "droidcam", f["frame"]))
+
+    video.sort(key=lambda x: x[0])
+    labeled = [(label, b64) for _, label, b64 in video]
+
+    if video and config.SNAPSHOT_DIR:
+        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
+        folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            for i, (_, label, b64) in enumerate(video):
+                path = os.path.join(folder, f"{i:03d}_{label}.jpg")
+                with open(path, "wb") as fh:
+                    fh.write(base64.b64decode(b64))
+            log.info("Action video (%d frames) saved to: %s", len(video), folder)
+        except Exception as exc:
+            log.warning("Failed to save action video: %s", exc)
+
     out = _ok(result)
+    if labeled:
+        description = vision.describe_action_video(action_desc, expected, labeled)
+    else:
+        # No streaming, DroidCam unreachable — fall back to before/after stills
+        before, before_paths = _capture_pair("before")
+        after, after_paths = _capture_pair("after")
+        description = vision.describe_change(
+            action_desc, expected, before, after, before_paths, after_paths
+        )
     if description:
         out["change_description"] = description
     return out

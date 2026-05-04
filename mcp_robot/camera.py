@@ -84,6 +84,19 @@ class _PiFrameCache:
             indices = [round(i * (len(frames) - 1) / (target_n - 1)) for i in range(target_n)]
             return [frames[i] for i in indices]
 
+    def clip_since(self, t_start: float, max_fps: float = 3.0) -> list[dict] | None:
+        """Return frames captured since t_start, subsampled to max_fps. None if empty."""
+        with self._lock:
+            frames = [f for f in self._buf if f["ts"] >= t_start]
+            if not frames:
+                return None
+            duration = frames[-1]["ts"] - frames[0]["ts"]
+            target_n = max(2, round(duration * max_fps)) if duration > 0 else len(frames)
+            if len(frames) <= target_n:
+                return list(frames)
+            indices = [round(i * (len(frames) - 1) / (target_n - 1)) for i in range(target_n)]
+            return [frames[i] for i in indices]
+
 
 _pi_cache = _PiFrameCache()
 
@@ -122,6 +135,19 @@ class _DroidCamFrameCache:
             cutoff = time.time() - duration_s
             frames = [f for f in self._buf if f["ts"] >= cutoff] or list(self._buf)
             target_n = max(1, round(duration_s * fps))
+            if len(frames) <= target_n:
+                return list(frames)
+            indices = [round(i * (len(frames) - 1) / (target_n - 1)) for i in range(target_n)]
+            return [frames[i] for i in indices]
+
+    def clip_since(self, t_start: float, max_fps: float = 3.0) -> list[dict] | None:
+        """Return frames captured since t_start, subsampled to max_fps. None if empty."""
+        with self._lock:
+            frames = [f for f in self._buf if f["ts"] >= t_start]
+            if not frames:
+                return None
+            duration = frames[-1]["ts"] - frames[0]["ts"]
+            target_n = max(2, round(duration * max_fps)) if duration > 0 else len(frames)
             if len(frames) <= target_n:
                 return list(frames)
             indices = [round(i * (len(frames) - 1) / (target_n - 1)) for i in range(target_n)]

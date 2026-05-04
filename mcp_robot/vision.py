@@ -31,6 +31,18 @@ _PROMPT = (
     "nothing visible changed, say so explicitly>"
 )
 
+_VIDEO_PROMPT = (
+    "You are analysing {n_frames} sequential frames captured during a 4-motor "
+    "Lego robot action (left wheel, right wheel, arm, gripper).\n"
+    "ACTION COMMANDED: {action}\n"
+    "EXPECTED OUTCOME: {expected}\n\n"
+    "The frames below are in chronological order and show the complete motion. "
+    "Camera labels: pi_camera = robot eye, droidcam = third-person view.\n\n"
+    "Reply in EXACTLY this format on two lines:\n"
+    "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
+    "Changes: <1-2 short sentences on what actually happened during the motion>"
+)
+
 
 # ── Gemini backend ─────────────────────────────────────────────────────────────
 
@@ -262,6 +274,122 @@ def describe_change(
         log.warning("Ollama fallback also failed: %s", exc)
         primary = str(gemini_exc) if gemini_exc else str(exc)
         return f"(vision analysis failed: {primary}; ollama: {exc})"
+
+
+def _gemini_describe_video(
+    action: str,
+    expected: str,
+    labeled_frames: Sequence[tuple[str, str]],
+) -> str:
+    from google.genai import types
+
+    client = _get_gemini_client()
+    if client is None:
+        raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
+
+    prompt = _VIDEO_PROMPT.format(action=action, expected=expected, n_frames=len(labeled_frames))
+    parts: list = [types.Part.from_text(text=prompt)]
+    for label, b64 in labeled_frames:
+        parts.append(types.Part.from_text(text=f"[{label}]"))
+        parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
+
+    model = _get_active_model()
+    log.info("Gemini video query model=%s action=%r frames=%d", model, action, len(labeled_frames))
+    try:
+        resp = client.models.generate_content(
+            model=model,
+            contents=[types.Content(role="user", parts=parts)],
+        )
+        text = (resp.text or "").strip()
+        log.info("Gemini video response: %s", text)
+        return text
+    except Exception as exc:
+        if _is_quota_error(exc) and model != config.GEMINI_FALLBACK_MODEL:
+            fallback = _switch_gemini_to_fallback()
+            resp = client.models.generate_content(
+                model=fallback,
+                contents=[types.Content(role="user", parts=parts)],
+            )
+            text = (resp.text or "").strip()
+            log.info("Gemini video fallback response: %s", text)
+            return text
+        raise
+
+
+def _ollama_describe_video(
+    action: str,
+    expected: str,
+    labeled_frames: Sequence[tuple[str, str]],
+) -> str:
+    import ollama
+
+    prompt_text = _VIDEO_PROMPT.format(
+        action=action, expected=expected, n_frames=len(labeled_frames)
+    )
+    for label, _ in labeled_frames:
+        prompt_text += f"\n[{label}]"
+
+    images = [base64.b64decode(b64) for _, b64 in labeled_frames]
+
+    log.info("Ollama video query model=%s host=%s action=%r frames=%d",
+             config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images))
+
+    client = ollama.Client(host=config.OLLAMA_HOST)
+    resp = client.chat(
+        model=config.OLLAMA_MODEL,
+        messages=[{"role": "user", "content": prompt_text, "images": images}],
+    )
+    text = resp["message"]["content"].strip()
+    log.info("Ollama video response: %s", text)
+    return text
+
+
+def describe_action_video(
+    action: str,
+    expected: str,
+    labeled_frames: Sequence[tuple[str, str]],
+) -> str:
+    """
+    Ask the vision backend to assess whether *expected* was achieved, given a
+    chronological sequence of (camera_label, base64_jpeg) frames captured
+    during the action.
+
+    Returns a two-line "Verdict: …\\nChanges: …" string, or "" if no frames.
+    """
+    if not labeled_frames:
+        return ""
+
+    log.info("Video vision query: backend=%s action=%r frames=%d",
+             config.VISION_BACKEND, action, len(labeled_frames))
+
+    backend = config.VISION_BACKEND
+
+    if backend == "gemini":
+        try:
+            return _gemini_describe_video(action, expected, labeled_frames)
+        except Exception as exc:
+            log.warning("Gemini describe_action_video failed: %s", exc)
+            return f"(vision analysis failed: {exc})"
+
+    if backend == "ollama":
+        try:
+            return _ollama_describe_video(action, expected, labeled_frames)
+        except Exception as exc:
+            log.warning("Ollama describe_action_video failed: %s", exc)
+            return f"(vision analysis failed: {exc})"
+
+    # "auto": Gemini first, Ollama fallback
+    if config.GEMINI_API_KEY:
+        try:
+            return _gemini_describe_video(action, expected, labeled_frames)
+        except Exception as exc:
+            log.warning("Gemini video failed, trying Ollama: %s", exc)
+
+    try:
+        return _ollama_describe_video(action, expected, labeled_frames)
+    except Exception as exc:
+        log.warning("Ollama video fallback failed: %s", exc)
+        return f"(vision analysis failed: {exc})"
 
 
 def describe_clip(
