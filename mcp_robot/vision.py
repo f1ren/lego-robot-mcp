@@ -37,7 +37,7 @@ _VIDEO_PROMPT = (
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n\n"
     "Below are sequential frames from two cameras captured during the action.\n"
-    "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
+    # "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
     "Reply in EXACTLY this format on two lines:\n"
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
     "Changes: <1-2 short sentences on what actually happened during the motion>"

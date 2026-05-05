@@ -202,10 +202,10 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
     # ── collect video frames in chronological order ───────────────────────────
     video: list[tuple[float, str, str]] = []  # (ts, camera_label, b64)
 
-    pi_clip = cam_mod._pi_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
-    if pi_clip:
-        for f in pi_clip:
-            video.append((f["ts"], "pi_camera", f["frame"]))
+    # pi_clip = cam_mod._pi_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
+    # if pi_clip:
+    #     for f in pi_clip:
+    #         video.append((f["ts"], "pi_camera", f["frame"]))
 
     if droid_bg_frames:
         for ts, b64 in droid_bg_frames:
