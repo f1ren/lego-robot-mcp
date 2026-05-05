@@ -16,12 +16,19 @@ Don't trust the MCP as is. It is a work in progress and should keep on changing.
 
 This project uses `mcp-memory-service` (`experience-memory` MCP server) to accumulate robot learnings across sessions. The DB lives at `memory/experiences.db`.
 
-**Before any task or code change:** call `memory_search` with keywords relevant to what you're about to do (e.g., `"gripper close"`, `"arm calibration"`, `"drive forward"`). If past experiences exist, let them inform your plan.
+**Before any task or code change:** call `memory_search` with keywords relevant to what you're about to do (e.g., `"gripper close"`, `"arm calibration"`, `"drive forward"`). For each returned experience that references specific code (a function, constant, or behaviour):
+1. Run `git log --oneline -1` to get the current commit hash.
+2. Compare the experience's `commit_hash` field against the current hash. If they differ, grep/read the referenced file+function to verify the logic described still exists as written.
+3. If the logic has changed or been removed, **delete the experience** with `memory_delete` before relying on it. If it still applies but the code evolved, **update** it with the new commit hash.
 
-**When changing code:** if a past experience informed the change, add an inline comment on the changed line(s) with the experience ID and the lesson — e.g. `# exp:abc123 — gripper stalls above 50% speed when arm is extended`. Include the same ID in the commit message. When storing the resulting `code_fix` experience, include the file path and function name in the content so future searches surface it.
+**When storing an experience:** always include in `content`:
+- `commit_hash`: output of `git rev-parse --short HEAD` at time of storing
+- `validation_version`: a short description of what code state was validated (e.g. `"server.py::_ACTION_VIDEO_FPS=5.0"`)
+
+**When changing code:** if a past experience informed the change, add an inline comment on the changed line(s) with the experience ID and the lesson — e.g. `# exp:abc123 — gripper stalls above 50% speed when arm is extended`. Include the same ID in the commit message. After committing, search for experiences that reference the changed file/function and either update them with the new commit hash or delete them if the lesson no longer applies.
 
 **After every task, failure, code fix, or user feedback:** call `memory_store` with:
-- `content`: one clear paragraph — what you tried, what happened, what you learned
+- `content`: one clear paragraph — what you tried, what happened, what you learned — plus `commit_hash` and `validation_version` fields
 - `tags`: robot body (e.g. `3-wheel-gripper`) + component (`gripper`, `arm`, `drive`, `camera`, `vision`, `buildhat`) + event (`failure`, `success`, `code_fix`, `feedback`)
 - `memory_type`: `"learning"` (lesson from outcome), `"error"` (failure + root cause), `"observation"` (factual discovery), or `"decision"` (deliberate design choice)
 
