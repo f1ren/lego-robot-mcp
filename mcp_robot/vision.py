@@ -22,7 +22,8 @@ _PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper).\n"
     "ACTION COMMANDED: {action}\n"
-    "EXPECTED OUTCOME: {expected}\n\n"
+    "EXPECTED OUTCOME: {expected}\n"
+    "{context_section}"
     "Below are BEFORE images followed by AFTER images, each labelled by the "
     "camera they came from (pi_camera = robot's front-mounted camera, "
     "droidcam = third-person view).\n\n"
@@ -36,7 +37,8 @@ _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper).\n"
     "ACTION COMMANDED: {action}\n"
-    "EXPECTED OUTCOME: {expected}\n\n"
+    "EXPECTED OUTCOME: {expected}\n"
+    "{context_section}"
     "Below are sequential frames from two cameras captured during the action.\n"
     # "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
     "Reply in EXACTLY this format on two lines:\n"
@@ -100,6 +102,7 @@ def _gemini_describe(
     expected: str,
     before: Sequence[tuple[str, str]],
     after: Sequence[tuple[str, str]],
+    context: str = "",
 ) -> str:
     from google.genai import types
 
@@ -107,7 +110,8 @@ def _gemini_describe(
     if client is None:
         raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
 
-    prompt = _PROMPT.format(action=action, expected=expected)
+    context_section = f"CONTEXT: {context}\n" if context else ""
+    prompt = _PROMPT.format(action=action, expected=expected, context_section=context_section)
     parts: list = [types.Part.from_text(text=prompt)]
     parts.append(types.Part.from_text(text="=== BEFORE ==="))
     for label, b64 in before:
@@ -151,10 +155,12 @@ def _ollama_describe(
     after: Sequence[tuple[str, str]],
     before_paths: Sequence[str | None] | None = None,
     after_paths: Sequence[str | None] | None = None,
+    context: str = "",
 ) -> str:
     import ollama
 
-    prompt_text = _PROMPT.format(action=action, expected=expected)
+    context_section = f"CONTEXT: {context}\n" if context else ""
+    prompt_text = _PROMPT.format(action=action, expected=expected, context_section=context_section)
     prompt_text += "\n\n=== BEFORE ===\n"
     for label, _ in before:
         prompt_text += f"[{label}]\n"
@@ -243,6 +249,7 @@ def describe_change(
     after: Sequence[tuple[str, str]],
     before_paths: Sequence[str | None] | None = None,
     after_paths: Sequence[str | None] | None = None,
+    context: str = "",
 ) -> str:
     """
     Ask the configured vision backend whether the expected outcome was achieved.
@@ -265,14 +272,14 @@ def describe_change(
 
     if backend == "gemini":
         try:
-            return _gemini_describe(action, expected, before, after)
+            return _gemini_describe(action, expected, before, after, context=context)
         except Exception as exc:
             log.warning("Gemini describe_change failed: %s", exc)
             return f"(vision analysis failed: {exc})"
 
     if backend == "ollama":
         try:
-            return _ollama_describe(action, expected, before, after, before_paths, after_paths)
+            return _ollama_describe(action, expected, before, after, before_paths, after_paths, context=context)
         except Exception as exc:
             log.warning("Ollama describe_change failed: %s", exc)
             return f"(vision analysis failed: {exc})"
@@ -281,13 +288,13 @@ def describe_change(
     gemini_exc = None
     if config.GEMINI_API_KEY:
         try:
-            return _gemini_describe(action, expected, before, after)
+            return _gemini_describe(action, expected, before, after, context=context)
         except Exception as exc:
             log.warning("Gemini failed, trying Ollama fallback: %s", exc)
             gemini_exc = exc
 
     try:
-        return _ollama_describe(action, expected, before, after, before_paths, after_paths)
+        return _ollama_describe(action, expected, before, after, before_paths, after_paths, context=context)
     except Exception as exc:
         log.warning("Ollama fallback also failed: %s", exc)
         primary = str(gemini_exc) if gemini_exc else str(exc)
@@ -298,6 +305,7 @@ def _gemini_describe_video(
     action: str,
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
+    context: str = "",
 ) -> str:
     from google.genai import types
 
@@ -305,7 +313,8 @@ def _gemini_describe_video(
     if client is None:
         raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
 
-    prompt = _VIDEO_PROMPT.format(action=action, expected=expected, n_frames=len(labeled_frames))
+    context_section = f"CONTEXT: {context}\n" if context else ""
+    prompt = _VIDEO_PROMPT.format(action=action, expected=expected, context_section=context_section, n_frames=len(labeled_frames))
     parts: list = [types.Part.from_text(text=prompt)]
     for label, b64 in labeled_frames:
         parts.append(types.Part.from_text(text=f"[{label}]"))
@@ -339,6 +348,7 @@ def _ollama_describe_video(
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
+    context: str = "",
 ) -> str:
     import ollama
 
@@ -349,7 +359,8 @@ def _ollama_describe_video(
     for (label, b64), path in zip(labeled_frames, paths):
         cameras.setdefault(label, []).append((b64, path))
 
-    prompt_text = _VIDEO_PROMPT.format(action=action, expected=expected)
+    context_section = f"CONTEXT: {context}\n" if context else ""
+    prompt_text = _VIDEO_PROMPT.format(action=action, expected=expected, context_section=context_section)
     images: list[bytes] = []
     image_log_lines: list[str] = []
     for camera, frames in cameras.items():
@@ -395,6 +406,7 @@ def describe_action_video(
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
+    context: str = "",
 ) -> str:
     """
     Ask the vision backend to assess whether *expected* was achieved, given a
@@ -414,14 +426,14 @@ def describe_action_video(
 
     if backend == "gemini":
         try:
-            return _gemini_describe_video(action, expected, labeled_frames)
+            return _gemini_describe_video(action, expected, labeled_frames, context=context)
         except Exception as exc:
             log.warning("Gemini describe_action_video failed: %s", exc)
             return f"(vision analysis failed: {exc})"
 
     if backend == "ollama":
         try:
-            return _ollama_describe_video(action, expected, labeled_frames, frame_paths)
+            return _ollama_describe_video(action, expected, labeled_frames, frame_paths, context=context)
         except Exception as exc:
             log.warning("Ollama describe_action_video failed: %s", exc)
             return f"(vision analysis failed: {exc})"
@@ -429,12 +441,12 @@ def describe_action_video(
     # "auto": Gemini first, Ollama fallback
     if config.GEMINI_API_KEY:
         try:
-            return _gemini_describe_video(action, expected, labeled_frames)
+            return _gemini_describe_video(action, expected, labeled_frames, context=context)
         except Exception as exc:
             log.warning("Gemini video failed, trying Ollama: %s", exc)
 
     try:
-        return _ollama_describe_video(action, expected, labeled_frames, frame_paths)
+        return _ollama_describe_video(action, expected, labeled_frames, frame_paths, context=context)
     except Exception as exc:
         log.warning("Ollama video fallback failed: %s", exc)
         return f"(vision analysis failed: {exc})"

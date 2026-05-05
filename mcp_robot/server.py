@@ -158,7 +158,7 @@ def _capture_droidcam_background(
         log.debug("Background DroidCam capture failed: %s", exc)
 
 
-def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
+def _with_change_analysis(action_desc: str, expected: str, action_fn, context: str = "") -> dict:
     """
     Record a video of the action, then ask the vision model whether the
     expected outcome was achieved.
@@ -239,13 +239,13 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn) -> dict:
 
     out = _ok(result)
     if labeled:
-        description = vision.describe_action_video(action_desc, expected, labeled, frame_paths)
+        description = vision.describe_action_video(action_desc, expected, labeled, frame_paths, context=context)
     else:
         # No streaming, DroidCam unreachable — fall back to before/after stills
         before, before_paths = _capture_pair("before")
         after, after_paths = _capture_pair("after")
         description = vision.describe_change(
-            action_desc, expected, before, after, before_paths, after_paths
+            action_desc, expected, before, after, before_paths, after_paths, context=context
         )
     if description:
         out["change_description"] = description
@@ -264,7 +264,7 @@ def get_motor_positions() -> dict:
 
 
 @mcp.tool()
-def move_motor(port: str, degrees: int, speed: int = 50, context: str = "") -> dict:
+def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", context: str = "") -> dict:
     """
     Move a single motor port by the given number of degrees.
 
@@ -272,12 +272,14 @@ def move_motor(port: str, degrees: int, speed: int = 50, context: str = "") -> d
     Gemini-generated `change_description` alongside motor positions.
 
     Args:
-        port:    BuildHat port — "A", "B", "C", or "D".
-        degrees: Positive = one direction, negative = opposite.
-                 Use small values (e.g. 30–90) to start with.
-        speed:   Motor speed, 1–100.
-        context: High-level goal this action is part of (e.g. "picking up the ball").
-                 Included in the vision-model prompt so it can judge success in context.
+        port:     BuildHat port — "A", "B", "C", or "D".
+        degrees:  Positive = one direction, negative = opposite.
+                  Use small values (e.g. 30–90) to start with.
+        speed:    Motor speed, 1–100.
+        expected: Short, precise description of what should physically happen
+                  (e.g. "arm rotates down 45°"). Defaults to a technical summary.
+        context:  Why this action is being taken and hints for evaluation
+                  (e.g. "lowering arm to ball height; last attempt overshot by 20°").
     """
     if port.upper() not in ("A", "B", "C", "D"):
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
@@ -290,11 +292,12 @@ def move_motor(port: str, degrees: int, speed: int = 50, context: str = "") -> d
         config.PORT_ARM:         "arm moves (positive=down, negative=up)",
         config.PORT_GRIPPER:     "gripper jaws move (positive=close, negative=open)",
     }.get(p, "the connected motor rotates")
-    expected = context if context else f"motor on port {p} rotates by ~{degrees}°; visually: {role}"
+    expected_str = expected if expected else f"motor on port {p} rotates by ~{degrees}°; visually: {role}"
     return _with_change_analysis(
         f"move_motor port={p} degrees={degrees} speed={speed}",
-        expected,
+        expected_str,
         lambda: robot_mod.move_motor(p, degrees, speed),
+        context=context,
     )
 
 
@@ -305,6 +308,7 @@ def drive(
     left_speed: int,
     right_speed: int,
     duration_s: float = 1.0,
+    expected: str = "",
     context: str = "",
 ) -> dict:
     """
@@ -317,71 +321,79 @@ def drive(
                      determined empirically — it has not been calibrated yet.
         right_speed: Speed for the right wheel, -100 to 100.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
-        context:     High-level goal this action is part of (e.g. "moving toward the ball
-                     to pick it up"). Included in the vision-model prompt so it can judge
-                     success in context.
+        expected:    Short, precise description of the expected motion
+                     (e.g. "robot moves forward ~20 cm").
+        context:     Why this action is being taken and hints for evaluation
+                     (e.g. "approaching the ball; previous attempt turned right instead").
     """
     desc = (
         "stop wheels"
         if duration_s == 0
         else f"drive left={left_speed} right={right_speed} for {duration_s}s"
     )
-    expected = context if context else "observe droidcam for resulting robot motion"
+    expected_str = expected if expected else "robot moves or pivots; observe droidcam for direction and distance"
     return _with_change_analysis(
-        desc, expected, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
+        desc, expected_str, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
+        context=context,
     )
 
 
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def move_arm(degrees: int, speed: int = 30, context: str = "") -> dict:
+def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "") -> dict:
     """
     Move the robot arm by the given number of degrees. Captures before/after
     images and returns a Gemini-generated `change_description`.
 
     Args:
-        degrees: How far to move. Positive = down, negative = up.
-                 Start with values like ±30–90 and adjust based on results.
-        speed:   Motor speed, 1–100.
-        context: High-level goal this action is part of (e.g. "lowering arm to ball height
-                 before grasping"). Included in the vision-model prompt.
+        degrees:  How far to move. Positive = down, negative = up.
+                  Start with values like ±30–90 and adjust based on results.
+        speed:    Motor speed, 1–100.
+        expected: Short, precise description of the expected outcome
+                  (e.g. "arm moves down ~45°, tip reaches ball height").
+        context:  Why this action is being taken and hints for evaluation
+                  (e.g. "positioning arm to grasp ball; last attempt stopped too high").
     """
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
-    expected = context if context else (
+    expected_str = expected if expected else (
         f"arm moves {direction} by ~{abs(degrees)}° — visible in droidcam (arm angle "
         f"changes); pi_camera view may tilt as the arm pose shifts; wheels and gripper unchanged"
     )
     return _with_change_analysis(
         f"move arm by {degrees}° (positive=down, negative=up) at speed {speed}",
-        expected,
+        expected_str,
         lambda: robot_mod.move_arm(degrees, speed),
+        context=context,
     )
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def control_gripper(action: str, speed: int = 25, context: str = "") -> dict:
+def control_gripper(action: str, speed: int = 25, expected: str = "", context: str = "") -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
     Gemini-generated `change_description`.
 
     Args:
-        action:  "open" or "close".
-        speed:   Motor speed, 1–100.
-        context: High-level goal this action is part of (e.g. "grasping the paper ball").
-                 Included in the vision-model prompt.
+        action:   "open" or "close".
+        speed:    Motor speed, 1–100.
+        expected: Short, precise description of the expected outcome
+                  (e.g. "gripper closes around the ball").
+        context:  Why this action is being taken and hints for evaluation
+                  (e.g. "grasping paper ball; previous close attempt slipped off").
     """
-    expected = context if context else (
+    expected_str = expected if expected else (
         "gripper jaws open (visibly wider gap between fingers); robot pose and arm unchanged"
         if action == "open"
         else "gripper jaws close (gap narrows; if an object is between them, it is now grasped); robot pose and arm unchanged"
     )
     return _with_change_analysis(
         f"{action} gripper at speed {speed}",
-        expected,
+        expected_str,
         lambda: robot_mod.control_gripper(action, speed),
+        context=context,
     )
 
 
