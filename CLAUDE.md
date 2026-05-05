@@ -2,6 +2,8 @@
 
 It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HAT and OV5647 Pi Camera.
 
+Consider state before acting: do you need to open the gripper, or is it already open? Do you need to lower the arm, or is it already on the ground?
+
 Don't trust the MCP as is. It is a work in progress and should keep on changing. Be skeptic. Did the robot move as expected? Does the motors, mechanincs, and code align as expected? Prefer the vision model results over the sensors input, as it is more robust and data rich.
 
 ## Tool use and Code synthesis
