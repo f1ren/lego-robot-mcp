@@ -372,6 +372,19 @@ def _ollama_describe_video(
     return text
 
 
+def _subsample_frames(
+    labeled_frames: Sequence[tuple[str, str]],
+    frame_paths: Sequence[str | None] | None = None,
+) -> tuple[list[tuple[str, str]], list[str | None]]:
+    """Return first, 4th-before-last, and last frames (deduplicated, ordered)."""
+    n = len(labeled_frames)
+    paths = list(frame_paths) if frame_paths else [None] * n
+    if n <= 3:
+        return list(labeled_frames), paths
+    indices = sorted({0, max(1, n - 4), n - 1})
+    return [labeled_frames[i] for i in indices], [paths[i] for i in indices]
+
+
 def describe_action_video(
     action: str,
     expected: str,
@@ -388,7 +401,8 @@ def describe_action_video(
     if not labeled_frames:
         return ""
 
-    log.info("Video vision query: backend=%s action=%r frames=%d",
+    labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths)
+    log.info("Video vision query: backend=%s action=%r frames=%d (subsampled)",
              config.VISION_BACKEND, action, len(labeled_frames))
 
     backend = config.VISION_BACKEND
