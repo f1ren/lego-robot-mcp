@@ -125,7 +125,7 @@ def _capture_pair(tag: str = "frame") -> tuple[list[tuple[str, str]], list[str |
     return frames, paths
 
 
-_ACTION_VIDEO_FPS = 3.0  # frames per second collected during action execution
+_ACTION_VIDEO_FPS = 5.0  # frames per second collected during action execution
 
 
 def _capture_droidcam_background(
