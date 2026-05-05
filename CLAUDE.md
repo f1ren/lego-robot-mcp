@@ -3,8 +3,9 @@
 It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HAT and OV5647 Pi Camera.
 
 # Act
-1. Before acting, consider current state from image by asking questions such as: do you need to open the gripper, or is it already open? Do you need to lower the arm, or is it already on the ground? If you close the gripper to grab an object, is the object well located to be grabbed once the jaws close?
-2. Don't trust the MCP as is. It is a work in progress and should keep on changing. Be skeptic. Did the robot move as expected? Does the motors, mechanincs, and code align as expected? Prefer the vision model results over the sensors input, as it is more robust and data rich.
+1. **Before planning any action sequence, explicitly describe what each camera shows:** gripper open or closed, arm high or low, object location relative to the robot, any clearance issues. Do not skip this step — motor position numbers alone are not sufficient. Only after this visual assessment should you list your planned moves.
+2. Before acting, consider current state from image by asking questions such as: do you need to open the gripper, or is it already open? Do you need to lower the arm, or is it already on the ground? If you close the gripper to grab an object, is the object well located to be grabbed once the jaws close?
+3. Don't trust the MCP as is. It is a work in progress and should keep on changing. Be skeptic. Did the robot move as expected? Does the motors, mechanincs, and code align as expected? Prefer the vision model results over the sensors input, as it is more robust and data rich.
 
 ## Tool use and Code synthesis
 1. The agentic coder should prefer using the MCP server to control the robot, as it should be more reliable and consistent.
