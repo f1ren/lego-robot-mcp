@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import logging
 import threading
+import time
 from typing import Sequence
 
 from mcp_robot import config
@@ -179,12 +180,14 @@ def _ollama_describe(
     )
 
     client = ollama.Client(host=config.OLLAMA_HOST)
+    t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,
         messages=[{"role": "user", "content": prompt_text, "images": images}],
     )
+    elapsed = time.monotonic() - t0
     text = resp["message"]["content"].strip()
-    log.info("Ollama response:\n%s", text)
+    log.info("Ollama response (%.1fs):\n%s", elapsed, text)
     return text
 
 
@@ -220,12 +223,14 @@ def _ollama_video_describe(
              config.OLLAMA_MODEL, config.OLLAMA_HOST, camera, len(frames))
 
     client = ollama.Client(host=config.OLLAMA_HOST)
+    t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,
         messages=[{"role": "user", "content": prompt, "images": images}],
     )
+    elapsed = time.monotonic() - t0
     text = resp["message"]["content"].strip()
-    log.info("Ollama clip VQA response: %s", text)
+    log.info("Ollama clip VQA response (%.1fs): %s", elapsed, text)
     return text
 
 
