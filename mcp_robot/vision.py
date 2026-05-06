@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Sequence
 
+import numpy as np
+
 from mcp_robot import config
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,53 @@ _VIDEO_PROMPT = (
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
     "Changes: <1-2 short sentences on what actually happened during the motion>"
 )
+
+
+# ── motion detection ──────────────────────────────────────────────────────────
+
+_MOTION_THRESHOLD = 4.0  # mean absolute pixel diff (0-255 scale) to count as motion
+
+
+def _has_motion(frames_b64: Sequence[str]) -> bool:
+    """
+    Return True if consecutive frames show any pixel-level change above threshold.
+
+    Groups frames by camera when labels are embedded in the sequence.
+    Falls back to True (assume motion) on any decoding error so VQA is not skipped
+    when the check itself fails.
+    """
+    try:
+        import cv2
+
+        if len(frames_b64) < 2:
+            return True
+
+        decoded = []
+        for b64 in frames_b64:
+            data = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                decoded.append(img)
+
+        if len(decoded) < 2:
+            return True
+
+        for a, b in zip(decoded[:-1], decoded[1:]):
+            if a.shape == b.shape:
+                diff = float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))))
+                if diff > _MOTION_THRESHOLD:
+                    return True
+        return False
+    except Exception:
+        return True
+
+
+def _has_motion_labeled(labeled: Sequence[tuple[str, str]]) -> bool:
+    """Check per-camera motion from (camera_label, b64) pairs."""
+    cameras: dict[str, list[str]] = {}
+    for label, b64 in labeled:
+        cameras.setdefault(label, []).append(b64)
+    return any(_has_motion(frames) for frames in cameras.values())
 
 
 # ── Gemini backend ─────────────────────────────────────────────────────────────
@@ -418,6 +467,10 @@ def describe_action_video(
     if not labeled_frames:
         return ""
 
+    if not _has_motion_labeled(labeled_frames):
+        log.info("Video is static — skipping VQA for action %r", action)
+        return "Verdict: NO — no motion detected in video\nChanges: No motion was detected in the captured video frames; the robot may not have moved."
+
     labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths)
     log.info("Video vision query: backend=%s action=%r frames=%d (subsampled)",
              config.VISION_BACKEND, action, len(labeled_frames))
@@ -465,6 +518,10 @@ def describe_clip(
     """
     if not frames:
         return ""
+
+    if not _has_motion(frames):
+        log.info("Clip is static — skipping VQA for camera %r", camera)
+        return "No motion detected in the captured video clip."
 
     resolved = list(paths) if paths else []
     try:
