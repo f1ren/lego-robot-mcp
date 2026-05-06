@@ -48,6 +48,16 @@ class TestHasMotion(unittest.TestCase):
 
         self.assertTrue(self._has_motion([_encode(img_a), _encode(img_b)]))
 
+    def test_gripper_motion_returns_true(self):
+        """Frames 008-009 from a gripper-open action — small but real motion."""
+        gripper_dir = pathlib.Path(__file__).parent / "fixtures" / "gripper_motion"
+        frames = [_load_b64(gripper_dir / "droidcam_008.jpg"),
+                  _load_b64(gripper_dir / "droidcam_009.jpg")]
+        self.assertTrue(
+            self._has_motion(frames),
+            "Expected motion to be detected when gripper opened",
+        )
+
     def test_identical_frames_return_false(self):
         frames = sorted(FIXTURES.glob("droidcam_*.jpg"))
         b64 = _load_b64(frames[0])

@@ -51,7 +51,7 @@ _VIDEO_PROMPT = (
 
 # ── motion detection ──────────────────────────────────────────────────────────
 
-_MOTION_THRESHOLD = 4.0  # mean absolute pixel diff (0-255 scale) to count as motion
+_MOTION_THRESHOLD = 3.0  # mean absolute pixel diff (0-255 scale) to count as motion
 
 
 def _has_motion(frames_b64: Sequence[str]) -> bool:
