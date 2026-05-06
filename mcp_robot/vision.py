@@ -428,12 +428,14 @@ def _ollama_describe_video(
     )
 
     client = ollama.Client(host=config.OLLAMA_HOST)
+    t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,
         messages=[{"role": "user", "content": prompt_text, "images": images}],
     )
+    elapsed = time.monotonic() - t0
     text = resp["message"]["content"].strip()
-    log.info("Ollama video response:\n%s", text)
+    log.info("Ollama video response (%.1fs):\n%s", elapsed, text)
     return text
 
 
