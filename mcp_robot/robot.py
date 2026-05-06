@@ -116,14 +116,15 @@ def drive(
     duration_s: float = 1.0,
 ) -> dict:
     """
-    Drive the robot wheels directly.
+    Drive the robot wheels. Positive speed = forward for both wheels.
 
     Args:
-        left_speed:  Speed for the left wheel, -100 to 100. Positive/negative
-                     direction must be determined empirically.
-        right_speed: Speed for the right wheel, -100 to 100.
+        left_speed:  Speed for the left wheel, -100 to 100. Positive = forward.
+        right_speed: Speed for the right wheel, -100 to 100. Positive = forward.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
     """
+    # Left motor (A) is physically inverted — negate so positive = forward matches right wheel convention.
+    # Verified: MotorPair('A','B').run_for_seconds(1, -20, 20) moves forward.
     if duration_s == 0:
         result = get_client().run_python(
             _STOP_WHEELS.format(
@@ -141,7 +142,7 @@ def drive(
         _DRIVE_WHEELS.format(
             left_port=config.PORT_LEFT_WHEEL,
             right_port=config.PORT_RIGHT_WHEEL,
-            left_speed=left_speed,
+            left_speed=-left_speed,  # motor A is inverted; negate to keep positive=forward
             right_speed=right_speed,
             duration=duration_s,
         ),

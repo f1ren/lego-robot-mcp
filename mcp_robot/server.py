@@ -11,7 +11,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Wheel driving
   ─────────────
-  drive                  left_speed, right_speed, duration_s (raw — directions uncalibrated)
+  drive                  left_speed, right_speed, duration_s (positive = forward for both wheels)
 
   Arm & gripper
   ─────────────
@@ -316,10 +316,8 @@ def drive(
     Gemini-generated `change_description` alongside motor positions.
 
     Args:
-        left_speed:  Speed for the left wheel, -100 to 100. The sign convention
-                     (which value moves the robot forward vs backward) must be
-                     determined empirically — it has not been calibrated yet.
-        right_speed: Speed for the right wheel, -100 to 100.
+        left_speed:  Speed for the left wheel, -100 to 100. Positive = forward.
+        right_speed: Speed for the right wheel, -100 to 100. Positive = forward.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
         expected:    Short, precise description of the expected motion
                      (e.g. "robot moves forward ~20 cm").
