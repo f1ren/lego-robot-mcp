@@ -9,7 +9,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 
 ## Tool use and Code synthesis
 1. The agentic coder should prefer using the MCP server to control the robot, as it should be more reliable and consistent.
-2. If no appropriate function or tool is missing, the agentic coder should modify the MCP server code itself while testing. For instance, if you want the robot to grasp something, and the function does not exist, you should add the function to the MCP server code and test it.
+2. If no appropriate function or tool is missing, the agentic coder should modify the MCP server code itself while testing. For instance, if you want the robot to grasp something, and the function does not exist, you should add the function to the MCP server code and test it. Same goes for moving forward, turning and etc.
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
 4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 5. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
