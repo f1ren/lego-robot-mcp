@@ -13,7 +13,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
 4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 5. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
-6. When trying new actions or evaluting the API, consider making large moves, so that they are obvious to the Visual Temporal Reasoning model.
+6. When trying new actions or evaluting the API, consider making slow and large moves, so that they are obvious to the Visual Temporal Reasoning model.
 
 ## Experience Memory Workflow
 
