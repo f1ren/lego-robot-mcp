@@ -68,6 +68,16 @@ class TestHasMotion(unittest.TestCase):
             "Expected motion to be detected when robot drove forward",
         )
 
+    def test_arm_motion_returns_true(self):
+        """Frames 004-005 from a move-arm action — motion present between frames."""
+        arm_dir = pathlib.Path(__file__).parent / "fixtures" / "arm_motion"
+        frames = [_load_b64(arm_dir / "droidcam_004.jpg"),
+                  _load_b64(arm_dir / "droidcam_005.jpg")]
+        self.assertTrue(
+            self._has_motion(frames),
+            "Expected motion to be detected between arm-move frames",
+        )
+
     def test_identical_frames_return_false(self):
         frames = sorted(FIXTURES.glob("droidcam_*.jpg"))
         b64 = _load_b64(frames[0])
