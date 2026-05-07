@@ -58,6 +58,16 @@ class TestHasMotion(unittest.TestCase):
             "Expected motion to be detected when gripper opened",
         )
 
+    def test_drive_forward_motion_returns_true(self):
+        """Frames 005-006 from a drive-forward action — robot visibly moves toward ball."""
+        drive_dir = pathlib.Path(__file__).parent / "fixtures" / "drive_motion"
+        frames = [_load_b64(drive_dir / "droidcam_005.jpg"),
+                  _load_b64(drive_dir / "droidcam_006.jpg")]
+        self.assertTrue(
+            self._has_motion(frames),
+            "Expected motion to be detected when robot drove forward",
+        )
+
     def test_identical_frames_return_false(self):
         frames = sorted(FIXTURES.glob("droidcam_*.jpg"))
         b64 = _load_b64(frames[0])
