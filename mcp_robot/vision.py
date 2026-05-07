@@ -51,7 +51,7 @@ _VIDEO_PROMPT = (
 
 # ── motion detection ──────────────────────────────────────────────────────────
 
-_MOTION_THRESHOLD = 2.5  # mean absolute pixel diff (0-255 scale) to count as motion
+_CAPTURE_MOTION_THRESHOLD = 2.5  # mean absolute pixel diff (0-255 scale) to stop action capture
 
 
 def _has_motion(frames_b64: Sequence[str]) -> bool:
@@ -81,7 +81,7 @@ def _has_motion(frames_b64: Sequence[str]) -> bool:
         for a, b in zip(decoded[:-1], decoded[1:]):
             if a.shape == b.shape:
                 diff = float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))))
-                if diff > _MOTION_THRESHOLD:
+                if diff > _CAPTURE_MOTION_THRESHOLD:
                     return True
         return False
     except Exception:
