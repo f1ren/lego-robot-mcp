@@ -38,6 +38,7 @@ import atexit
 import base64
 import logging
 import os
+import re
 import threading
 import time
 
@@ -50,6 +51,16 @@ from mcp_robot import config, viz, vision
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
+
+# ── task folder state ─────────────────────────────────────────────────────────
+
+_current_task_folder: str | None = None
+_task_lock = threading.Lock()
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
+    return slug[:max_len].rstrip("_")
 
 # ── initialization tracker ────────────────────────────────────────────────────
 
@@ -221,8 +232,13 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
 
     frame_paths: list[str | None] = [None] * len(video)
     if video and config.SNAPSHOT_DIR:
-        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
-        folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
+        ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
+        with _task_lock:
+            task_dir = _current_task_folder
+        if task_dir:
+            folder = os.path.join(task_dir, f"{ts_str}_action_{_slugify(action_desc)}")
+        else:
+            folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts_str}")
         try:
             os.makedirs(folder, exist_ok=True)
             cam_counters: dict[str, int] = {}
@@ -544,6 +560,136 @@ def get_robot_state() -> list[ImageContent | TextContent]:
         return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+# ── task management ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def start_task(description: str) -> dict:
+    """
+    Begin a new task session. Creates a dated task folder under SNAPSHOT_DIR
+    that will hold all subsequent action-video subfolders. Call this once before
+    a sequence of related robot actions.
+
+    Args:
+        description: Short human-readable task label (e.g. "pick up red ball").
+    """
+    global _current_task_folder
+    if not config.SNAPSHOT_DIR:
+        return _err("SNAPSHOT_DIR is not configured — snapshots are disabled")
+    ts_str = time.strftime("%Y%m%d_%H%M%S")
+    folder = os.path.join(config.SNAPSHOT_DIR, f"{ts_str}_task_{_slugify(description)}")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with _task_lock:
+            _current_task_folder = folder
+        log.info("Task started: %s", folder)
+        return _ok({"task_folder": folder})
+    except Exception as exc:
+        return _err(str(exc))
+
+
+@mcp.tool()
+def compile_task_video(task_folder: str = "", output_fps: float = 5.0) -> dict:
+    """
+    Compile all action frames from a task into a single MP4, keeping only
+    frames where motion was detected (pixel diff above threshold vs. neighbour).
+
+    Args:
+        task_folder: Path to the task folder. Defaults to the current active task.
+        output_fps:  Playback frame rate of the output video (default 5.0).
+
+    Returns a dict with video_path, total_frames, motion_frames, action_count.
+    """
+    import cv2
+    import numpy as np
+    from mcp_robot.vision import _MOTION_THRESHOLD
+
+    with _task_lock:
+        folder = task_folder.strip() or _current_task_folder
+    if not folder:
+        return _err("No task folder specified and no active task — call start_task first.")
+    if not os.path.isdir(folder):
+        return _err(f"Task folder not found: {folder}")
+
+    # Collect action subdirectories in chronological order (datetime prefix sorts them)
+    try:
+        action_dirs = sorted([
+            os.path.join(folder, d)
+            for d in os.listdir(folder)
+            if os.path.isdir(os.path.join(folder, d)) and "_action_" in d
+        ])
+    except Exception as exc:
+        return _err(f"Failed to list task folder: {exc}")
+
+    if not action_dirs:
+        return _err(f"No action subdirectories found in {folder}")
+
+    # Collect all JPEG paths in chronological order
+    all_paths: list[str] = []
+    for action_dir in action_dirs:
+        try:
+            files = sorted(
+                os.path.join(action_dir, f)
+                for f in os.listdir(action_dir)
+                if f.endswith(".jpg")
+            )
+            all_paths.extend(files)
+        except Exception as exc:
+            log.warning("Skipping action dir %s: %s", action_dir, exc)
+
+    if not all_paths:
+        return _err("No JPEG frames found in any action subdirectory")
+
+    # Decode frames (skip unreadable files)
+    imgs: list[tuple[str, "np.ndarray"]] = []
+    for fp in all_paths:
+        img = cv2.imread(fp)
+        if img is not None:
+            imgs.append((fp, img))
+    if not imgs:
+        return _err("Failed to decode any frames")
+
+    # Per-frame motion flag: frame i is included if diff(i-1,i) or diff(i,i+1) exceeds threshold
+    n = len(imgs)
+    in_motion = [False] * n
+    for i in range(n - 1):
+        gray_a = cv2.cvtColor(imgs[i][1],   cv2.COLOR_BGR2GRAY).astype(np.float32)
+        gray_b = cv2.cvtColor(imgs[i+1][1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if float(np.mean(np.abs(gray_a - gray_b))) > _MOTION_THRESHOLD:
+            in_motion[i] = True
+            in_motion[i + 1] = True
+
+    motion_imgs = [imgs[i][1] for i, m in enumerate(in_motion) if m]
+
+    if not motion_imgs:
+        return _ok({
+            "message": "No motion detected across all frames — video not written",
+            "total_frames": n,
+            "motion_frames": 0,
+            "action_count": len(action_dirs),
+        })
+
+    h, w = motion_imgs[0].shape[:2]
+    ts_str = time.strftime("%Y%m%d_%H%M%S")
+    video_path = os.path.join(folder, f"task_video_{ts_str}.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(video_path, fourcc, output_fps, (w, h))
+    for img in motion_imgs:
+        writer.write(img if img.shape[:2] == (h, w) else cv2.resize(img, (w, h)))
+    writer.release()
+
+    log.info(
+        "Task video written: %s (%d/%d motion frames from %d actions)",
+        video_path, len(motion_imgs), n, len(action_dirs),
+    )
+    return _ok({
+        "video_path": video_path,
+        "total_frames": n,
+        "motion_frames": len(motion_imgs),
+        "action_count": len(action_dirs),
+        "output_fps": output_fps,
+    })
 
 
 # ── background streaming ──────────────────────────────────────────────────────
