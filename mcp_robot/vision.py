@@ -22,13 +22,17 @@ log = logging.getLogger(__name__)
 
 _PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
-    "gripper).\n"
+    "gripper). The gripper defines the robot's front.\n"
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
     "Below are BEFORE images followed by AFTER images, each labelled by the "
     "camera they came from (pi_camera = robot's front-mounted camera, "
     "droidcam = third-person view).\n\n"
+    "DIRECTIONAL LANGUAGE: When describing the robot's heading or turning direction, use "
+    "clockwise/counter-clockwise (viewed from above) or compass directions "
+    "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
+    "right' — those terms are ambiguous across camera perspectives.\n\n"
     "Reply in EXACTLY this format on two lines:\n"
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
     "Changes: <1-2 short sentences describing what actually changed; if "
@@ -37,12 +41,16 @@ _PROMPT = (
 
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
-    "gripper).\n"
+    "gripper). The gripper defines the robot's front.\n"
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
     "Below are sequential frames from two cameras captured during the action.\n"
     # "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
+    "DIRECTIONAL LANGUAGE: When describing the robot's heading or turning direction, use "
+    "clockwise/counter-clockwise (viewed from above) or compass directions "
+    "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
+    "right' — those terms are ambiguous across camera perspectives.\n\n"
     "Reply in EXACTLY this format on two lines:\n"
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
     "Changes: <1-2 short sentences on what actually happened during the motion>"
@@ -250,10 +258,13 @@ def _ollama_describe(
 
 _CLIP_PROMPT = (
     "You are analysing a video clip from a 4-motor Lego robot (left wheel, "
-    "right wheel, arm, gripper).\n"
+    "right wheel, arm, gripper). The gripper defines the robot's front.\n"
     "Camera: {camera}. The {n_frames} images below are sequential frames.\n\n"
     "Describe what you observe: robot position, any motion, visible objects, "
-    "and the overall scene state. Be concise (2-4 sentences)."
+    "and the overall scene state. Be concise (2-4 sentences).\n"
+    "DIRECTIONAL LANGUAGE: Describe turning direction as clockwise/counter-clockwise "
+    "(viewed from above) or compass directions (north/south/east/west), "
+    "not as 'left' or 'right'."
 )
 
 

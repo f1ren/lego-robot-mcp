@@ -322,7 +322,7 @@ def drive(
         expected:    Short, precise description of the expected motion
                      (e.g. "robot moves forward ~20 cm").
         context:     Why this action is being taken and hints for evaluation
-                     (e.g. "approaching the ball; previous attempt turned right instead").
+                     (e.g. "approaching the ball; previous attempt turned clockwise instead").
     """
     desc = (
         "stop wheels"
