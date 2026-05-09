@@ -318,6 +318,7 @@ def drive(
     Args:
         left_speed:  Speed for the left wheel, -100 to 100. Positive = forward.
         right_speed: Speed for the right wheel, -100 to 100. Positive = forward.
+                     To rotate/turn, use inverse values, left_speed = -right_speed.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
         expected:    Short, precise description of the expected motion
                      (e.g. "robot moves forward ~20 cm").
