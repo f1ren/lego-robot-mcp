@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 _PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper). The gripper defines the robot's front.\n"
+    "ROBOT ORIENTATION: 'forward' always means the direction the gripper is currently "
+    "pointing. After any turn the robot's heading changes — identify which way the "
+    "gripper faces in the BEFORE image before evaluating a drive action.\n"
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
@@ -42,6 +45,9 @@ _PROMPT = (
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper). The gripper defines the robot's front.\n"
+    "ROBOT ORIENTATION: 'forward' always means the direction the gripper is currently "
+    "pointing. After any turn the robot's heading changes — identify which way the "
+    "gripper faces in the first frame before evaluating a drive action.\n"
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
@@ -263,6 +269,9 @@ def _ollama_describe(
 _CLIP_PROMPT = (
     "You are analysing a video clip from a 4-motor Lego robot (left wheel, "
     "right wheel, arm, gripper). The gripper defines the robot's front.\n"
+    "ROBOT ORIENTATION: 'forward' always means the direction the gripper is currently "
+    "pointing — identify which way the gripper faces in the first frame before "
+    "describing any movement.\n"
     "Camera: {camera}. The {n_frames} images below are sequential frames.\n\n"
     "Describe what you observe: robot position, any motion, visible objects, "
     "and the overall scene state. Be concise (2-4 sentences).\n"
