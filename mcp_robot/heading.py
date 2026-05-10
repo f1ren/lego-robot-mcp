@@ -1,0 +1,311 @@
+"""
+Detect the robot's forward heading in external (DroidCam) frames and overlay
+a green arrow showing the direction the gripper is pointing.
+
+The robot has a yellow LEGO body whose chassis presents many long parallel
+edges (brick rows, top and bottom panel edges). Those edges all run along the
+body's "forward" axis. We:
+  1. Color-mask the yellow body to localize it and define a search ROI.
+  2. Run a Hough line transform on Canny edges inside that ROI; the dominant
+     line orientation gives the forward axis (modulo 180°).
+  3. Disambiguate front-vs-back by detecting the dark gripper-and-arm
+     assembly nearby — it sits at the FRONT of the body.
+
+This is intentionally a static image-processing approach (no motion required):
+the lab lighting and floor are kept clean enough that color masking is more
+reliable than optical-flow tracking, which suffers from motor jitter.
+
+Public API:
+    detect_heading(bgr) -> Heading | None
+    annotate_jpeg_b64(b64) -> str            # returns annotated b64 (or original)
+    annotate_jpeg_bytes(buf) -> bytes        # returns annotated bytes (or original)
+"""
+from __future__ import annotations
+
+import base64
+import logging
+import math
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+log = logging.getLogger(__name__)
+
+# HSV ranges tuned against tests/fixtures/*/droidcam_*.jpg.
+# OpenCV HSV: H in [0,179], S in [0,255], V in [0,255].
+_YELLOW_HSV_LO = np.array([15, 130, 100], dtype=np.uint8)
+_YELLOW_HSV_HI = np.array([35, 255, 255], dtype=np.uint8)
+
+# Gripper jaws + arm: low value (dark), low-to-medium saturation.
+_BLACK_V_MAX = 70
+_BLACK_S_MAX = 90
+
+# Minimum yellow blob area (pixels) to accept as the robot body. Tuned for
+# 1280x720 droidcam frames; scaled down with image area below.
+_MIN_BODY_AREA_FRAC = 0.0025   # 0.25% of frame (handles partially occluded body)
+_MIN_GRIPPER_AREA_FRAC = 0.0005  # 0.05% of frame
+
+# Search for gripper within this fractional expansion of the body bbox.
+_ROI_EXPAND = 0.6
+
+_ARROW_COLOR_BGR = (0, 220, 0)   # bright green
+_ARROW_THICKNESS_FRAC = 0.006    # of image diagonal
+
+
+@dataclass
+class Heading:
+    body_center: tuple[int, int]      # (x, y) pixel coords of body centroid
+    arrow_anchor: tuple[int, int]     # (x, y) pixel coords — front-edge midpoint of body
+    forward: tuple[float, float]      # unit vector (dx, dy) along body's long axis, gripper-side
+    body_area: int                    # pixel count of yellow mask used
+    gripper_area: int                 # pixel count of black mask used
+
+
+def _largest_contour(mask: np.ndarray) -> np.ndarray | None:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    return max(contours, key=cv2.contourArea)
+
+
+def _centroid(contour: np.ndarray) -> tuple[int, int] | None:
+    m = cv2.moments(contour)
+    if m["m00"] == 0:
+        return None
+    return int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])
+
+
+def detect_heading(bgr: np.ndarray) -> Heading | None:
+    """
+    Locate the robot in `bgr` and return its forward heading, or None if
+    detection is unreliable (robot out of frame, gripper occluded, etc).
+    """
+    if bgr is None or bgr.size == 0:
+        return None
+    h, w = bgr.shape[:2]
+    frame_area = h * w
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    yellow_mask = cv2.morphologyEx(
+        yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+
+    # ── 1. Find the yellow body ───────────────────────────────────────────
+    # Locate the body by clustering nearby yellow contours into one shape so we
+    # have a reliable centroid + ROI. Body shape itself is NOT used to compute
+    # the heading axis (Hough lines do that below) — using minAreaRect on the
+    # combined hull is unreliable when oblique camera angles make the visible
+    # yellow region L-shaped.
+    contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    seed = max(contours, key=cv2.contourArea)
+    seed_center = _centroid(seed)
+    if seed_center is None:
+        return None
+    sx, sy, sw, sh = cv2.boundingRect(seed)
+    cluster_radius = float(np.hypot(sw, sh)) * 1.6
+    pts: list[np.ndarray] = [seed.reshape(-1, 2)]
+    for c in contours:
+        if c is seed or cv2.contourArea(c) < 30:
+            continue
+        cc = _centroid(c)
+        if cc is None:
+            continue
+        if np.hypot(cc[0] - seed_center[0], cc[1] - seed_center[1]) <= cluster_radius:
+            pts.append(c.reshape(-1, 2))
+    body_pts = np.vstack(pts)
+    body = cv2.convexHull(body_pts)
+    if cv2.contourArea(body) < _MIN_BODY_AREA_FRAC * frame_area:
+        return None
+    body_center = _centroid(body)
+    if body_center is None:
+        return None
+    bx, by, bw, bh = cv2.boundingRect(body)
+
+    # ── 2. Find black gripper inside an expanded ROI around the body ──────
+    pad_x = int(bw * _ROI_EXPAND)
+    pad_y = int(bh * _ROI_EXPAND)
+    x0 = max(0, bx - pad_x)
+    y0 = max(0, by - pad_y)
+    x1 = min(w, bx + bw + pad_x)
+    y1 = min(h, by + bh + pad_y)
+
+    roi_hsv = hsv[y0:y1, x0:x1]
+    black_mask = cv2.inRange(
+        roi_hsv,
+        np.array([0,   0,   0], dtype=np.uint8),
+        np.array([179, _BLACK_S_MAX, _BLACK_V_MAX], dtype=np.uint8),
+    )
+    # Suppress black pixels that overlap the yellow body itself — the gripper
+    # is what extends *beyond* the body.
+    body_mask_full = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(body_mask_full, [body], -1, 255, thickness=cv2.FILLED)
+    body_mask_dilated = cv2.dilate(body_mask_full, np.ones((9, 9), np.uint8))
+    body_in_roi = body_mask_dilated[y0:y1, x0:x1]
+    black_mask = cv2.bitwise_and(black_mask, cv2.bitwise_not(body_in_roi))
+    black_mask = cv2.morphologyEx(
+        black_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+    # Close with a larger kernel so multi-finger gripper jaws fuse into one blob.
+    black_mask = cv2.morphologyEx(
+        black_mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8)
+    )
+
+    # Pick the black blob that best represents the gripper. We score by
+    # area × distance-from-body-center so that big protrusions beat both
+    # small far-away noise (e.g. cables) and big-but-central regions
+    # (e.g. wheel hubs and the shadow under the body).
+    contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
+    bcx, bcy = body_center
+    best_score = -1.0
+    arrow_anchor: tuple[int, int] | None = None
+    gripper_area = 0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        gc = _centroid(c)
+        if gc is None:
+            continue
+        cx_full, cy_full = gc[0] + x0, gc[1] + y0
+        dist = float(np.hypot(cx_full - bcx, cy_full - bcy))
+        score = area * dist
+        if score > best_score:
+            best_score = score
+            arrow_anchor = (cx_full, cy_full)
+            gripper_area = int(area)
+    if arrow_anchor is None:
+        return None
+
+    # ── 3. Forward direction from dominant Hough lines on the body ────────
+    # The LEGO chassis presents many long parallel edges (brick rows, top
+    # and bottom panel edges) all aligned with the body's long axis. We
+    # detect Canny edges within a yellow-restricted ROI, run a probabilistic
+    # Hough transform, and take the length-weighted modal angle as the long
+    # axis. This is robust to oblique camera angles where the projected body
+    # shape becomes L-shaped (for which minAreaRect would return a diagonal).
+    pad_long_x = int(bw * 0.4)
+    pad_long_y = int(bh * 0.4)
+    lx0 = max(0, bx - pad_long_x)
+    ly0 = max(0, by - pad_long_y)
+    lx1 = min(w, bx + bw + pad_long_x)
+    ly1 = min(h, by + bh + pad_long_y)
+    gray_roi = cv2.cvtColor(bgr[ly0:ly1, lx0:lx1], cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray_roi, 60, 150)
+    yellow_dilated = cv2.dilate(yellow_mask[ly0:ly1, lx0:lx1], np.ones((9, 9), np.uint8))
+    edges = cv2.bitwise_and(edges, yellow_dilated)
+    lines = cv2.HoughLinesP(
+        edges, rho=1, theta=np.pi / 180,
+        threshold=30, minLineLength=25, maxLineGap=8,
+    )
+    if lines is None or len(lines) < 3:
+        return None
+    # Length-weighted histogram of line angles in [0, 180).
+    angle_hist = np.zeros(180, dtype=np.float32)
+    for L in lines:
+        x1, y1, x2, y2 = L[0]
+        ldx, ldy = x2 - x1, y2 - y1
+        length = math.hypot(ldx, ldy)
+        ang = int(math.degrees(math.atan2(ldy, ldx))) % 180
+        angle_hist[ang] += length
+    # Light circular smoothing so 89° and 91° aren't treated as different bins.
+    smoothed = np.convolve(
+        np.concatenate([angle_hist[-3:], angle_hist, angle_hist[:3]]),
+        np.ones(7) / 7, mode="same",
+    )[3:-3]
+    dom_deg = int(np.argmax(smoothed))
+    a = math.radians(dom_deg)
+    axis = (math.cos(a), math.sin(a))
+    # Disambiguate front-vs-back using the gripper centroid: forward points
+    # toward the gripper, away from the body interior.
+    dx = arrow_anchor[0] - body_center[0]
+    dy = arrow_anchor[1] - body_center[1]
+    if axis[0] * dx + axis[1] * dy < 0:
+        axis = (-axis[0], -axis[1])
+
+    # Anchor the arrow at the body's front edge: project every body-hull
+    # vertex onto the forward axis, take the max-projection point. This
+    # keeps the arrow rooted on the body itself (not at the gripper centroid,
+    # which can sit off-axis when jaws or arm hang asymmetrically).
+    hull_xy = body.reshape(-1, 2).astype(np.float32)
+    projections = (hull_xy[:, 0] - body_center[0]) * axis[0] + (hull_xy[:, 1] - body_center[1]) * axis[1]
+    front_idx = int(np.argmax(projections))
+    front_x, front_y = int(hull_xy[front_idx, 0]), int(hull_xy[front_idx, 1])
+
+    return Heading(
+        body_center=body_center,
+        arrow_anchor=(front_x, front_y),
+        forward=axis,
+        body_area=int(cv2.contourArea(body)),
+        gripper_area=gripper_area,
+    )
+
+
+def _draw_arrow(bgr: np.ndarray, heading: Heading) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    diag = float(np.hypot(w, h))
+    thickness = max(2, int(diag * _ARROW_THICKNESS_FRAC))
+    # Arrow length: long enough to reach across most of the frame so the user
+    # can tell whether "forward" actually meets the target.
+    length = int(diag * 0.45)
+
+    start = heading.arrow_anchor
+    end_x = int(start[0] + heading.forward[0] * length)
+    end_y = int(start[1] + heading.forward[1] * length)
+    # Clamp end-point inside the frame so the arrowhead is always visible.
+    end_x = max(0, min(w - 1, end_x))
+    end_y = max(0, min(h - 1, end_y))
+
+    out = bgr.copy()
+    cv2.arrowedLine(
+        out, start, (end_x, end_y),
+        _ARROW_COLOR_BGR, thickness=thickness, tipLength=0.08,
+    )
+    return out
+
+
+def annotate_bgr(bgr: np.ndarray) -> np.ndarray:
+    """Return `bgr` with a green forward arrow if heading is detected, else as-is."""
+    try:
+        heading = detect_heading(bgr)
+    except Exception as exc:
+        log.debug("Heading detection failed: %s", exc)
+        return bgr
+    if heading is None:
+        return bgr
+    return _draw_arrow(bgr, heading)
+
+
+def annotate_jpeg_bytes(buf: bytes) -> bytes:
+    """Decode JPEG bytes, overlay arrow, re-encode. Returns original on any failure."""
+    try:
+        arr = np.frombuffer(buf, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return buf
+        annotated = annotate_bgr(bgr)
+        if annotated is bgr:  # no change — skip re-encoding
+            return buf
+        ok, out = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not ok:
+            return buf
+        return out.tobytes()
+    except Exception as exc:
+        log.debug("annotate_jpeg_bytes failed: %s", exc)
+        return buf
+
+
+def annotate_jpeg_b64(b64: str) -> str:
+    """Same as annotate_jpeg_bytes but base64-in / base64-out."""
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return b64
+    out = annotate_jpeg_bytes(raw)
+    if out is raw:
+        return b64
+    return base64.b64encode(out).decode()

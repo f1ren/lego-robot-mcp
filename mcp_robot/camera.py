@@ -13,6 +13,7 @@ import os
 import time
 import threading
 from mcp_robot import config, viz
+from mcp_robot import heading as _heading
 from mcp_robot.rpi_client import get_client
 
 log = logging.getLogger(__name__)
@@ -425,17 +426,20 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
 
     Reads from the cache populated by stream_droidcam(). If no stream is
     running, opens a short-lived cv2.VideoCapture to grab frames directly.
+    Each frame is overlaid with a green forward-arrow when the robot's
+    heading can be detected (see mcp_robot.heading).
 
     Returns:
         {"frames": ["<base64>", ...], "count": int}
     """
     clip_frames = _droidcam_cache.clip(duration_s, fps)
     if clip_frames is not None:
+        annotated = [_heading.annotate_jpeg_b64(f["frame"]) for f in clip_frames]
         result = {
-            "frames": [f["frame"] for f in clip_frames],
-            "count": len(clip_frames),
+            "frames": annotated,
+            "count": len(annotated),
         }
-        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(result["frames"])]
+        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(annotated)]
         result["paths"] = paths
         return result
 
@@ -455,7 +459,7 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             if not ok:
                 break
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            b64 = base64.b64encode(buf.tobytes()).decode()
+            b64 = _heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
             frames.append(b64)
             paths.append(_save_snapshot(b64, "droidcam_clip", index=i))
             slack = interval - (time.time() - t0)
@@ -472,15 +476,18 @@ def capture_droidcam_still() -> dict:
 
     DroidCam allows only one client at a time, so we read from the cache
     populated by stream_droidcam(). If no stream is running, opens a
-    short-lived cv2.VideoCapture to grab a single frame.
+    short-lived cv2.VideoCapture to grab a single frame. The returned frame
+    is overlaid with a green forward-arrow when the robot's heading can be
+    detected (see mcp_robot.heading).
 
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None}
     """
     cached = _droidcam_cache.latest()
     if cached is not None:
-        path = _save_snapshot(cached["frame"], "droidcam")
-        return {**cached, "path": path}
+        annotated = _heading.annotate_jpeg_b64(cached["frame"])
+        path = _save_snapshot(annotated, "droidcam")
+        return {**cached, "frame": annotated, "path": path}
 
     import cv2
 
@@ -492,7 +499,7 @@ def capture_droidcam_still() -> dict:
         if not ok:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64 = base64.b64encode(buf.tobytes()).decode()
+        b64 = _heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
         path = _save_snapshot(b64, "droidcam")
         return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path}
     finally:

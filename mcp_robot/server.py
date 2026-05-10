@@ -46,7 +46,7 @@ from mcp.types import ImageContent, TextContent
 
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
-from mcp_robot import config, viz, vision
+from mcp_robot import config, heading, viz, vision
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -133,7 +133,11 @@ def _capture_droidcam_background(
     stop_event: threading.Event,
     fps: float = _ACTION_VIDEO_FPS,
 ) -> None:
-    """Background thread: poll DroidCam and append (ts, b64) pairs to frames."""
+    """Background thread: poll DroidCam and append (ts, b64) pairs to frames.
+
+    Frames are overlaid with the heading arrow before being appended so the
+    saved action video and the VLM both see the forward-direction cue.
+    """
     try:
         import cv2
         cap = cv2.VideoCapture(config.DROIDCAM_URL)
@@ -147,7 +151,7 @@ def _capture_droidcam_background(
                 ok, frame = cap.read()
                 if ok:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    b64 = base64.b64encode(buf.tobytes()).decode()
+                    b64 = heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
                     frames.append((time.time(), b64))
                 slack = interval - (time.time() - t0)
                 if slack > 0:
@@ -208,13 +212,14 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
     #         video.append((f["ts"], "pi_camera", f["frame"]))
 
     if droid_bg_frames:
+        # Background-captured frames are already annotated with the heading arrow.
         for ts, b64 in droid_bg_frames:
             video.append((ts, "droidcam", b64))
     else:
         droid_clip = cam_mod._droidcam_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
         if droid_clip:
             for f in droid_clip:
-                video.append((f["ts"], "droidcam", f["frame"]))
+                video.append((f["ts"], "droidcam", heading.annotate_jpeg_b64(f["frame"])))
 
     video.sort(key=lambda x: x[0])
     labeled = [(label, b64) for _, label, b64 in video]
