@@ -420,28 +420,30 @@ def stream_droidcam(
         cap.release()
 
 
-def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
+def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: bool = True) -> dict:
     """
     Return a short DroidCam clip as a list of JPEG frames.
 
     Reads from the cache populated by stream_droidcam(). If no stream is
     running, opens a short-lived cv2.VideoCapture to grab frames directly.
-    Each frame is overlaid with a green forward-arrow when the robot's
-    heading can be detected (see mcp_robot.heading).
+
+    Args:
+        annotate: If True (default), overlay the heading arrow on each frame.
+                  Pass False when frames are destined for VLM motion analysis.
 
     Returns:
-        {"frames": ["<base64>", ...], "count": int}
+        {"frames": ["<base64>", ...], "raw_frames": ["<base64>", ...], "count": int}
+        raw_frames always contains unannotated frames for VLM use.
     """
+    def _maybe_annotate(b64: str) -> str:
+        return _heading.annotate_jpeg_b64(b64) if annotate else b64
+
     clip_frames = _droidcam_cache.clip(duration_s, fps)
     if clip_frames is not None:
-        annotated = [_heading.annotate_jpeg_b64(f["frame"]) for f in clip_frames]
-        result = {
-            "frames": annotated,
-            "count": len(annotated),
-        }
-        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(annotated)]
-        result["paths"] = paths
-        return result
+        raw = [f["frame"] for f in clip_frames]
+        display = [_maybe_annotate(f) for f in raw]
+        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(display)]
+        return {"frames": display, "raw_frames": raw, "count": len(display), "paths": paths}
 
     import cv2
 
@@ -451,7 +453,8 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     try:
         n_frames = max(1, round(duration_s * fps))
         interval = 1.0 / fps
-        frames: list[str] = []
+        raw_frames: list[str] = []
+        display_frames: list[str] = []
         paths: list[str | None] = []
         for i in range(n_frames):
             t0 = time.time()
@@ -459,18 +462,20 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
             if not ok:
                 break
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            b64 = _heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
-            frames.append(b64)
-            paths.append(_save_snapshot(b64, "droidcam_clip", index=i))
+            raw = base64.b64encode(buf.tobytes()).decode()
+            display = _maybe_annotate(raw)
+            raw_frames.append(raw)
+            display_frames.append(display)
+            paths.append(_save_snapshot(display, "droidcam_clip", index=i))
             slack = interval - (time.time() - t0)
             if slack > 0 and i < n_frames - 1:
                 time.sleep(slack)
-        return {"frames": frames, "count": len(frames), "paths": paths}
+        return {"frames": display_frames, "raw_frames": raw_frames, "count": len(display_frames), "paths": paths}
     finally:
         cap.release()
 
 
-def capture_droidcam_still() -> dict:
+def capture_droidcam_still(annotate: bool = True) -> dict:
     """
     Return the most recent DroidCam frame.
 
@@ -480,14 +485,22 @@ def capture_droidcam_still() -> dict:
     is overlaid with a green forward-arrow when the robot's heading can be
     detected (see mcp_robot.heading).
 
+    Args:
+        annotate: If True (default), overlay the heading arrow. Pass False
+                  when the frame is destined for VLM change analysis to avoid
+                  the arrow causing spurious motion detections.
+
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None}
     """
+    def _maybe_annotate(b64: str) -> str:
+        return _heading.annotate_jpeg_b64(b64) if annotate else b64
+
     cached = _droidcam_cache.latest()
     if cached is not None:
-        annotated = _heading.annotate_jpeg_b64(cached["frame"])
-        path = _save_snapshot(annotated, "droidcam")
-        return {**cached, "frame": annotated, "path": path}
+        frame = _maybe_annotate(cached["frame"])
+        path = _save_snapshot(frame, "droidcam")
+        return {**cached, "frame": frame, "path": path}
 
     import cv2
 
@@ -499,7 +512,7 @@ def capture_droidcam_still() -> dict:
         if not ok:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64 = _heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
+        b64 = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
         path = _save_snapshot(b64, "droidcam")
         return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path}
     finally:

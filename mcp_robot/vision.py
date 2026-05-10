@@ -491,18 +491,26 @@ def describe_action_video(
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
     context: str = "",
+    raw_labeled_frames: Sequence[tuple[str, str]] | None = None,
 ) -> str:
     """
     Ask the vision backend to assess whether *expected* was achieved, given a
     chronological sequence of (camera_label, base64_jpeg) frames captured
     during the action.
 
+    Args:
+        labeled_frames:     Annotated frames (heading arrow) — sent to VQA.
+        raw_labeled_frames: Unannotated frames — used only for the motion gate
+                            so the arrow does not cause spurious motion hits.
+                            Falls back to labeled_frames if not provided.
+
     Returns a two-line "Verdict: …\\nChanges: …" string, or "" if no frames.
     """
     if not labeled_frames:
         return ""
 
-    if not _has_motion_labeled(labeled_frames):
+    motion_frames = raw_labeled_frames if raw_labeled_frames is not None else labeled_frames
+    if not _has_motion_labeled(motion_frames):
         log.info("Video is static — skipping VQA for action %r", action)
         return "Verdict: NO — no motion detected in video\nChanges: No motion was detected in the captured video frames; the robot may not have moved."
 
@@ -544,17 +552,24 @@ def describe_clip(
     camera: str,
     frames: Sequence[str],
     paths: Sequence[str | None] | None = None,
+    raw_frames: Sequence[str] | None = None,
 ) -> str:
     """
     Ask the Ollama backend to describe a video clip (sequence of JPEG frames).
 
-    Logs all saved frame file paths so results can be inspected manually.
+    Args:
+        frames:     Annotated frames (heading arrow) — sent to VQA.
+        raw_frames: Unannotated frames — used only for the motion gate so the
+                    arrow does not cause spurious motion hits. Falls back to
+                    frames if not provided.
+
     Returns a description string, or "" if no frames are available.
     """
     if not frames:
         return ""
 
-    if not _has_motion(frames):
+    motion_frames = raw_frames if raw_frames is not None else frames
+    if not _has_motion(motion_frames):
         log.info("Clip is static — skipping VQA for camera %r", camera)
         return "No motion detected in the captured video clip."
 

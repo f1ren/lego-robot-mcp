@@ -135,8 +135,8 @@ def _capture_droidcam_background(
 ) -> None:
     """Background thread: poll DroidCam and append (ts, b64) pairs to frames.
 
-    Frames are overlaid with the heading arrow before being appended so the
-    saved action video and the VLM both see the forward-direction cue.
+    Frames are stored raw (no heading arrow) so the VLM sees clean before/after
+    comparisons without the arrow creating spurious motion detections.
     """
     try:
         import cv2
@@ -151,7 +151,7 @@ def _capture_droidcam_background(
                 ok, frame = cap.read()
                 if ok:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    b64 = heading.annotate_jpeg_b64(base64.b64encode(buf.tobytes()).decode())
+                    b64 = base64.b64encode(buf.tobytes()).decode()
                     frames.append((time.time(), b64))
                 slack = interval - (time.time() - t0)
                 if slack > 0:
@@ -211,40 +211,51 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
     #     for f in pi_clip:
     #         video.append((f["ts"], "pi_camera", f["frame"]))
 
+    # raw_video holds unannotated frames (for motion gate only).
+    # annotated_video holds arrow-overlaid frames (for VQA and saved clips).
+    raw_video: list[tuple[float, str, str]] = []
+    annotated_video: list[tuple[float, str, str]] = []
+
     if droid_bg_frames:
-        # Background-captured frames are already annotated with the heading arrow.
         for ts, b64 in droid_bg_frames:
-            video.append((ts, "droidcam", b64))
+            raw_video.append((ts, "droidcam", b64))
+            annotated_video.append((ts, "droidcam", heading.annotate_jpeg_b64(b64)))
     else:
         droid_clip = cam_mod._droidcam_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
         if droid_clip:
             for f in droid_clip:
-                video.append((f["ts"], "droidcam", heading.annotate_jpeg_b64(f["frame"])))
+                raw_video.append((f["ts"], "droidcam", f["frame"]))
+                annotated_video.append((f["ts"], "droidcam", heading.annotate_jpeg_b64(f["frame"])))
 
-    video.sort(key=lambda x: x[0])
-    labeled = [(label, b64) for _, label, b64 in video]
+    annotated_video.sort(key=lambda x: x[0])
+    raw_video.sort(key=lambda x: x[0])
+    labeled = [(label, b64) for _, label, b64 in annotated_video]
+    raw_labeled = [(label, b64) for _, label, b64 in raw_video]
 
-    frame_paths: list[str | None] = [None] * len(video)
-    if video and config.SNAPSHOT_DIR:
+    frame_paths: list[str | None] = [None] * len(annotated_video)
+    if annotated_video and config.SNAPSHOT_DIR:
         ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
         folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
         try:
             os.makedirs(folder, exist_ok=True)
             cam_counters: dict[str, int] = {}
-            for i, (_, label, b64) in enumerate(video):
+            for i, (_, label, b64) in enumerate(annotated_video):
                 idx = cam_counters.get(label, 0)
                 cam_counters[label] = idx + 1
                 path = os.path.join(folder, f"{label}_{idx:03d}.jpg")
                 with open(path, "wb") as fh:
                     fh.write(base64.b64decode(b64))
                 frame_paths[i] = path
-            log.info("Action video (%d frames) saved to: %s", len(video), folder)
+            log.info("Action video (%d frames) saved to: %s", len(annotated_video), folder)
         except Exception as exc:
             log.warning("Failed to save action video: %s", exc)
 
     out = _ok(result)
     if labeled:
-        description = vision.describe_action_video(action_desc, expected, labeled, frame_paths, context=context)
+        description = vision.describe_action_video(
+            action_desc, expected, labeled, frame_paths, context=context,
+            raw_labeled_frames=raw_labeled,
+        )
     else:
         # No streaming, DroidCam unreachable — fall back to before/after stills
         before, before_paths = _capture_pair("before")
@@ -511,7 +522,10 @@ def capture_external_video_clip(
         ]
         for frame_b64 in result["frames"]:
             content.append(_image_content(frame_b64))
-        vqa = vision.describe_clip("droidcam", result["frames"], result.get("paths"))
+        vqa = vision.describe_clip(
+            "droidcam", result["frames"], result.get("paths"),
+            raw_frames=result.get("raw_frames"),
+        )
         if vqa:
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
