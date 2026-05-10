@@ -104,8 +104,13 @@ def _image_content(frame_b64: str) -> ImageContent:
     return ImageContent(type="image", data=frame_b64, mimeType="image/jpeg")
 
 
-def _capture_pair(tag: str = "frame") -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Snap one frame from each available camera. Returns (frames, paths)."""
+def _capture_pair(tag: str = "frame", annotate: bool = True) -> tuple[list[tuple[str, str]], list[str | None]]:
+    """Snap one frame from each available camera. Returns (frames, paths).
+
+    annotate: whether to overlay the heading arrow on DroidCam frames.
+              Pass False for arm/gripper actions so the arrow does not mask
+              the arm or gripper position in VQA evaluation.
+    """
     frames: list[tuple[str, str]] = []
     paths: list[str | None] = []
     try:
@@ -116,7 +121,7 @@ def _capture_pair(tag: str = "frame") -> tuple[list[tuple[str, str]], list[str |
     except Exception as exc:
         log.warning("Pi camera capture failed during action wrap: %s", exc)
     try:
-        droid = cam_mod.capture_droidcam_still()
+        droid = cam_mod.capture_droidcam_still(annotate=annotate)
         b64 = droid["frame"]
         frames.append(("droidcam", b64))
         paths.append(cam_mod._save_snapshot(b64, f"{tag}_droidcam"))
@@ -162,7 +167,13 @@ def _capture_droidcam_background(
         log.debug("Background DroidCam capture failed: %s", exc)
 
 
-def _with_change_analysis(action_desc: str, expected: str, action_fn, context: str = "") -> dict:
+def _with_change_analysis(
+    action_desc: str,
+    expected: str,
+    action_fn,
+    context: str = "",
+    annotate: bool = True,
+) -> dict:
     """
     Record a video of the action, then ask the vision model whether the
     expected outcome was achieved.
@@ -172,6 +183,12 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
     - DroidCam: if streaming cache is active use it; otherwise spin up a
       background cv2 capture thread for the duration of the action.
     - Fallback: if neither camera yields frames, capture before/after stills.
+
+    annotate: whether to overlay the heading arrow on DroidCam frames sent to
+              the VQA model. Pass False for arm/gripper actions so the arrow
+              does not cover the arm or gripper and confuse the model about
+              their state. Pass True (default) for drive/turn actions where
+              heading information is needed for evaluation.
 
     On action error, returns _err(...) and skips vision.
     On vision failure, the action result is returned without change_description.
@@ -216,16 +233,19 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
     raw_video: list[tuple[float, str, str]] = []
     annotated_video: list[tuple[float, str, str]] = []
 
+    def _maybe_annotate(b64: str) -> str:
+        return heading.annotate_jpeg_b64(b64) if annotate else b64
+
     if droid_bg_frames:
         for ts, b64 in droid_bg_frames:
             raw_video.append((ts, "droidcam", b64))
-            annotated_video.append((ts, "droidcam", heading.annotate_jpeg_b64(b64)))
+            annotated_video.append((ts, "droidcam", _maybe_annotate(b64)))
     else:
         droid_clip = cam_mod._droidcam_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
         if droid_clip:
             for f in droid_clip:
                 raw_video.append((f["ts"], "droidcam", f["frame"]))
-                annotated_video.append((f["ts"], "droidcam", heading.annotate_jpeg_b64(f["frame"])))
+                annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
 
     annotated_video.sort(key=lambda x: x[0])
     raw_video.sort(key=lambda x: x[0])
@@ -258,8 +278,8 @@ def _with_change_analysis(action_desc: str, expected: str, action_fn, context: s
         )
     else:
         # No streaming, DroidCam unreachable — fall back to before/after stills
-        before, before_paths = _capture_pair("before")
-        after, after_paths = _capture_pair("after")
+        before, before_paths = _capture_pair("before", annotate=annotate)
+        after, after_paths = _capture_pair("after", annotate=annotate)
         description = vision.describe_change(
             action_desc, expected, before, after, before_paths, after_paths, context=context
         )
@@ -309,11 +329,15 @@ def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", con
         config.PORT_GRIPPER:     "gripper jaws move (positive=close, negative=open)",
     }.get(p, "the connected motor rotates")
     expected_str = expected if expected else f"motor on port {p} rotates by ~{degrees}°; visually: {role}"
+    # Wheel ports (A, B) need the heading arrow for direction evaluation.
+    # Arm (D) and gripper (C) ports must NOT have the arrow — it masks their state.
+    wheel_ports = {config.PORT_LEFT_WHEEL, config.PORT_RIGHT_WHEEL}
     return _with_change_analysis(
         f"move_motor port={p} degrees={degrees} speed={speed}",
         expected_str,
         lambda: robot_mod.move_motor(p, degrees, speed),
         context=context,
+        annotate=(p in wheel_ports),
     )
 
 
@@ -380,6 +404,7 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
         expected_str,
         lambda: robot_mod.move_arm(degrees, speed),
         context=context,
+        annotate=False,  # arrow masks arm position — suppress for arm actions
     )
 
 
@@ -409,6 +434,7 @@ def control_gripper(action: str, speed: int = 25, expected: str = "", context: s
         expected_str,
         lambda: robot_mod.control_gripper(action, speed),
         context=context,
+        annotate=False,  # arrow masks gripper state — suppress for gripper actions
     )
 
 
@@ -428,6 +454,7 @@ def put() -> dict:
         "in front of the robot), then arm raises — in the AFTER frames the gripper "
         "should be open and the arm should be in its raised position",
         robot_mod.put,
+        annotate=False,  # arrow masks gripper/arm state — suppress for put action
     )
 
 
