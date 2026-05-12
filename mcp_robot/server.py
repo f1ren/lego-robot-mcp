@@ -377,6 +377,42 @@ def drive(
     )
 
 
+@mcp.tool()
+def drive_degrees(
+    degrees: int,
+    left_speed: int,
+    right_speed: int,
+    expected: str = "",
+    context: str = "",
+) -> dict:
+    """
+    Drive both wheel motors by an exact number of encoder degrees. Captures
+    before/after images and returns a Gemini-generated `change_description`.
+
+    Unlike `drive` (which runs for a fixed time), this stops each wheel
+    after exactly *degrees* of encoder rotation, giving repeatable distances
+    and turns regardless of battery voltage or surface friction.
+
+    Args:
+        degrees:     How far each wheel rotates (encoder degrees, positive).
+        left_speed:  Left wheel speed, -100 to 100. Positive = forward.
+        right_speed: Right wheel speed, -100 to 100. Positive = forward.
+                     For an in-place turn use opposite signs, e.g. left=50 right=-50.
+        expected:    Short description of the expected outcome
+                     (e.g. "robot rotates clockwise ~90°").
+        context:     Why this action is being taken and hints for evaluation.
+    """
+    desc = f"drive_degrees degrees={degrees} left={left_speed} right={right_speed}"
+    expected_str = expected if expected else (
+        "robot moves or pivots a precise distance; observe droidcam for direction and angle"
+    )
+    return _with_change_analysis(
+        desc, expected_str,
+        lambda: robot_mod.drive_degrees(degrees, left_speed, right_speed),
+        context=context,
+    )
+
+
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()

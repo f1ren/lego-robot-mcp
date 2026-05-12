@@ -45,6 +45,11 @@ _DRIVE_WHEELS = """
 import json
 from buildhat import Motor, MotorPair
 
+# MotorPair is required here — it is the only BuildHAT API that commands
+# both wheel motors in a single firmware call, guaranteeing synchronised
+# start and stop.  Replacing this with two separate Motor instances would
+# cause each motor to start/stop independently, producing timing skew,
+# unpredictable heading drift, and non-repeatable manoeuvres.
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.run_for_seconds({duration}, {left_speed}, {right_speed})
 del pair
@@ -57,12 +62,35 @@ _STOP_WHEELS = """
 import json
 from buildhat import Motor, MotorPair
 
+# MotorPair is required here — it is the only BuildHAT API that commands
+# both wheel motors in a single firmware call, guaranteeing synchronised
+# start and stop.  Replacing this with two separate Motor instances would
+# cause each motor to start/stop independently, producing timing skew,
+# unpredictable heading drift, and non-repeatable manoeuvres.
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.stop()
 del pair
 left  = Motor({left_port!r})
 right = Motor({right_port!r})
 print(json.dumps({{"ok": True, "left": left.get_position(), "right": right.get_position()}}))
+"""
+
+_DRIVE_WHEELS_BY_DEGREES = """
+import json
+from buildhat import Motor, MotorPair
+
+# MotorPair is required here — it is the only BuildHAT API that commands
+# both wheel motors in a single firmware call, guaranteeing synchronised
+# start and stop.  Replacing this with two separate Motor instances would
+# cause each motor to start/stop independently, producing timing skew,
+# unpredictable heading drift, and non-repeatable manoeuvres.  This is
+# especially critical for angle-based driving where precision matters.
+pair = MotorPair({left_port!r}, {right_port!r})
+pair.run_for_degrees({degrees}, {left_speed}, {right_speed})
+del pair
+left  = Motor({left_port!r})
+right = Motor({right_port!r})
+print(json.dumps({{"left": left.get_position(), "right": right.get_position()}}))
 """
 
 
@@ -147,6 +175,45 @@ def drive(
             duration=duration_s,
         ),
         timeout=int(duration_s + 10),
+    )
+    viz.log_motor_positions({
+        "left_wheel":  result.get("left"),
+        "right_wheel": result.get("right"),
+    })
+    return result
+
+
+def drive_degrees(
+    degrees: int,
+    left_speed: int,
+    right_speed: int,
+) -> dict:
+    """
+    Drive both wheel motors by exactly *degrees* of encoder rotation.
+
+    Unlike drive() which runs for a fixed duration, this runs until each
+    wheel has physically rotated *degrees* encoder-degrees, giving
+    repeatable distances and turns regardless of battery voltage or load.
+
+    The direction of travel is controlled by the sign of the speed
+    arguments, not the sign of *degrees* (pass abs values for degrees).
+    For an in-place turn, set left_speed = -right_speed; for straight
+    travel set both to the same positive value.
+
+    Args:
+        degrees:     Motor encoder degrees each wheel rotates (positive).
+        left_speed:  Left wheel speed, -100 to 100. Positive = forward.
+        right_speed: Right wheel speed, -100 to 100. Positive = forward.
+    """
+    result = get_client().run_python(
+        _DRIVE_WHEELS_BY_DEGREES.format(
+            left_port=config.PORT_LEFT_WHEEL,
+            right_port=config.PORT_RIGHT_WHEEL,
+            degrees=abs(degrees),
+            left_speed=-left_speed,  # motor A is physically inverted; negate to keep positive=forward
+            right_speed=right_speed,
+        ),
+        timeout=max(30, abs(degrees) // 50 + 10),
     )
     viz.log_motor_positions({
         "left_wheel":  result.get("left"),
