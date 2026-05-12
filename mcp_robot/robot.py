@@ -170,6 +170,13 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
 
 # ── gripper ───────────────────────────────────────────────────────────────────
 
+# Last known gripper state.  None = unknown (first call always moves).
+# LEGO motors have incremental encoders that reset on power-cycle, so absolute
+# position targets are unreliable.  We use fixed relative travel and track
+# logical state instead.
+_gripper_state: str | None = None
+
+
 def control_gripper(
     action: str,
     speed: int = config.DEFAULT_GRIPPER_SPEED,
@@ -181,24 +188,20 @@ def control_gripper(
         action: "open" or "close".
         speed:  Motor speed 1–100.
     """
+    global _gripper_state
+
     if action not in ("open", "close"):
         raise ValueError(f"action must be 'open' or 'close', got {action!r}")
 
-    current = get_client().run_python(
-        _GET_ALL_POSITIONS.format(ports=[config.PORT_GRIPPER])
-    )
-    current_pos = current.get(config.PORT_GRIPPER, 0)
-    if isinstance(current_pos, dict):
-        raise RuntimeError(f"Gripper motor error: {current_pos.get('error')}")
+    if _gripper_state == action:
+        return {"action": action, "delta": 0, "note": "already at target"}
 
-    target = config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
-    delta = target - current_pos
-
-    if abs(delta) < 3:
-        return {"action": action, "start": current_pos, "end": current_pos, "delta": 0, "note": "already at target"}
-
-    result = move_motor(config.PORT_GRIPPER, delta, speed)
+    # Negative = opening direction, positive = closing direction (matches the
+    # existing motor wiring convention used when the absolute approach worked).
+    degrees = -config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
+    result = move_motor(config.PORT_GRIPPER, degrees, speed)
     result["action"] = action
+    _gripper_state = action
     return result
 
 

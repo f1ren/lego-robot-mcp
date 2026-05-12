@@ -18,9 +18,13 @@ PORT_RIGHT_WHEEL = os.getenv("PORT_RIGHT_WHEEL", "B")
 PORT_ARM         = os.getenv("PORT_ARM",         "D")
 PORT_GRIPPER     = os.getenv("PORT_GRIPPER",     "C")
 
-# ── Gripper calibration (degrees) ────────────────────────────────────────────
-# Run control_gripper manually and observe positions to calibrate.
-GRIPPER_OPEN_DEG   = int(os.getenv("GRIPPER_OPEN_DEG",   "0"))
+# ── Gripper calibration (relative degrees) ───────────────────────────────────
+# These are RELATIVE travel amounts, not absolute targets.  LEGO motors use
+# incremental encoders that reset on power-cycle, so an absolute target is
+# unreliable.  GRIPPER_OPEN_DEG is how far the motor turns to go from closed
+# to fully open (~180° finger separation); GRIPPER_CLOSED_DEG is how far it
+# turns to go from open to closed.
+GRIPPER_OPEN_DEG   = int(os.getenv("GRIPPER_OPEN_DEG",   "180"))
 GRIPPER_CLOSED_DEG = int(os.getenv("GRIPPER_CLOSED_DEG", "90"))
 
 # ── Arm limits (degrees relative to motor home) ───────────────────────────────
