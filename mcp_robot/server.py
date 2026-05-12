@@ -711,6 +711,7 @@ def main() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     if log_file:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
         fh = logging.FileHandler(log_file)
         fh.setFormatter(fmt)
         root.addHandler(fh)

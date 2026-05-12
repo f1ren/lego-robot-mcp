@@ -5,6 +5,10 @@ Motor port mapping must match the physical wiring on your BuildHat.
 Adjust PORT_* variables (or set env vars) if the robot behaves unexpectedly.
 """
 import os
+from pathlib import Path
+
+_PROJECT_DIR = Path(__file__).parent.parent
+_OUTPUT_DIR = _PROJECT_DIR / "output"
 
 # ── SSH ──────────────────────────────────────────────────────────────────────
 RPI_HOST = os.getenv("ROBOT_HOST", "rpi.local")
@@ -46,12 +50,12 @@ POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle del
 DROIDCAM_URL = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = os.getenv("LOG_FILE", "/tmp/lego-robot-mcp.log")
+LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))
 
 # ── Snapshots ─────────────────────────────────────────────────────────────────
 # Directory where captured images are saved before being sent to the model.
 # Set SNAPSHOT_DIR="" to disable saving.
-SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/tmp/lego-robot-snapshots")
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", str(_OUTPUT_DIR / "snapshots"))
 
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"
