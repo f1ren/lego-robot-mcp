@@ -14,7 +14,7 @@ import os
 
 from mcp_robot.video_compiler import compile_task_video
 
-SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/tmp/lego-robot-snapshots")
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "output/snapshots")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
