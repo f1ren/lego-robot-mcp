@@ -60,7 +60,7 @@ SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", str(_OUTPUT_DIR / "snapshots"))
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"
 #   auto = try Gemini first, fall back to Ollama on failure/quota exhaustion
-VISION_BACKEND = os.getenv("VISION_BACKEND", "ollama")
+VISION_BACKEND = os.getenv("VISION_BACKEND", "auto")
 
 # ── Gemini vision (Robotics-ER) ──────────────────────────────────────────────
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY", "")
