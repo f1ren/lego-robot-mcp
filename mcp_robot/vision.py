@@ -310,12 +310,12 @@ def _subsample_frames(
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Return first, 4th-before-last, and last frames (deduplicated, ordered)."""
+    """Return first, n*2/3, and last frames (deduplicated, ordered)."""
     n = len(labeled_frames)
     paths = list(frame_paths) if frame_paths else [None] * n
     if n <= 3:
         return list(labeled_frames), paths
-    indices = sorted({0, max(1, n - 4), n - 1})
+    indices = sorted({0, int(n * 2 / 3), n - 1})
     return [labeled_frames[i] for i in indices], [paths[i] for i in indices]
 
 
