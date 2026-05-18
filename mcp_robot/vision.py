@@ -41,9 +41,14 @@ _VIDEO_PROMPT = (
     "clockwise/counter-clockwise (viewed from above) or compass directions "
     "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
     "right' — those terms are ambiguous across camera perspectives.\n\n"
-    "Reply in EXACTLY this format on two lines:\n"
+    "PLAN EVALUATION: If a CONTEXT was provided, assess whether the robot's final state "
+    "in the last frame is compatible with the stated plan context — i.e. is the robot "
+    "positioned/configured to successfully execute the next step? If no CONTEXT was "
+    "provided, set Plan to N/A.\n\n"
+    "Reply in EXACTLY this format on three lines:\n"
     "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
-    "Changes: <1-2 short sentences on what actually happened during the motion>"
+    "Changes: <1-2 short sentences on what actually happened during the motion>\n"
+    "Plan: OK | REPLAN | N/A — <one short clause: why the final state is or is not ready for the next step, or N/A if no context>"
 )
 
 
@@ -235,8 +240,10 @@ def _gemini_describe_video(
 
     model = _get_active_model()
     log.info(
-        "Gemini video query model=%s action=%r frames=%d\n--- IMAGES ---\n%s\n--- END IMAGES ---",
-        model, action, len(labeled_frames), image_log,
+        "Gemini video query model=%s action=%r frames=%d"
+        "\n--- PROMPT ---\n%s\n--- END PROMPT ---"
+        "\n--- IMAGES ---\n%s\n--- END IMAGES ---",
+        model, action, len(labeled_frames), prompt, image_log,
     )
     try:
         resp = client.models.generate_content(
