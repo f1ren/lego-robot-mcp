@@ -20,32 +20,6 @@ from mcp_robot import config
 
 log = logging.getLogger(__name__)
 
-_PROMPT = (
-    "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
-    "gripper). The gripper defines the robot's front.\n"
-    "ROBOT ORIENTATION: 'forward' always means the direction the gripper is currently "
-    "pointing. After any turn the robot's heading changes — identify which way the "
-    "gripper faces in the BEFORE image before evaluating a drive action.\n"
-    "GRIPPER STATE: only call the gripper 'open' when the jaws are FULLY spread apart — "
-    "the angle between the two fingers must be approximately 180 degrees (fingers "
-    "pointing in opposite directions). A partially-open gripper is NOT 'open' — describe "
-    "it as 'partially open' or 'closed'. A non-wide-open gripper may fail to clear or "
-    "grasp an object.\n"
-    "ACTION COMMANDED: {action}\n"
-    "EXPECTED OUTCOME: {expected}\n"
-    "{context_section}"
-    "Below are BEFORE images followed by AFTER images, each labelled by the "
-    "camera they came from (pi_camera = robot's front-mounted camera, "
-    "droidcam = third-person view).\n\n"
-    "DIRECTIONAL LANGUAGE: When describing the robot's heading or turning direction, use "
-    "clockwise/counter-clockwise (viewed from above) or compass directions "
-    "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
-    "right' — those terms are ambiguous across camera perspectives.\n\n"
-    "Reply in EXACTLY this format on two lines:\n"
-    "Verdict: YES | NO | PARTIAL — <one short clause justifying the verdict>\n"
-    "Changes: <1-2 short sentences describing what actually changed; if "
-    "nothing visible changed, say so explicitly>"
-)
 
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
@@ -174,104 +148,6 @@ def _switch_gemini_to_fallback() -> str:
     return _active_model
 
 
-def _gemini_describe(
-    action: str,
-    expected: str,
-    before: Sequence[tuple[str, str]],
-    after: Sequence[tuple[str, str]],
-    context: str = "",
-) -> str:
-    from google.genai import types
-
-    client = _get_gemini_client()
-    if client is None:
-        raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
-
-    context_section = f"CONTEXT: {context}\n" if context else ""
-    prompt = _PROMPT.format(action=action, expected=expected, context_section=context_section)
-    parts: list = [types.Part.from_text(text=prompt)]
-    parts.append(types.Part.from_text(text="=== BEFORE ==="))
-    for label, b64 in before:
-        parts.append(types.Part.from_text(text=f"[{label}]"))
-        parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
-    parts.append(types.Part.from_text(text="=== AFTER ==="))
-    for label, b64 in after:
-        parts.append(types.Part.from_text(text=f"[{label}]"))
-        parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
-
-    model = _get_active_model()
-    log.info("Gemini query model=%s action=%r", model, action)
-    try:
-        resp = client.models.generate_content(
-            model=model,
-            contents=[types.Content(role="user", parts=parts)],
-        )
-        text = (resp.text or "").strip()
-        log.info("Gemini response: %s", text)
-        return text
-    except Exception as exc:
-        if _is_quota_error(exc) and model != config.GEMINI_FALLBACK_MODEL:
-            fallback = _switch_gemini_to_fallback()
-            log.info("Retrying with Gemini fallback model: %s", fallback)
-            resp = client.models.generate_content(
-                model=fallback,
-                contents=[types.Content(role="user", parts=parts)],
-            )
-            text = (resp.text or "").strip()
-            log.info("Gemini fallback response: %s", text)
-            return text
-        raise
-
-
-# ── Ollama backend ─────────────────────────────────────────────────────────────
-
-def _ollama_describe(
-    action: str,
-    expected: str,
-    before: Sequence[tuple[str, str]],
-    after: Sequence[tuple[str, str]],
-    before_paths: Sequence[str | None] | None = None,
-    after_paths: Sequence[str | None] | None = None,
-    context: str = "",
-) -> str:
-    import ollama
-
-    context_section = f"CONTEXT: {context}\n" if context else ""
-    prompt_text = _PROMPT.format(action=action, expected=expected, context_section=context_section)
-    prompt_text += "\n\n=== BEFORE ===\n"
-    for label, _ in before:
-        prompt_text += f"[{label}]\n"
-    prompt_text += "\n=== AFTER ===\n"
-    for label, _ in after:
-        prompt_text += f"[{label}]\n"
-
-    # Ollama images= accepts raw bytes; we pass all frames in order (before then after)
-    images = [base64.b64decode(b64) for _, b64 in list(before) + list(after)]
-
-    all_labels = [lbl for lbl, _ in list(before) + list(after)]
-    all_paths  = list(before_paths or [None] * len(before)) + list(after_paths or [None] * len(after))
-    image_log  = "\n".join(
-        f"  [{'before' if i < len(before) else 'after'}] {lbl} — {path or '(no path)'}"
-        for i, (lbl, path) in enumerate(zip(all_labels, all_paths))
-    )
-    log.info(
-        "Ollama query model=%s host=%s action=%r frames=%d"
-        "\n--- PROMPT ---\n%s\n--- END PROMPT ---"
-        "\n--- IMAGES ---\n%s\n--- END IMAGES ---",
-        config.OLLAMA_MODEL, config.OLLAMA_HOST, action, len(images),
-        prompt_text, image_log,
-    )
-
-    client = ollama.Client(host=config.OLLAMA_HOST)
-    t0 = time.monotonic()
-    resp = client.chat(
-        model=config.OLLAMA_MODEL,
-        messages=[{"role": "user", "content": prompt_text, "images": images}],
-    )
-    elapsed = time.monotonic() - t0
-    text = resp["message"]["content"].strip()
-    log.info("Ollama response (%.1fs):\n%s", elapsed, text)
-    return text
 
 
 # ── Ollama video backend ───────────────────────────────────────────────────────
@@ -330,69 +206,12 @@ def _ollama_video_describe(
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
-def describe_change(
-    action: str,
-    expected: str,
-    before: Sequence[tuple[str, str]],
-    after: Sequence[tuple[str, str]],
-    before_paths: Sequence[str | None] | None = None,
-    after_paths: Sequence[str | None] | None = None,
-    context: str = "",
-) -> str:
-    """
-    Ask the configured vision backend whether the expected outcome was achieved.
-
-    Returns a two-line "Verdict: …\\nChanges: …" string, or "" if no frames
-    are available. Returns "(vision analysis failed: …)" on unrecoverable error.
-    """
-    if not before and not after:
-        return ""
-
-    log.info(
-        "Vision query: backend=%s action=%r before=%d after=%d"
-        "\n  before_paths=%s\n  after_paths=%s",
-        config.VISION_BACKEND, action, len(before), len(after),
-        list(before_paths) if before_paths else [],
-        list(after_paths) if after_paths else [],
-    )
-
-    backend = config.VISION_BACKEND
-
-    if backend == "gemini":
-        try:
-            return _gemini_describe(action, expected, before, after, context=context)
-        except Exception as exc:
-            log.warning("Gemini describe_change failed: %s", exc)
-            return f"(vision analysis failed: {exc})"
-
-    if backend == "ollama":
-        try:
-            return _ollama_describe(action, expected, before, after, before_paths, after_paths, context=context)
-        except Exception as exc:
-            log.warning("Ollama describe_change failed: %s", exc)
-            return f"(vision analysis failed: {exc})"
-
-    # "auto": Gemini first, Ollama as final fallback
-    gemini_exc = None
-    if config.GEMINI_API_KEY:
-        try:
-            return _gemini_describe(action, expected, before, after, context=context)
-        except Exception as exc:
-            log.warning("Gemini failed, trying Ollama fallback: %s", exc)
-            gemini_exc = exc
-
-    try:
-        return _ollama_describe(action, expected, before, after, before_paths, after_paths, context=context)
-    except Exception as exc:
-        log.warning("Ollama fallback also failed: %s", exc)
-        primary = str(gemini_exc) if gemini_exc else str(exc)
-        return f"(vision analysis failed: {primary}; ollama: {exc})"
-
 
 def _gemini_describe_video(
     action: str,
     expected: str,
     labeled_frames: Sequence[tuple[str, str]],
+    frame_paths: Sequence[str | None] | None = None,
     context: str = "",
 ) -> str:
     from google.genai import types
@@ -400,6 +219,12 @@ def _gemini_describe_video(
     client = _get_gemini_client()
     if client is None:
         raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
+
+    paths = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
+    image_log = "\n".join(
+        f"  [{label}][{i:03d}] {path or '(no path)'}"
+        for i, ((label, _), path) in enumerate(zip(labeled_frames, paths))
+    )
 
     context_section = f"CONTEXT: {context}\n" if context else ""
     prompt = _VIDEO_PROMPT.format(action=action, expected=expected, context_section=context_section, n_frames=len(labeled_frames))
@@ -409,7 +234,10 @@ def _gemini_describe_video(
         parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
 
     model = _get_active_model()
-    log.info("Gemini video query model=%s action=%r frames=%d", model, action, len(labeled_frames))
+    log.info(
+        "Gemini video query model=%s action=%r frames=%d\n--- IMAGES ---\n%s\n--- END IMAGES ---",
+        model, action, len(labeled_frames), image_log,
+    )
     try:
         resp = client.models.generate_content(
             model=model,
@@ -528,7 +356,7 @@ def describe_action_video(
 
     if backend == "gemini":
         try:
-            return _gemini_describe_video(action, expected, labeled_frames, context=context)
+            return _gemini_describe_video(action, expected, labeled_frames, frame_paths, context=context)
         except Exception as exc:
             log.warning("Gemini describe_action_video failed: %s", exc)
             return f"(vision analysis failed: {exc})"
@@ -543,7 +371,7 @@ def describe_action_video(
     # "auto": Gemini first, Ollama fallback
     if config.GEMINI_API_KEY:
         try:
-            return _gemini_describe_video(action, expected, labeled_frames, context=context)
+            return _gemini_describe_video(action, expected, labeled_frames, frame_paths, context=context)
         except Exception as exc:
             log.warning("Gemini video failed, trying Ollama: %s", exc)
 

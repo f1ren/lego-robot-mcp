@@ -104,31 +104,6 @@ def _image_content(frame_b64: str) -> ImageContent:
     return ImageContent(type="image", data=frame_b64, mimeType="image/jpeg")
 
 
-def _capture_pair(tag: str = "frame", annotate: bool = True) -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Snap one frame from each available camera. Returns (frames, paths).
-
-    annotate: whether to overlay the heading arrow on DroidCam frames.
-              Pass False for arm/gripper actions so the arrow does not mask
-              the arm or gripper position in VQA evaluation.
-    """
-    frames: list[tuple[str, str]] = []
-    paths: list[str | None] = []
-    try:
-        pi = cam_mod.capture_still()
-        b64 = pi["frame"]
-        frames.append(("pi_camera", b64))
-        paths.append(cam_mod._save_snapshot(b64, f"{tag}_pi_camera"))
-    except Exception as exc:
-        log.warning("Pi camera capture failed during action wrap: %s", exc)
-    try:
-        droid = cam_mod.capture_droidcam_still(annotate=annotate)
-        b64 = droid["frame"]
-        frames.append(("droidcam", b64))
-        paths.append(cam_mod._save_snapshot(b64, f"{tag}_droidcam"))
-    except Exception as exc:
-        log.debug("DroidCam unavailable during action wrap: %s", exc)
-    return frames, paths
-
 
 _ACTION_VIDEO_FPS = 5.0  # frames per second collected during action execution
 
@@ -270,19 +245,17 @@ def _with_change_analysis(
         except Exception as exc:
             log.warning("Failed to save action video: %s", exc)
 
+    if not labeled:
+        raise RuntimeError(
+            f"No video frames captured during action {action_desc!r} — "
+            "DroidCam must be streaming for experiments."
+        )
+
     out = _ok(result)
-    if labeled:
-        description = vision.describe_action_video(
-            action_desc, expected, labeled, frame_paths, context=context,
-            raw_labeled_frames=raw_labeled,
-        )
-    else:
-        # No streaming, DroidCam unreachable — fall back to before/after stills
-        before, before_paths = _capture_pair("before", annotate=annotate)
-        after, after_paths = _capture_pair("after", annotate=annotate)
-        description = vision.describe_change(
-            action_desc, expected, before, after, before_paths, after_paths, context=context
-        )
+    description = vision.describe_action_video(
+        action_desc, expected, labeled, frame_paths, context=context,
+        raw_labeled_frames=raw_labeled,
+    )
     if description:
         out["change_description"] = description
     return out
