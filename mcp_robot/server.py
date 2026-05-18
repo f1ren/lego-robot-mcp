@@ -293,6 +293,7 @@ def _with_change_analysis(
 @mcp.tool()
 def get_motor_positions() -> dict:
     """Return current position (degrees) for all four motor ports."""
+    log.info("[TOOL] get_motor_positions")
     try:
         return _ok(robot_mod.get_all_positions())
     except Exception as exc:
@@ -317,6 +318,7 @@ def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", con
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "lowering arm to ball height; last attempt overshot by 20°").
     """
+    log.info("[TOOL] move_motor port=%r degrees=%r speed=%r", port, degrees, speed)
     if port.upper() not in ("A", "B", "C", "D"):
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
     if not (1 <= abs(speed) <= 100):
@@ -365,6 +367,7 @@ def drive(
         context:     Why this action is being taken and hints for evaluation
                      (e.g. "approaching the ball; previous attempt turned clockwise instead").
     """
+    log.info("[TOOL] drive left_speed=%r right_speed=%r duration_s=%r", left_speed, right_speed, duration_s)
     desc = (
         "stop wheels"
         if duration_s == 0
@@ -402,6 +405,7 @@ def drive_degrees(
                      (e.g. "robot rotates clockwise ~90°").
         context:     Why this action is being taken and hints for evaluation.
     """
+    log.info("[TOOL] drive_degrees degrees=%r left_speed=%r right_speed=%r", degrees, left_speed, right_speed)
     desc = f"drive_degrees degrees={degrees} left={left_speed} right={right_speed}"
     expected_str = expected if expected else (
         "robot moves or pivots a precise distance; observe droidcam for direction and angle"
@@ -430,6 +434,7 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "positioning arm to grasp ball; last attempt stopped too high").
     """
+    log.info("[TOOL] move_arm degrees=%r speed=%r", degrees, speed)
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
     expected_str = expected if expected else (
         f"arm moves {direction} by ~{abs(degrees)}° — visible in droidcam (arm angle "
@@ -460,6 +465,7 @@ def control_gripper(action: str, speed: int = 25, expected: str = "", context: s
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "grasping paper ball; previous close attempt slipped off").
     """
+    log.info("[TOOL] control_gripper action=%r speed=%r", action, speed)
     expected_str = expected if expected else (
         "gripper jaws open (visibly wider gap between fingers); robot pose and arm unchanged"
         if action == "open"
@@ -484,6 +490,7 @@ def put() -> dict:
     images and returns a Gemini-generated `change_description` confirming
     whether the object was released.
     """
+    log.info("[TOOL] put")
     return _with_change_analysis(
         "put (open gripper + raise arm)",
         "gripper jaws open (releasing any held object so it sits on the surface "
@@ -502,6 +509,7 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
     Capture a single still frame from the Pi Camera (front/robot-eye view).
     Returns the image so you can inspect what the robot sees directly ahead.
     """
+    log.info("[TOOL] get_front_camera_image")
     try:
         result = cam_mod.capture_still()
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
@@ -522,6 +530,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     Capture a single still frame from the DroidCam (third-person/overhead view).
     Useful for observing the robot's position and surroundings from outside.
     """
+    log.info("[TOOL] get_external_camera_image")
     try:
         result = cam_mod.capture_droidcam_still()
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
@@ -545,6 +554,7 @@ def capture_front_video_clip(
         duration_s: Clip length in seconds (1–10 recommended).
         fps:        Frames per second (1–5 recommended for SSH bandwidth).
     """
+    log.info("[TOOL] capture_front_video_clip duration_s=%r fps=%r", duration_s, fps)
     try:
         result = cam_mod.capture_clip(duration_s, fps)
         content: list[ImageContent | TextContent] = [
@@ -575,6 +585,7 @@ def capture_external_video_clip(
         duration_s: Clip length in seconds (1–10 recommended).
         fps:        Frames per second (1–5 recommended).
     """
+    log.info("[TOOL] capture_external_video_clip duration_s=%r fps=%r", duration_s, fps)
     try:
         result = cam_mod.capture_droidcam_clip(duration_s, fps)
         content: list[ImageContent | TextContent] = [
@@ -603,6 +614,7 @@ def get_robot_state() -> list[ImageContent | TextContent]:
     cameras (Pi Camera = front view; DroidCam = wider third-person view).
     Call this before planning any sequence of actions.
     """
+    log.info("[TOOL] get_robot_state")
     try:
         positions = robot_mod.get_all_positions()
         pi_frame = cam_mod.capture_still()
@@ -648,6 +660,7 @@ def compile_video(since: str, output_fps: float = 5.0) -> dict:
 
     Returns a dict with video_path, total_frames, motion_frames, action_count.
     """
+    log.info("[TOOL] compile_video since=%r output_fps=%r", since, output_fps)
     from mcp_robot.video_compiler import compile_task_video
     result = compile_task_video(since, config.SNAPSHOT_DIR, output_fps)
     if not result.ok:
