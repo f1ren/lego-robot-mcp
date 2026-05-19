@@ -231,17 +231,25 @@ def _with_change_analysis(
     if annotated_video and config.SNAPSHOT_DIR:
         ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
         folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
+        annotated_folder = os.path.join(folder, "annotated")
         try:
             os.makedirs(folder, exist_ok=True)
+            os.makedirs(annotated_folder, exist_ok=True)
             cam_counters: dict[str, int] = {}
-            for i, (_, label, b64) in enumerate(annotated_video):
+            for i, ((_, label, raw_b64), (_, _, ann_b64)) in enumerate(zip(raw_video, annotated_video)):
                 idx = cam_counters.get(label, 0)
                 cam_counters[label] = idx + 1
-                path = os.path.join(folder, f"{label}_{idx:03d}.jpg")
-                with open(path, "wb") as fh:
-                    fh.write(base64.b64decode(b64))
-                frame_paths[i] = path
-            log.info("Action video (%d frames) saved to: %s", len(annotated_video), folder)
+                fname = f"{label}_{idx:03d}.jpg"
+                # raw frame → main folder (read by compile_video)
+                with open(os.path.join(folder, fname), "wb") as fh:
+                    fh.write(base64.b64decode(raw_b64))
+                # annotated frame → subfolder (for VQA path logging only)
+                ann_path = os.path.join(annotated_folder, fname)
+                with open(ann_path, "wb") as fh:
+                    fh.write(base64.b64decode(ann_b64))
+                frame_paths[i] = ann_path
+            log.info("Action video (%d frames) saved to: %s (annotated → %s/annotated/)",
+                     len(annotated_video), folder, folder)
         except Exception as exc:
             log.warning("Failed to save action video: %s", exc)
 
