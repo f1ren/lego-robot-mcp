@@ -48,6 +48,11 @@ _VIDEO_PROMPT = (
     "(N, NNE, NE, ENE, E, ESE, SE, SSE, S, SSW, SW, WSW, W, WNW, NW, NNW). Do NOT say the "
     "robot 'turned left' or 'turned "
     "right' — those terms are ambiguous across camera perspectives.\n\n"
+    "FRAME ANNOTATIONS: Frames may contain overlaid arrows — these are visual aids, not "
+    "physical objects. A GREEN arrow rooted at the gripper indicates the robot's current "
+    "forward direction (heading). RED arrows are Optical Flow vectors computed from "
+    "consecutive frames — each arrow shows the direction and magnitude of pixel motion at "
+    "that location; use them to identify which parts of the scene moved and how far.\n\n"
     "PLAN EVALUATION: If a CONTEXT was provided, assess whether the robot's final state "
     "in the last frame is compatible with the stated plan context — i.e. is the robot "
     "positioned/configured to successfully execute the next step? If no CONTEXT was "
@@ -181,7 +186,12 @@ _CLIP_PROMPT = (
     "DIRECTIONAL LANGUAGE: Describe turning direction as clockwise/counter-clockwise "
     "(viewed from above) or compass directions "
     "(N, NNE, NE, ENE, E, ESE, SE, SSE, S, SSW, SW, WSW, W, WNW, NW, NNW), "
-    "not as 'left' or 'right'."
+    "not as 'left' or 'right'.\n"
+    "FRAME ANNOTATIONS: Frames may contain overlaid arrows — these are visual aids, not "
+    "physical objects. A GREEN arrow rooted at the gripper indicates the robot's current "
+    "forward direction (heading). RED arrows are Optical Flow vectors computed from "
+    "consecutive frames — each arrow shows the direction and magnitude of pixel motion at "
+    "that location; use them to identify which parts of the scene moved and how far."
 )
 
 
