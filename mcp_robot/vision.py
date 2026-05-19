@@ -22,8 +22,8 @@ log = logging.getLogger(__name__)
 
 
 _CAMERA_LABELS = {
-    "pi_camera": "PI CAMERA — front view (robot's eye, mounted on the arm, looking forward from the gripper)",
-    "droidcam":  "DROIDCAM — external/third-person view (overhead or side angle showing the whole robot)",
+    "pi_camera": "front cam — front view (robot's eye, mounted on the arm, looking forward from the gripper)",
+    "droidcam":  "external cam — third-person view (overhead or side angle showing the whole robot)",
 }
 
 _VIDEO_PROMPT = (
@@ -41,11 +41,12 @@ _VIDEO_PROMPT = (
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
     "Frames are grouped by camera below:\n"
-    "  PI CAMERA: front view — mounted on the robot, looking forward from the gripper.\n"
-    "  DROIDCAM: external/third-person view — overhead or side angle showing the whole robot.\n\n"
+    "  front cam: front view — mounted on the robot, looking forward from the gripper.\n"
+    "  external cam: third-person view — overhead or side angle showing the whole robot.\n\n"
     "DIRECTIONAL LANGUAGE: When describing the robot's heading or turning direction, use "
     "clockwise/counter-clockwise (viewed from above) or compass directions "
-    "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
+    "(N, NNE, NE, ENE, E, ESE, SE, SSE, S, SSW, SW, WSW, W, WNW, NW, NNW). Do NOT say the "
+    "robot 'turned left' or 'turned "
     "right' — those terms are ambiguous across camera perspectives.\n\n"
     "PLAN EVALUATION: If a CONTEXT was provided, assess whether the robot's final state "
     "in the last frame is compatible with the stated plan context — i.e. is the robot "
@@ -178,7 +179,8 @@ _CLIP_PROMPT = (
     "Describe what you observe: robot position, any motion, visible objects, "
     "and the overall scene state. Be concise (2-4 sentences).\n"
     "DIRECTIONAL LANGUAGE: Describe turning direction as clockwise/counter-clockwise "
-    "(viewed from above) or compass directions (north/south/east/west), "
+    "(viewed from above) or compass directions "
+    "(N, NNE, NE, ENE, E, ESE, SE, SSE, S, SSW, SW, WSW, W, WNW, NW, NNW), "
     "not as 'left' or 'right'."
 )
 
@@ -331,13 +333,27 @@ def _subsample_frames(
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Return first, n*2/3, and last frames (deduplicated, ordered)."""
-    n = len(labeled_frames)
-    paths = list(frame_paths) if frame_paths else [None] * n
-    if n <= 3:
-        return list(labeled_frames), paths
-    indices = sorted({0, int(n * 2 / 3), n - 1})
-    return [labeled_frames[i] for i in indices], [paths[i] for i in indices]
+    """Return 3 frames per camera (first, ~2/3, last), grouped by camera — 6 total for two cameras."""
+    paths = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
+
+    # Group by camera, preserving original indices for path lookup
+    camera_indices: dict[str, list[int]] = {}
+    for i, (label, _) in enumerate(labeled_frames):
+        camera_indices.setdefault(label, []).append(i)
+
+    out_frames: list[tuple[str, str]] = []
+    out_paths: list[str | None] = []
+    for indices in camera_indices.values():
+        n = len(indices)
+        if n <= 3:
+            picks = indices
+        else:
+            picks = sorted({indices[0], indices[int(n * 2 / 3)], indices[-1]})
+        for i in picks:
+            out_frames.append(labeled_frames[i])
+            out_paths.append(paths[i])
+
+    return out_frames, out_paths
 
 
 def describe_action_video(
