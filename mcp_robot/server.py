@@ -200,13 +200,6 @@ def _with_change_analysis(
         bg_thread.join(timeout=2)
 
     # ── collect video frames in chronological order ───────────────────────────
-    video: list[tuple[float, str, str]] = []  # (ts, camera_label, b64)
-
-    # pi_clip = cam_mod._pi_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
-    # if pi_clip:
-    #     for f in pi_clip:
-    #         video.append((f["ts"], "pi_camera", f["frame"]))
-
     # raw_video holds unannotated frames (for motion gate only).
     # annotated_video holds arrow-overlaid frames (for VQA and saved clips).
     raw_video: list[tuple[float, str, str]] = []
@@ -225,6 +218,12 @@ def _with_change_analysis(
             for f in droid_clip:
                 raw_video.append((f["ts"], "droidcam", f["frame"]))
                 annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
+
+    pi_clip = cam_mod._pi_cache.clip_since(t_start, config.PICAMERA_CAPTURE_FPS)
+    if pi_clip:
+        for f in pi_clip:
+            raw_video.append((f["ts"], "pi_camera", f["frame"]))
+            annotated_video.append((f["ts"], "pi_camera", f["frame"]))
 
     annotated_video.sort(key=lambda x: x[0])
     raw_video.sort(key=lambda x: x[0])
@@ -260,7 +259,7 @@ def _with_change_analysis(
     if not labeled:
         raise RuntimeError(
             f"No video frames captured during action {action_desc!r} — "
-            "DroidCam must be streaming for experiments."
+            "at least one camera (DroidCam or Pi Camera) must be streaming."
         )
 
     out = _ok(result)

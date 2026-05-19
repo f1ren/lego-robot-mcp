@@ -21,6 +21,11 @@ from mcp_robot import config
 log = logging.getLogger(__name__)
 
 
+_CAMERA_LABELS = {
+    "pi_camera": "PI CAMERA — front view (robot's eye, mounted on the arm, looking forward from the gripper)",
+    "droidcam":  "DROIDCAM — external/third-person view (overhead or side angle showing the whole robot)",
+}
+
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper). The gripper defines the robot's front.\n"
@@ -35,8 +40,9 @@ _VIDEO_PROMPT = (
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n"
     "{context_section}"
-    "Below are sequential frames from two cameras captured during the action.\n"
-    # "Camera labels: pi_camera = robot eye (front view), droidcam = third-person view.\n\n"
+    "Frames are grouped by camera below:\n"
+    "  PI CAMERA: front view — mounted on the robot, looking forward from the gripper.\n"
+    "  DROIDCAM: external/third-person view — overhead or side angle showing the whole robot.\n\n"
     "DIRECTIONAL LANGUAGE: When describing the robot's heading or turning direction, use "
     "clockwise/counter-clockwise (viewed from above) or compass directions "
     "(north/south/east/west). Do NOT say the robot 'turned left' or 'turned "
@@ -231,12 +237,19 @@ def _gemini_describe_video(
         for i, ((label, _), path) in enumerate(zip(labeled_frames, paths))
     )
 
-    context_section = f"CONTEXT: {context}\n" if context else ""
-    prompt = _VIDEO_PROMPT.format(action=action, expected=expected, context_section=context_section, n_frames=len(labeled_frames))
-    parts: list = [types.Part.from_text(text=prompt)]
+    # Group frames by camera, preserving chronological order within each camera
+    cameras: dict[str, list[str]] = {}
     for label, b64 in labeled_frames:
-        parts.append(types.Part.from_text(text=f"[{label}]"))
-        parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
+        cameras.setdefault(label, []).append(b64)
+
+    context_section = f"CONTEXT: {context}\n" if context else ""
+    prompt = _VIDEO_PROMPT.format(action=action, expected=expected, context_section=context_section)
+    parts: list = [types.Part.from_text(text=prompt)]
+    for camera, frames in cameras.items():
+        desc = _CAMERA_LABELS.get(camera, camera)
+        parts.append(types.Part.from_text(text=f"\n=== {desc} ({len(frames)} frames) ==="))
+        for b64 in frames:
+            parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
 
     model = _get_active_model()
     log.info(
@@ -287,7 +300,8 @@ def _ollama_describe_video(
     images: list[bytes] = []
     image_log_lines: list[str] = []
     for camera, frames in cameras.items():
-        prompt_text += f"\n\n=== {camera} ({len(frames)} frames) ==="
+        desc = _CAMERA_LABELS.get(camera, camera)
+        prompt_text += f"\n\n=== {desc} ({len(frames)} frames) ==="
         for i, (b64, path) in enumerate(frames):
             images.append(base64.b64decode(b64))
             image_log_lines.append(f"  [{camera}][{i:03d}] {path or '(no path)'}")
