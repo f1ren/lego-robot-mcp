@@ -41,6 +41,9 @@ import os
 import threading
 import time
 
+import cv2
+import numpy as np
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
@@ -100,8 +103,30 @@ def _err(msg: str) -> dict:
     return {"ok": False, "error": msg}
 
 
+_MAX_PIXELS = 1_000_000  # ~1 megapixel cap for images sent to AI agents
+
+
+def _scale_jpeg_b64(frame_b64: str) -> str:
+    """Scale a base64 JPEG down to ≤ _MAX_PIXELS, preserving aspect ratio."""
+    raw = base64.b64decode(frame_b64)
+    arr = np.frombuffer(raw, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return frame_b64
+    h, w = img.shape[:2]
+    if w * h <= _MAX_PIXELS:
+        return frame_b64
+    scale = (_MAX_PIXELS / (w * h)) ** 0.5
+    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        return frame_b64
+    return base64.b64encode(buf.tobytes()).decode()
+
+
 def _image_content(frame_b64: str) -> ImageContent:
-    return ImageContent(type="image", data=frame_b64, mimeType="image/jpeg")
+    return ImageContent(type="image", data=_scale_jpeg_b64(frame_b64), mimeType="image/jpeg")
 
 
 
