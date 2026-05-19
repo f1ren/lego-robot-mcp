@@ -52,6 +52,11 @@ DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/vide
 # Higher = smoother video and better optical flow; limited by DroidCam's native rate (~30 fps).
 DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "15.0"))
 
+# ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
+# stream_live() starts a picamera2 MJPEG server on the RPi and reads it via
+# OpenCV — no per-frame SSH overhead, achieves 15-30 fps at 640×480.
+PICAMERA_MJPEG_PORT = int(os.getenv("PICAMERA_MJPEG_PORT", "8765"))
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))
 

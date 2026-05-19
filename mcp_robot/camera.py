@@ -24,7 +24,7 @@ def _save_snapshot(frame_b64: str, label: str, index: int | None = None) -> str 
     Decode frame_b64 and write it to SNAPSHOT_DIR as a JPEG.
 
     Returns the file path on success, None if saving is disabled or fails.
-    label:  "still" or "clip"
+    label:  "picamera" or "clip"
     index:  frame index within a clip (None for stills)
     """
     if not config.SNAPSHOT_DIR:
@@ -255,6 +255,61 @@ finally:
     cam.close()
 """
 
+# MJPEG HTTP server script — runs on the RPi and serves frames at the sensor's
+# native rate (~15-30 fps at 640×480). Read by _stream_live_http via OpenCV.
+_PICAMERA_MJPEG_SERVER = """
+import io, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from picamera2 import Picamera2
+from picamera2.encoders import MJPEGEncoder
+from picamera2.outputs import FileOutput
+from libcamera import Transform
+
+class _Buf(io.BufferedIOBase):
+    def __init__(self):
+        self.frame = b''
+        self.cond = threading.Condition()
+    def write(self, buf):
+        with self.cond:
+            self.frame = bytes(buf)
+            self.cond.notify_all()
+        return len(buf)
+
+_buf = _Buf()
+
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
+        self.end_headers()
+        try:
+            while True:
+                with _buf.cond:
+                    _buf.cond.wait()
+                    frame = _buf.frame
+                hdr = (
+                    b'--FRAME\r\n'
+                    b'Content-Type: image/jpeg\r\n'
+                    b'Content-Length: ' + str(len(frame)).encode() + b'\r\n\r\n'
+                )
+                self.wfile.write(hdr + frame + b'\r\n')
+        except Exception:
+            pass
+    def log_message(self, *a): pass
+
+cam = Picamera2()
+cam.configure(cam.create_video_configuration(
+    main={{'size': ({w}, {h}), 'format': 'RGB888'}},
+    transform=Transform(hflip=True, vflip=True),
+))
+cam.start_recording(MJPEGEncoder(), FileOutput(_buf))
+try:
+    HTTPServer(('', {port}), _Handler).serve_forever()
+finally:
+    cam.stop_recording()
+    cam.close()
+"""
+
 
 # ── public API ────────────────────────────────────────────────────────────────
 
@@ -270,7 +325,7 @@ def capture_still() -> dict:
     """
     cached = _pi_cache.latest()
     if cached is not None:
-        path = _save_snapshot(cached["frame"], "still")
+        path = _save_snapshot(cached["frame"], "picamera")
         viz.log_still(cached)
         return {**cached, "path": path}
 
@@ -280,7 +335,7 @@ def capture_still() -> dict:
         warmup=config.CAMERA_WARMUP,
     )
     result = get_client().run_python(script, timeout=15)
-    path = _save_snapshot(result["frame"], "still")
+    path = _save_snapshot(result["frame"], "picamera")
     viz.log_still(result)
     return {**result, "path": path}
 
@@ -327,25 +382,108 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
 
 
 def stream_live(
-    fps: float = 5.0,
+    fps: float = 15.0,
     on_frame=None,
     stop_event: threading.Event | None = None,
 ) -> None:
     """
     Stream frames from the RPi camera until stop_event is set.
 
-    Keeps picamera2 open across frames — no per-frame startup cost.
-    Uses a separate SSH connection so robot commands still work concurrently.
+    Tries the fast path first: starts a picamera2 MJPEG HTTP server on the RPi
+    and reads it via OpenCV (no per-frame SSH overhead, ~15-30 fps at 640×480).
+    Falls back to SSH JSON-line streaming (~5 fps) if the HTTP server cannot be
+    reached.
 
     Args:
-        fps:        Target capture rate (1–10 practical limit over SSH).
+        fps:        Target capture rate hint (used by SSH fallback; HTTP path
+                    runs at the camera's native rate).
         on_frame:   Optional callback(frame_b64: str, timestamp: float).
                     Defaults to viz.log_frame if not provided.
-        stop_event: Set this to stop the stream. If None, runs until SSH drops.
+        stop_event: Set this to stop the stream.
     """
     if on_frame is None:
         on_frame = viz.log_frame
 
+    try:
+        _stream_live_http(on_frame, stop_event)
+    except Exception as exc:
+        log.warning("Pi Camera HTTP stream failed (%s) — falling back to SSH stream", exc)
+        _stream_live_ssh(fps, on_frame, stop_event)
+
+
+def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
+    """Fast path: picamera2 MJPEG HTTP server read by OpenCV."""
+    import cv2
+
+    url = f"http://{config.RPI_HOST}:{config.PICAMERA_MJPEG_PORT}/"
+    server_stop = threading.Event()
+
+    def _run_server() -> None:
+        import paramiko as _pm
+
+        script = _PICAMERA_MJPEG_SERVER.format(
+            w=config.CAMERA_WIDTH,
+            h=config.CAMERA_HEIGHT,
+            port=config.PICAMERA_MJPEG_PORT,
+        )
+        ssh = _pm.SSHClient()
+        ssh.set_missing_host_key_policy(_pm.AutoAddPolicy())
+        ssh.connect(
+            config.RPI_HOST,
+            username=config.RPI_USER,
+            timeout=config.SSH_TIMEOUT,
+            look_for_keys=True,
+            allow_agent=True,
+        )
+        ssh.get_transport().sock.settimeout(None)
+        _, _so, _ = ssh.exec_command(
+            "fuser -k -TERM /dev/video0 /dev/video1 /dev/media0 2>/dev/null; sleep 0.4"
+        )
+        _so.channel.recv_exit_status()
+        preamble = "import os; os.dup2(os.open('/dev/null', os.O_WRONLY), 2)\n"
+        stdin, stdout, _ = ssh.exec_command("python3 -", timeout=None)
+        stdin.write((preamble + script).encode())
+        stdin.channel.shutdown_write()
+        try:
+            while not server_stop.is_set():
+                if stdout.channel.exit_status_ready():
+                    log.warning("Pi Camera MJPEG server exited unexpectedly")
+                    break
+                server_stop.wait(timeout=0.5)
+        finally:
+            stdin.channel.close()
+            ssh.close()
+
+    server_thread = threading.Thread(target=_run_server, daemon=True)
+    server_thread.start()
+    # Give picamera2 time to start and bind the HTTP port.
+    time.sleep(config.CAMERA_WARMUP + 1.5)
+
+    cap = cv2.VideoCapture(url)
+    if not cap.isOpened():
+        server_stop.set()
+        server_thread.join(timeout=5)
+        raise RuntimeError(f"Cannot connect to Pi Camera MJPEG server at {url}")
+
+    log.info("Pi Camera MJPEG stream started at %s", url)
+    try:
+        while stop_event is None or not stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                break
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            b64 = base64.b64encode(buf.tobytes()).decode()
+            ts = time.time()
+            _pi_cache.put(b64, ts, frame.shape[1], frame.shape[0])
+            on_frame(b64, ts)
+    finally:
+        cap.release()
+        server_stop.set()
+        server_thread.join(timeout=5)
+
+
+def _stream_live_ssh(fps: float, on_frame, stop_event: threading.Event | None) -> None:
+    """Slow-path fallback: SSH JSON-line stream (~5 fps)."""
     script = _STREAM_FRAMES.format(
         w=config.CAMERA_WIDTH,
         h=config.CAMERA_HEIGHT,
