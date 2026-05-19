@@ -146,6 +146,33 @@ def _capture_droidcam_background(
         log.debug("Background DroidCam capture failed: %s", exc)
 
 
+def _apply_optical_flow_per_camera(
+    annotated: list[tuple[float, str, str]],
+    raw: list[tuple[float, str, str]],
+) -> list[tuple[float, str, str]]:
+    """Add optical flow red arrows to annotated frames, processed per-camera.
+
+    Flow is computed from raw frames (no heading-arrow overlay) so the static
+    arrow pixels don't produce spurious flow vectors.
+    """
+    cam_indices: dict[str, list[int]] = {}
+    for i, (_, label, _) in enumerate(annotated):
+        cam_indices.setdefault(label, []).append(i)
+
+    cam_raw_b64: dict[str, list[str]] = {}
+    for _, label, b64 in raw:
+        cam_raw_b64.setdefault(label, []).append(b64)
+
+    result = list(annotated)
+    for label, indices in cam_indices.items():
+        ann_b64s = [annotated[i][2] for i in indices]
+        flow_b64s = heading.annotate_flow_sequence_jpeg_b64(ann_b64s, cam_raw_b64.get(label))
+        for idx, new_b64 in zip(indices, flow_b64s):
+            ts, lbl, _ = result[idx]
+            result[idx] = (ts, lbl, new_b64)
+    return result
+
+
 def _with_change_analysis(
     action_desc: str,
     expected: str,
@@ -227,6 +254,7 @@ def _with_change_analysis(
 
     annotated_video.sort(key=lambda x: x[0])
     raw_video.sort(key=lambda x: x[0])
+    annotated_video = _apply_optical_flow_per_camera(annotated_video, raw_video)
     labeled = [(label, b64) for _, label, b64 in annotated_video]
     raw_labeled = [(label, b64) for _, label, b64 in raw_video]
 

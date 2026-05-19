@@ -309,3 +309,84 @@ def annotate_jpeg_b64(b64: str) -> str:
     if out is raw:
         return b64
     return base64.b64encode(out).decode()
+
+
+# ── optical flow annotation ───────────────────────────────────────────────────
+
+_FLOW_COLOR_BGR = (0, 0, 220)   # red arrows
+_FLOW_GRID_STEP = 25            # sampling grid spacing (pixels)
+_FLOW_MIN_MAG = 1.5             # minimum flow magnitude to draw (pixels)
+_FLOW_ARROW_SCALE = 4.0         # visual amplification of arrow length
+
+
+def _draw_flow_arrows(dst: np.ndarray, prev_gray: np.ndarray, curr_gray: np.ndarray) -> np.ndarray:
+    """Compute Farneback optical flow and draw small red arrows on a copy of dst."""
+    flow = cv2.calcOpticalFlowFarneback(
+        prev_gray, curr_gray, None,
+        pyr_scale=0.5, levels=3, winsize=15,
+        iterations=3, poly_n=5, poly_sigma=1.1, flags=0,
+    )
+    h, w = dst.shape[:2]
+    out = dst.copy()
+    for y in range(_FLOW_GRID_STEP // 2, h, _FLOW_GRID_STEP):
+        for x in range(_FLOW_GRID_STEP // 2, w, _FLOW_GRID_STEP):
+            dx, dy = flow[y, x]
+            mag = math.hypot(dx, dy)
+            if mag < _FLOW_MIN_MAG:
+                continue
+            ex = max(0, min(w - 1, int(x + dx * _FLOW_ARROW_SCALE)))
+            ey = max(0, min(h - 1, int(y + dy * _FLOW_ARROW_SCALE)))
+            cv2.arrowedLine(out, (x, y), (ex, ey), _FLOW_COLOR_BGR, thickness=1, tipLength=0.3)
+    return out
+
+
+def annotate_flow_sequence_bgr(
+    annotated: list[np.ndarray],
+    raw: list[np.ndarray] | None = None,
+) -> list[np.ndarray]:
+    """Overlay optical flow red arrows onto a chronological sequence of BGR frames.
+
+    Flow is computed from `raw` (clean, no heading-arrow overlay) so static
+    arrow pixels don't produce spurious flow vectors. Arrows are drawn on
+    `annotated`. The first frame is returned unchanged (no prior frame).
+    """
+    src = raw if (raw is not None and len(raw) == len(annotated)) else annotated
+    if len(annotated) < 2:
+        return list(annotated)
+    result: list[np.ndarray] = [annotated[0]]
+    prev_gray = cv2.cvtColor(src[0], cv2.COLOR_BGR2GRAY)
+    for i in range(1, len(annotated)):
+        curr_gray = cv2.cvtColor(src[i], cv2.COLOR_BGR2GRAY)
+        result.append(_draw_flow_arrows(annotated[i], prev_gray, curr_gray))
+        prev_gray = curr_gray
+    return result
+
+
+def annotate_flow_sequence_jpeg_b64(
+    annotated_b64: list[str],
+    raw_b64: list[str] | None = None,
+) -> list[str]:
+    """JPEG base64 wrapper around annotate_flow_sequence_bgr. Returns original on failure."""
+    try:
+        def _dec(b: str) -> np.ndarray | None:
+            return cv2.imdecode(np.frombuffer(base64.b64decode(b), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        ann_bgr = [_dec(b) for b in annotated_b64]
+        if any(f is None for f in ann_bgr):
+            return annotated_b64
+
+        raw_bgr: list[np.ndarray] | None = None
+        if raw_b64 and len(raw_b64) == len(annotated_b64):
+            decoded_raw = [_dec(b) for b in raw_b64]
+            if all(f is not None for f in decoded_raw):
+                raw_bgr = decoded_raw  # type: ignore[assignment]
+
+        result_bgr = annotate_flow_sequence_bgr(ann_bgr, raw_bgr)  # type: ignore[arg-type]
+        out: list[str] = []
+        for i, frame in enumerate(result_bgr):
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            out.append(base64.b64encode(buf.tobytes()).decode() if ok else annotated_b64[i])
+        return out
+    except Exception as exc:
+        log.debug("annotate_flow_sequence_jpeg_b64 failed: %s", exc)
+        return annotated_b64
