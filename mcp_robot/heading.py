@@ -316,11 +316,12 @@ def annotate_jpeg_b64(b64: str) -> str:
 _FLOW_COLOR_BGR = (0, 0, 220)   # red arrows
 _FLOW_GRID_STEP = 25            # sampling grid spacing (pixels)
 _FLOW_MIN_MAG = 1.5             # minimum flow magnitude to draw (pixels)
-_FLOW_ARROW_SCALE = 4.0         # visual amplification of arrow length
+_FLOW_ARROW_SCALE = 6.0         # visual amplification of arrow length
+_FLOW_THICKNESS = 2             # arrow stroke thickness (px)
 
 
 def _draw_flow_arrows(dst: np.ndarray, prev_gray: np.ndarray, curr_gray: np.ndarray) -> np.ndarray:
-    """Compute Farneback optical flow and draw small red arrows on a copy of dst."""
+    """Compute Farneback optical flow and draw red arrows on a copy of dst."""
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
         pyr_scale=0.5, levels=3, winsize=15,
@@ -336,7 +337,7 @@ def _draw_flow_arrows(dst: np.ndarray, prev_gray: np.ndarray, curr_gray: np.ndar
                 continue
             ex = max(0, min(w - 1, int(x + dx * _FLOW_ARROW_SCALE)))
             ey = max(0, min(h - 1, int(y + dy * _FLOW_ARROW_SCALE)))
-            cv2.arrowedLine(out, (x, y), (ex, ey), _FLOW_COLOR_BGR, thickness=1, tipLength=0.3)
+            cv2.arrowedLine(out, (x, y), (ex, ey), _FLOW_COLOR_BGR, thickness=_FLOW_THICKNESS, tipLength=0.3)
     return out
 
 
