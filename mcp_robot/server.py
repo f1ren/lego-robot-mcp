@@ -117,6 +117,9 @@ def _capture_droidcam_background(
 
     Frames are stored raw (no heading arrow) so the VLM sees clean before/after
     comparisons without the arrow creating spurious motion detections.
+    cap.read() blocks until the next frame arrives from DroidCam's MJPEG stream,
+    naturally capping at DroidCam's native rate; we add a sleep only when our
+    target fps is lower than what the camera delivers.
     """
     try:
         import cv2
@@ -124,7 +127,8 @@ def _capture_droidcam_background(
         if not cap.isOpened():
             log.debug("Background DroidCam capture: could not open stream")
             return
-        interval = 1.0 / fps
+        target_fps = config.DROIDCAM_CAPTURE_FPS
+        interval = 1.0 / target_fps
         try:
             while not stop_event.is_set():
                 t0 = time.time()
@@ -216,7 +220,7 @@ def _with_change_analysis(
             raw_video.append((ts, "droidcam", b64))
             annotated_video.append((ts, "droidcam", _maybe_annotate(b64)))
     else:
-        droid_clip = cam_mod._droidcam_cache.clip_since(t_start, _ACTION_VIDEO_FPS)
+        droid_clip = cam_mod._droidcam_cache.clip_since(t_start, config.DROIDCAM_CAPTURE_FPS)
         if droid_clip:
             for f in droid_clip:
                 raw_video.append((f["ts"], "droidcam", f["frame"]))
@@ -625,7 +629,7 @@ def get_robot_state() -> list[ImageContent | TextContent]:
 # ── task video ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def compile_video(since: str, output_fps: float = 5.0) -> dict:
+def compile_video(since: str, output_fps: float = config.DROIDCAM_CAPTURE_FPS) -> dict:
     """
     Compile a task video from all action-video folders captured since a given
     timestamp. Only frames where motion was detected (pixel diff vs. neighbour
@@ -637,7 +641,7 @@ def compile_video(since: str, output_fps: float = 5.0) -> dict:
         since:      ISO-style datetime string marking the start of the task,
                     e.g. "20260507_143022" (same format as folder names), or a
                     UNIX timestamp as a string (e.g. "1746613200.0").
-        output_fps: Playback frame rate of the output video (default 5.0).
+        output_fps: Playback frame rate of the output video (default: DROIDCAM_CAPTURE_FPS).
 
     Returns a dict with video_path, total_frames, motion_frames, action_count.
     """
