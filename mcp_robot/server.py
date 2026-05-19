@@ -338,7 +338,7 @@ def get_motor_positions() -> dict:
 
 
 @mcp.tool()
-def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", context: str = "") -> dict:
+def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", context: str = "") -> dict:
     """
     Move a single motor port by the given number of degrees.
 
@@ -489,14 +489,14 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
 # ── gripper ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def control_gripper(action: str, speed: int = 25, expected: str = "", context: str = "") -> dict:
+def control_gripper(action: str, speed: int = 20, expected: str = "", context: str = "") -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
     Gemini-generated `change_description`.
 
     Args:
         action:   "open" or "close".
-        speed:    Motor speed, 1–30.
+        speed:    Motor speed, 1–20.
         expected: Short, precise description of the expected outcome
                   (e.g. "gripper closes around the ball").
         context:  Why this action is being taken and hints for evaluation
