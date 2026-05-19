@@ -287,12 +287,9 @@ class _Handler(BaseHTTPRequestHandler):
                 with _buf.cond:
                     _buf.cond.wait()
                     frame = _buf.frame
-                hdr = (
-                    b'--FRAME\r\n'
-                    b'Content-Type: image/jpeg\r\n'
-                    b'Content-Length: ' + str(len(frame)).encode() + b'\r\n\r\n'
-                )
-                self.wfile.write(hdr + frame + b'\r\n')
+                hdr = (b'--FRAME\\r\\nContent-Type: image/jpeg\\r\\nContent-Length: '
+                       + str(len(frame)).encode() + b'\\r\\n\\r\\n')
+                self.wfile.write(hdr + frame + b'\\r\\n')
         except Exception:
             pass
     def log_message(self, *a): pass
@@ -440,14 +437,14 @@ def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
             "fuser -k -TERM /dev/video0 /dev/video1 /dev/media0 2>/dev/null; sleep 0.4"
         )
         _so.channel.recv_exit_status()
-        preamble = "import os; os.dup2(os.open('/dev/null', os.O_WRONLY), 2)\n"
-        stdin, stdout, _ = ssh.exec_command("python3 -", timeout=None)
-        stdin.write((preamble + script).encode())
+        stdin, stdout, stderr = ssh.exec_command("python3 -", timeout=None)
+        stdin.write(script.encode())
         stdin.channel.shutdown_write()
         try:
             while not server_stop.is_set():
                 if stdout.channel.exit_status_ready():
-                    log.warning("Pi Camera MJPEG server exited unexpectedly")
+                    err = stderr.read().decode(errors="replace").strip()
+                    log.warning("Pi Camera MJPEG server exited unexpectedly. stderr: %s", err or "(empty)")
                     break
                 server_stop.wait(timeout=0.5)
         finally:
@@ -456,11 +453,21 @@ def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
 
     server_thread = threading.Thread(target=_run_server, daemon=True)
     server_thread.start()
-    # Give picamera2 time to start and bind the HTTP port.
-    time.sleep(config.CAMERA_WARMUP + 1.5)
 
-    cap = cv2.VideoCapture(url)
-    if not cap.isOpened():
+    # Poll until the MJPEG server is accepting connections (up to 8 s).
+    # SSH + fuser + picamera2 + MJPEGEncoder init can take 3-5 s total.
+    time.sleep(1.5)
+    cap = None
+    deadline = time.time() + 6.5
+    while time.time() < deadline:
+        c = cv2.VideoCapture(url)
+        if c.isOpened():
+            cap = c
+            break
+        c.release()
+        time.sleep(0.5)
+
+    if cap is None:
         server_stop.set()
         server_thread.join(timeout=5)
         raise RuntimeError(f"Cannot connect to Pi Camera MJPEG server at {url}")
