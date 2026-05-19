@@ -285,7 +285,7 @@ def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", con
         port:     BuildHat port — "A", "B", "C", or "D".
         degrees:  Positive = one direction, negative = opposite.
                   Use small values (e.g. 30–90) to start with.
-        speed:    Motor speed, 1–100.
+        speed:    Motor speed, 1–20.
         expected: Short, precise description of what should physically happen
                   (e.g. "arm rotates down 45°"). Defaults to a technical summary.
         context:  Why this action is being taken and hints for evaluation
@@ -294,8 +294,8 @@ def move_motor(port: str, degrees: int, speed: int = 50, expected: str = "", con
     log.info("[TOOL] move_motor port=%r degrees=%r speed=%r", port, degrees, speed)
     if port.upper() not in ("A", "B", "C", "D"):
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
-    if not (1 <= abs(speed) <= 100):
-        return _err("speed must be between 1 and 100.")
+    if not (1 <= abs(speed) <= 20):
+        return _err("speed must be between 1 and 20.")
     p = port.upper()
     role = {
         config.PORT_LEFT_WHEEL:  "left wheel turns (may translate or pivot the robot)",
@@ -331,8 +331,8 @@ def drive(
     Gemini-generated `change_description` alongside motor positions.
 
     Args:
-        left_speed:  Speed for the left wheel, -100 to 100. Positive = forward.
-        right_speed: Speed for the right wheel, -100 to 100. Positive = forward.
+        left_speed:  Speed for the left wheel, -20 to 20. Positive = forward.
+        right_speed: Speed for the right wheel, -20 to 20. Positive = forward.
                      To rotate/turn, use inverse values, left_speed = -right_speed.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
         expected:    Short, precise description of the expected motion
@@ -371,8 +371,8 @@ def drive_degrees(
 
     Args:
         degrees:     How far each wheel rotates (encoder degrees, positive).
-        left_speed:  Left wheel speed, -100 to 100. Positive = forward.
-        right_speed: Right wheel speed, -100 to 100. Positive = forward.
+        left_speed:  Left wheel speed, -20 to 20. Positive = forward.
+        right_speed: Right wheel speed, -20 to 20. Positive = forward.
                      For an in-place turn use opposite signs, e.g. left=50 right=-50.
         expected:    Short description of the expected outcome
                      (e.g. "robot rotates clockwise ~90°").
@@ -401,7 +401,7 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
     Args:
         degrees:  How far to move. Positive = down, negative = up.
                   Start with values like ±30–90 and adjust based on results.
-        speed:    Motor speed, 1–100.
+        speed:    Motor speed, 1–20.
         expected: Short, precise description of the expected outcome
                   (e.g. "arm moves down ~45°, tip reaches ball height").
         context:  Why this action is being taken and hints for evaluation
@@ -432,7 +432,7 @@ def control_gripper(action: str, speed: int = 25, expected: str = "", context: s
 
     Args:
         action:   "open" or "close".
-        speed:    Motor speed, 1–100.
+        speed:    Motor speed, 1–30.
         expected: Short, precise description of the expected outcome
                   (e.g. "gripper closes around the ball").
         context:  Why this action is being taken and hints for evaluation

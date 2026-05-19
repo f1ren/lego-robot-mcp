@@ -43,41 +43,45 @@ print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
 
 _DRIVE_WHEELS = """
 import json
-from buildhat import Motor, MotorPair
+from buildhat import MotorPair
 
 # MotorPair is required here — it is the only BuildHAT API that commands
 # both wheel motors in a single firmware call, guaranteeing synchronised
 # start and stop.  Replacing this with two separate Motor instances would
 # cause each motor to start/stop independently, producing timing skew,
 # unpredictable heading drift, and non-repeatable manoeuvres.
+#
+# WARNING: never `del pair` (or any Motor/MotorPair) — BuildHAT triggers a
+# firmware jitter on destruction that makes motors twitch.  Read encoder
+# positions via pair._leftmotor / pair._rightmotor instead of re-creating
+# Motor objects after the move.
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.run_for_seconds({duration}, {left_speed}, {right_speed})
-del pair
-left  = Motor({left_port!r})
-right = Motor({right_port!r})
-print(json.dumps({{"left": left.get_position(), "right": right.get_position()}}))
+print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
 """
 
 _STOP_WHEELS = """
 import json
-from buildhat import Motor, MotorPair
+from buildhat import MotorPair
 
 # MotorPair is required here — it is the only BuildHAT API that commands
 # both wheel motors in a single firmware call, guaranteeing synchronised
 # start and stop.  Replacing this with two separate Motor instances would
 # cause each motor to start/stop independently, producing timing skew,
 # unpredictable heading drift, and non-repeatable manoeuvres.
+#
+# WARNING: never `del pair` (or any Motor/MotorPair) — BuildHAT triggers a
+# firmware jitter on destruction that makes motors twitch.  Read encoder
+# positions via pair._leftmotor / pair._rightmotor instead of re-creating
+# Motor objects after the move.
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.stop()
-del pair
-left  = Motor({left_port!r})
-right = Motor({right_port!r})
-print(json.dumps({{"ok": True, "left": left.get_position(), "right": right.get_position()}}))
+print(json.dumps({{"ok": True, "left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
 """
 
 _DRIVE_WHEELS_BY_DEGREES = """
 import json
-from buildhat import Motor, MotorPair
+from buildhat import MotorPair
 
 # MotorPair is required here — it is the only BuildHAT API that commands
 # both wheel motors in a single firmware call, guaranteeing synchronised
@@ -85,12 +89,14 @@ from buildhat import Motor, MotorPair
 # cause each motor to start/stop independently, producing timing skew,
 # unpredictable heading drift, and non-repeatable manoeuvres.  This is
 # especially critical for angle-based driving where precision matters.
+#
+# WARNING: never `del pair` (or any Motor/MotorPair) — BuildHAT triggers a
+# firmware jitter on destruction that makes motors twitch.  Read encoder
+# positions via pair._leftmotor / pair._rightmotor instead of re-creating
+# Motor objects after the move.
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.run_for_degrees({degrees}, {left_speed}, {right_speed})
-del pair
-left  = Motor({left_port!r})
-right = Motor({right_port!r})
-print(json.dumps({{"left": left.get_position(), "right": right.get_position()}}))
+print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
 """
 
 
