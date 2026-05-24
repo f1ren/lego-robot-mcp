@@ -15,7 +15,8 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Arm & gripper
   ─────────────
-  move_arm               Move arm up or down
+  move_arm               Move arm up or down (downward moves end with a 20° raise)
+  lower_arm              Lower arm fully to ground then raise 20° for wheel clearance
   control_gripper        Open or close the gripper
 
   High-level actions
@@ -81,7 +82,7 @@ mcp = FastMCP(
         "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
         "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
         "Always call get_robot_state before planning a sequence of actions. "
-        "Motor-action tools (move_motor, drive, move_arm, control_gripper, "
+        "Motor-action tools (move_motor, drive, move_arm, lower_arm, control_gripper, "
         "put) automatically record a video of the motion and return a "
         "vision-model `change_description` summarising what happened — "
         "you do NOT need to call capture_image afterwards to verify them. "
@@ -506,9 +507,10 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
+    suffix = "; then raises 20° to clear gripper from ground" if degrees > 0 else ""
     expected_str = expected if expected else (
-        f"arm moves {direction} by ~{abs(degrees)}° — visible in droidcam (arm angle "
-        f"changes); pi_camera view may tilt as the arm pose shifts; wheels and gripper unchanged"
+        f"arm moves {direction} by ~{abs(degrees)}°{suffix} — visible in 3rd party cam (arm angle "
+        f"changes); front camera may show arm entering or leaving frame; wheels and gripper unchanged"
     )
     return _with_change_analysis(
         f"move arm by {degrees}° (positive=down, negative=up) at speed {speed}",
@@ -516,6 +518,34 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
         lambda: robot_mod.move_arm(degrees, speed),
         context=context,
         annotate=False,  # arrow masks arm position — suppress for arm actions
+    )
+
+
+@mcp.tool()
+def lower_arm(speed: int = 30, expected: str = "", context: str = "") -> dict:
+    """
+    Lower the robot arm fully to ground level, then raise it 20° to keep the
+    gripper clear of the floor and maximise wheel normal force. Captures
+    before/after images and returns a Gemini-generated `change_description`.
+
+    Args:
+        speed:    Motor speed, 15–20.
+        expected: Short, precise description of the expected outcome.
+        context:  Why this action is being taken and hints for evaluation.
+    """
+    log.info("[TOOL] lower_arm speed=%r", speed)
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+    expected_str = expected if expected else (
+        f"arm lowers fully to ground level (~{config.ARM_DOWN_DEG}°), then raises 20° "
+        "so the gripper just clears the floor; final arm position is slightly above ground"
+    )
+    return _with_change_analysis(
+        f"lower arm to ground level then raise 20° at speed {speed}",
+        expected_str,
+        lambda: robot_mod.lower_arm(speed),
+        context=context,
+        annotate=False,
     )
 
 
