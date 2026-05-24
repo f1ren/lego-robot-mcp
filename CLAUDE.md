@@ -22,6 +22,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 4. If the action verdict is NO or PARTIAL, stop and answer this question: Could there be a problem in the code? Should you fix it before moving on?
 5. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
 6. **Prefer slower, longer motions over fast, short ones.** High speeds cause the robot to jitter and overshoot, making outcomes harder to control and verify. Slower and larger moves also produce clearer visual changes, making them easier for the Visual Temporal Reasoning model to assess correctly.
+7. **Minimum motor speed is 15.** Never pass a speed below 15 to any motor tool. Below this threshold motion is too slow to be reliably detected by the CV pipeline, making it impossible to verify whether the action succeeded.
 
 ## Experience Memory Workflow
 

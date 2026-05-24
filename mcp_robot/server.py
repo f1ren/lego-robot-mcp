@@ -349,7 +349,7 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
         port:     BuildHat port — "A", "B", "C", or "D".
         degrees:  Positive = one direction, negative = opposite.
                   Use small values (e.g. 30–90) to start with.
-        speed:    Motor speed, 1–20.
+        speed:    Motor speed, 15–20.
         expected: Short, precise description of what should physically happen
                   (e.g. "arm rotates down 45°"). Defaults to a technical summary.
         context:  Why this action is being taken and hints for evaluation
@@ -358,8 +358,8 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
     log.info("[TOOL] move_motor port=%r degrees=%r speed=%r", port, degrees, speed)
     if port.upper() not in ("A", "B", "C", "D"):
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
-    if not (1 <= abs(speed) <= 20):
-        return _err("speed must be between 1 and 20.")
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     p = port.upper()
     role = {
         config.PORT_LEFT_WHEEL:  "left wheel turns (may translate or pivot the robot)",
@@ -395,8 +395,8 @@ def drive(
     Gemini-generated `change_description` alongside motor positions.
 
     Args:
-        left_speed:  Speed for the left wheel, -20 to 20. Positive = forward.
-        right_speed: Speed for the right wheel, -20 to 20. Positive = forward.
+        left_speed:  Speed for the left wheel, -20 to -15, 0, or 15 to 20. Positive = forward.
+        right_speed: Speed for the right wheel, -20 to -15, 0, or 15 to 20. Positive = forward.
                      To rotate/turn, use inverse values, left_speed = -right_speed.
         duration_s:  How long to run (seconds). Pass 0 to stop both wheels.
         expected:    Short, precise description of the expected motion
@@ -405,6 +405,9 @@ def drive(
                      (e.g. "approaching the ball; previous attempt turned clockwise instead").
     """
     log.info("[TOOL] drive left_speed=%r right_speed=%r duration_s=%r", left_speed, right_speed, duration_s)
+    for name, val in (("left_speed", left_speed), ("right_speed", right_speed)):
+        if val != 0 and not (config.SPEED_MIN <= abs(val) <= config.SPEED_MAX):
+            return _err(f"{name} must be 0 or between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     desc = (
         "stop wheels"
         if duration_s == 0
@@ -435,14 +438,17 @@ def drive_degrees(
 
     Args:
         degrees:     How far each wheel rotates (encoder degrees, positive).
-        left_speed:  Left wheel speed, -20 to 20. Positive = forward.
-        right_speed: Right wheel speed, -20 to 20. Positive = forward.
+        left_speed:  Left wheel speed, -20 to -15, 0, or 15 to 20. Positive = forward.
+        right_speed: Right wheel speed, -20 to -15, 0, or 15 to 20. Positive = forward.
                      For an in-place turn use opposite signs, e.g. left=50 right=-50.
         expected:    Short description of the expected outcome
                      (e.g. "robot rotates clockwise ~90°").
         context:     Why this action is being taken and hints for evaluation.
     """
     log.info("[TOOL] drive_degrees degrees=%r left_speed=%r right_speed=%r", degrees, left_speed, right_speed)
+    for name, val in (("left_speed", left_speed), ("right_speed", right_speed)):
+        if val != 0 and not (config.SPEED_MIN <= abs(val) <= config.SPEED_MAX):
+            return _err(f"{name} must be 0 or between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     desc = f"drive_degrees degrees={degrees} left={left_speed} right={right_speed}"
     expected_str = expected if expected else (
         "robot moves or pivots a precise distance; observe droidcam for direction and angle"
@@ -465,13 +471,15 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
     Args:
         degrees:  How far to move. Positive = down, negative = up.
                   Start with values like ±30–90 and adjust based on results.
-        speed:    Motor speed, 1–20.
+        speed:    Motor speed, 15–20.
         expected: Short, precise description of the expected outcome
                   (e.g. "arm moves down ~45°, tip reaches ball height").
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "positioning arm to grasp ball; last attempt stopped too high").
     """
     log.info("[TOOL] move_arm degrees=%r speed=%r", degrees, speed)
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
     expected_str = expected if expected else (
         f"arm moves {direction} by ~{abs(degrees)}° — visible in droidcam (arm angle "
@@ -496,13 +504,15 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
 
     Args:
         action:   "open" or "close".
-        speed:    Motor speed, 1–20.
+        speed:    Motor speed, 15–20.
         expected: Short, precise description of the expected outcome
                   (e.g. "gripper closes around the ball").
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "grasping paper ball; previous close attempt slipped off").
     """
     log.info("[TOOL] control_gripper action=%r speed=%r", action, speed)
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     expected_str = expected if expected else (
         "gripper jaws open (visibly wider gap between fingers); robot pose and arm unchanged"
         if action == "open"

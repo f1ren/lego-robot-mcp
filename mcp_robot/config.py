@@ -35,6 +35,13 @@ GRIPPER_CLOSED_DEG = int(os.getenv("GRIPPER_CLOSED_DEG", "90"))
 ARM_UP_DEG   = int(os.getenv("ARM_UP_DEG",   "0"))    # home / retracted
 ARM_DOWN_DEG = int(os.getenv("ARM_DOWN_DEG", "90"))   # extended / lowered
 
+# ── Speed limits ─────────────────────────────────────────────────────────────
+# Minimum absolute speed for any motor action. Below this threshold motion is
+# too slow for the CV pipeline to reliably detect, making success verification
+# impossible. Wheel speeds may also be 0 (coast / pivot one wheel).
+SPEED_MIN = int(os.getenv("SPEED_MIN", "15"))
+SPEED_MAX = int(os.getenv("SPEED_MAX", "20"))
+
 # ── Default speeds (range -100 to 100) ───────────────────────────────────────
 DEFAULT_WHEEL_SPEED   = int(os.getenv("DEFAULT_WHEEL_SPEED",   "50"))
 DEFAULT_ARM_SPEED     = int(os.getenv("DEFAULT_ARM_SPEED",     "30"))
