@@ -394,7 +394,23 @@ def describe_action_video(
         return "Verdict: NO — no motion detected in video\nChanges: No motion was detected in the captured video frames; the robot may not have moved."
 
     labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths)
-    log.info("Video vision query: backend=%s action=%r frames=%d (subsampled)",
+
+    # Collapse each camera's subsampled frames into a single stacked composite.
+    cameras_ordered: dict[str, list[tuple[int, str]]] = {}
+    for i, (label, b64) in enumerate(labeled_frames):
+        cameras_ordered.setdefault(label, []).append((i, b64))
+    stacked_labeled: list[tuple[str, str]] = []
+    stacked_paths: list[str | None] = []
+    paths_list = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
+    for label, indexed in cameras_ordered.items():
+        b64s = [b64 for _, b64 in indexed]
+        stacked_b64 = stack_frames(b64s) if len(b64s) > 1 else b64s[0]
+        stacked_labeled.append((label, stacked_b64))
+        stacked_paths.append(paths_list[indexed[-1][0]])  # last frame path for logging
+    labeled_frames = stacked_labeled
+    frame_paths = stacked_paths
+
+    log.info("Video vision query: backend=%s action=%r frames=%d (stacked per camera)",
              config.VISION_BACKEND, action, len(labeled_frames))
 
     backend = config.VISION_BACKEND
