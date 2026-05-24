@@ -49,6 +49,16 @@ This project uses `mcp-memory-service` (`experience-memory` MCP server) to accum
 **Skill extraction:** when you have enough consolidated learnings, use `memory_list` to pull recent memories and synthesize the patterns. Prefer encoding the lesson as **code** (more precise, cheaper to run). Only create a **skill** when code can't solve it — i.e. when the lesson is a playbook: a class of situations requiring judgment, reflection, or a sequence of code changes rather than a single repeatable action.
 
 
+## Local VQA (Ollama / Qwen) — Human Review Pause
+
+When `VISION_BACKEND=ollama` is set, the local Qwen model is used for VQA instead of Gemini. After every motor-action tool call (`drive`, `drive_degrees`, `move_arm`, `control_gripper`, `put`, `move_motor`):
+
+1. **Stop.** Do not proceed to the next planned action.
+2. **Ask:** "Please review the log — should I proceed?"
+3. **Wait for the user's confirmation** before issuing any further motor commands.
+
+Skip the pause when using Gemini (`VISION_BACKEND=gemini` or `VISION_BACKEND=auto` with Gemini succeeding).
+
 ## Technical Details
 
 1. The MCP runs in virtual environment.
