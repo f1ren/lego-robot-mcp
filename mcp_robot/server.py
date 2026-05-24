@@ -104,22 +104,26 @@ def _err(msg: str) -> dict:
 
 
 _MAX_PIXELS = 1_000_000  # ~1 megapixel cap for images sent to AI agents
+_STATE_MAX_PIXELS = 76_800  # 320×240 — small thumbnail for get_robot_state
 
 
-def _scale_jpeg_b64(frame_b64: str) -> str:
-    """Scale a base64 JPEG down to ≤ _MAX_PIXELS, preserving aspect ratio."""
+def _scale_jpeg_b64(frame_b64: str, max_pixels: int = _MAX_PIXELS, quality: int = 85) -> str:
+    """Scale a base64 JPEG down to ≤ max_pixels, preserving aspect ratio."""
     raw = base64.b64decode(frame_b64)
     arr = np.frombuffer(raw, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         return frame_b64
     h, w = img.shape[:2]
-    if w * h <= _MAX_PIXELS:
-        return frame_b64
-    scale = (_MAX_PIXELS / (w * h)) ** 0.5
+    if w * h <= max_pixels and quality == 85:
+        return frame_b64  # already small enough, avoid re-encoding
+    if w * h <= max_pixels:
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return base64.b64encode(buf.tobytes()).decode() if ok else frame_b64
+    scale = (max_pixels / (w * h)) ** 0.5
     new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
     img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         return frame_b64
     return base64.b64encode(buf.tobytes()).decode()
@@ -127,6 +131,12 @@ def _scale_jpeg_b64(frame_b64: str) -> str:
 
 def _image_content(frame_b64: str) -> ImageContent:
     return ImageContent(type="image", data=_scale_jpeg_b64(frame_b64), mimeType="image/jpeg")
+
+
+def _thumbnail_image_content(frame_b64: str) -> ImageContent:
+    """Compact thumbnail (320×240 max, quality 65) for state snapshots."""
+    data = _scale_jpeg_b64(frame_b64, max_pixels=_STATE_MAX_PIXELS, quality=65)
+    return ImageContent(type="image", data=data, mimeType="image/jpeg")
 
 
 
@@ -664,7 +674,6 @@ def get_robot_state() -> list[ImageContent | TextContent]:
     log.info("[TOOL] get_robot_state")
     try:
         positions = robot_mod.get_all_positions()
-        pi_frame = cam_mod.capture_still()
         summary = (
             f"Motor positions — "
             f"left_wheel: {positions['left_wheel']}°, "
@@ -672,16 +681,13 @@ def get_robot_state() -> list[ImageContent | TextContent]:
             f"arm: {positions['arm']}°, "
             f"gripper: {positions['gripper']}°"
         )
-        content: list[ImageContent | TextContent] = [
-            TextContent(type="text", text="Pi Camera (front view):"),
-            _image_content(pi_frame["frame"]),
-        ]
+        content: list[ImageContent | TextContent] = []
         try:
             droid_frame = cam_mod.capture_droidcam_still()
-            content.append(TextContent(type="text", text="DroidCam (third-person view):"))
-            content.append(_image_content(droid_frame["frame"]))
+            content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
+            content.append(_thumbnail_image_content(droid_frame["frame"]))
         except Exception as exc:
-            content.append(TextContent(type="text", text=f"DroidCam unavailable: {exc}"))
+            content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         content.append(TextContent(type="text", text=summary))
         return content
     except Exception as exc:
