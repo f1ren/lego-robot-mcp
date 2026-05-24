@@ -542,7 +542,7 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
     if action == "open":
         # Opening almost always succeeds — skip VQA to avoid the expense.
         try:
-            return {"ok": True, **robot_mod.control_gripper(action, speed)}
+            return {"ok": True, "change_description": "Skipped description, because gripper 'open' almost always works", **robot_mod.control_gripper(action, speed)}
         except Exception as exc:
             return _err(str(exc))
 
