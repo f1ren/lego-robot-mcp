@@ -523,13 +523,20 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
     log.info("[TOOL] control_gripper action=%r speed=%r", action, speed)
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+
+    if action == "open":
+        # Opening almost always succeeds — skip VQA to avoid the expense.
+        try:
+            return {"ok": True, **robot_mod.control_gripper(action, speed)}
+        except Exception as exc:
+            return _err(str(exc))
+
+    # Closing: verify that any object between the fingers is now grasped.
     expected_str = expected if expected else (
-        "gripper jaws open (visibly wider gap between fingers); robot pose and arm unchanged"
-        if action == "open"
-        else "gripper jaws close (gap narrows; if an object is between them, it is now grasped); robot pose and arm unchanged"
+        "gripper jaws close (gap narrows; if an object is between them, it is now grasped); robot pose and arm unchanged"
     )
     return _with_change_analysis(
-        f"{action} gripper at speed {speed}",
+        f"close gripper at speed {speed}",
         expected_str,
         lambda: robot_mod.control_gripper(action, speed),
         context=context,
