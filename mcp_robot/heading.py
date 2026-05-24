@@ -253,19 +253,20 @@ def _draw_arrow(bgr: np.ndarray, heading: Heading) -> np.ndarray:
     # can tell whether "forward" actually meets the target.
     length = int(diag * 0.45)
 
-    start = heading.arrow_anchor
+    start = heading.body_center
     end_x = int(start[0] + heading.forward[0] * length)
     end_y = int(start[1] + heading.forward[1] * length)
     # Clamp end-point inside the frame so the arrowhead is always visible.
     end_x = max(0, min(w - 1, end_x))
     end_y = max(0, min(h - 1, end_y))
 
-    out = bgr.copy()
+    overlay = bgr.copy()
     cv2.arrowedLine(
-        out, start, (end_x, end_y),
+        overlay, start, (end_x, end_y),
         _ARROW_COLOR_BGR, thickness=thickness, tipLength=0.08,
     )
-    return out
+    # 70% transparent → blend at 30% opacity
+    return cv2.addWeighted(overlay, 0.30, bgr, 0.70, 0)
 
 
 def annotate_bgr(bgr: np.ndarray) -> np.ndarray:
