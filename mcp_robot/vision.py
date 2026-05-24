@@ -427,6 +427,50 @@ def describe_action_video(
         return f"(vision analysis failed: {exc})"
 
 
+def stack_frames(frames_b64: Sequence[str], quality: int = 90) -> str:
+    """
+    Composite N frames into one image where later frames appear more opaque.
+
+    Frame i gets weight (i+1) / sum(1..N), so the earliest frame is the most
+    transparent ghost and the final frame is the most visible layer.
+
+    Args:
+        frames_b64: Base64-encoded JPEG frames, oldest first.
+        quality:    JPEG quality for the output image (default 90).
+
+    Returns a base64-encoded JPEG of the composited result.
+    """
+    import cv2
+
+    if not frames_b64:
+        raise ValueError("frames_b64 must not be empty")
+
+    decoded = []
+    for b64 in frames_b64:
+        data = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Could not decode a frame as JPEG")
+        decoded.append(img.astype(np.float32))
+
+    n = len(decoded)
+    weights = [i + 1 for i in range(n)]  # [1, 2, 3, ...] — later = heavier
+    total = sum(weights)
+
+    h, w = decoded[0].shape[:2]
+    composite = np.zeros((h, w, 3), dtype=np.float32)
+    for frame, weight in zip(decoded, weights):
+        if frame.shape[:2] != (h, w):
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+        composite += frame * (weight / total)
+
+    result = np.clip(composite, 0, 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", result, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError("Failed to encode stacked frame as JPEG")
+    return base64.b64encode(buf.tobytes()).decode()
+
+
 def describe_clip(
     camera: str,
     frames: Sequence[str],
