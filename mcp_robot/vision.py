@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import threading
 import time
 from typing import Sequence
@@ -406,7 +407,15 @@ def describe_action_video(
         b64s = [b64 for _, b64 in indexed]
         stacked_b64 = stack_frames(b64s) if len(b64s) > 1 else b64s[0]
         stacked_labeled.append((label, stacked_b64))
-        stacked_paths.append(paths_list[indexed[-1][0]])  # last frame path for logging
+        last_path = paths_list[indexed[-1][0]]
+        stacked_path: str | None = None
+        if last_path and len(b64s) > 1:
+            stacked_path = os.path.join(os.path.dirname(last_path), f"{label}_stacked.jpg")
+            with open(stacked_path, "wb") as fh:
+                fh.write(base64.b64decode(stacked_b64))
+        else:
+            stacked_path = last_path
+        stacked_paths.append(stacked_path)
     labeled_frames = stacked_labeled
     frame_paths = stacked_paths
 
