@@ -214,6 +214,7 @@ def _with_change_analysis(
     action_fn,
     context: str = "",
     annotate: bool = True,
+    vqa_cameras: set[str] | None = None,
 ) -> dict:
     """
     Record a video of the action, then ask the vision model whether the
@@ -230,6 +231,9 @@ def _with_change_analysis(
               does not cover the arm or gripper and confuse the model about
               their state. Pass True (default) for drive/turn actions where
               heading information is needed for evaluation.
+    vqa_cameras: set of camera labels to include in the VQA call (e.g.
+              {"droidcam"}). None (default) means all cameras. Frames from
+              excluded cameras are still saved to disk but not sent to VQA.
 
     On action error, returns _err(...) and skips vision.
     On vision failure, the action result is returned without change_description.
@@ -326,9 +330,16 @@ def _with_change_analysis(
         )
 
     out = _ok(result)
+    if vqa_cameras is not None:
+        vqa_indices = [i for i, (lbl, _) in enumerate(labeled) if lbl in vqa_cameras]
+        vqa_labeled = [labeled[i] for i in vqa_indices]
+        vqa_raw = [raw_labeled[i] for i in vqa_indices]
+        vqa_paths = [frame_paths[i] for i in vqa_indices]
+    else:
+        vqa_labeled, vqa_raw, vqa_paths = labeled, raw_labeled, frame_paths
     description = vision.describe_action_video(
-        action_desc, expected, labeled, frame_paths, context=context,
-        raw_labeled_frames=raw_labeled,
+        action_desc, expected, vqa_labeled, vqa_paths, context=context,
+        raw_labeled_frames=vqa_raw,
     )
     if description:
         out["change_description"] = description
@@ -381,12 +392,14 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
     # Wheel ports (A, B) need the heading arrow for direction evaluation.
     # Arm (D) and gripper (C) ports must NOT have the arrow — it masks their state.
     wheel_ports = {config.PORT_LEFT_WHEEL, config.PORT_RIGHT_WHEEL}
+    is_wheel = p in wheel_ports
     return _with_change_analysis(
         f"move_motor port={p} degrees={degrees} speed={speed}",
         expected_str,
         lambda: robot_mod.move_motor(p, degrees, speed),
         context=context,
-        annotate=(p in wheel_ports),
+        annotate=is_wheel,
+        vqa_cameras={"droidcam"} if is_wheel else None,
     )
 
 
@@ -427,6 +440,7 @@ def drive(
     return _with_change_analysis(
         desc, expected_str, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
         context=context,
+        vqa_cameras={"droidcam"},
     )
 
 
@@ -467,6 +481,7 @@ def drive_degrees(
         desc, expected_str,
         lambda: robot_mod.drive_degrees(degrees, left_speed, right_speed),
         context=context,
+        vqa_cameras={"droidcam"},
     )
 
 
