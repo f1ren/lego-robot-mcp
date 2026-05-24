@@ -266,7 +266,7 @@ def _draw_arrow(bgr: np.ndarray, heading: Heading) -> np.ndarray:
         _ARROW_COLOR_BGR, thickness=thickness, tipLength=0.08,
     )
     # 70% transparent → blend at 30% opacity
-    return cv2.addWeighted(overlay, 0.30, bgr, 0.70, 0)
+    return cv2.addWeighted(overlay, 0.50, bgr, 0.50, 0)
 
 
 def annotate_bgr(bgr: np.ndarray) -> np.ndarray:
