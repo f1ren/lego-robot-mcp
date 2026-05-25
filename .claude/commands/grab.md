@@ -16,7 +16,7 @@ Describe out loud:
 
 The object is **ready to be grabbed** only when BOTH of the following are true simultaneously:
 1. The object is at least **touching the robot's front body** (gripper end).
-2. The object is at least **touching (overlapping) the green forward-arrow** overlay in the external camera frame.
+2. The green forward-arrow is **well over the object** — not merely touching its edge, but clearly passing through or covering it in the external camera frame.
 
 **If either condition is unmet → do NOT close the gripper.** Instead go to Step 3.
 **If both conditions are met → skip to Step 4.**
