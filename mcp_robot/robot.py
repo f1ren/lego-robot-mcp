@@ -283,6 +283,8 @@ def control_gripper(
     # existing motor wiring convention used when the absolute approach worked).
     degrees = -config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
     result = move_motor(config.PORT_GRIPPER, degrees, speed)
+    if action == "open":
+        move_motor(config.PORT_GRIPPER, 17, speed)  # close 17° to release pressure from wheels
     result["action"] = action
     _gripper_state = action
     return result

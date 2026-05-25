@@ -17,7 +17,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
-  control_gripper        Open or close the gripper
+  control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
   ──────────────────
