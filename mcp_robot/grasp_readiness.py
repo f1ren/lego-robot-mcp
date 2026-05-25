@@ -15,13 +15,16 @@ from __future__ import annotations
 import base64
 import logging
 import math
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import cv2
 import numpy as np
 
-from mcp_robot.heading import Heading, detect_heading
+from mcp_robot import config
+from mcp_robot.heading import Heading, annotate_bgr, detect_heading
 
 log = logging.getLogger(__name__)
 
@@ -256,15 +259,47 @@ def _pick_target(objects: list[DetectedObject], h: Heading) -> DetectedObject | 
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
-def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
-    """Check whether the scene is ready for the gripper to close.
+def _save_debug_image(
+    bgr: np.ndarray,
+    heading: Heading | None,
+    obj: DetectedObject | None,
+    result: GraspReadiness,
+) -> str | None:
+    """Draw bbox + green arrow on a copy of bgr and save it to SNAPSHOT_DIR."""
+    if not config.SNAPSHOT_DIR:
+        return None
+    try:
+        annotated = annotate_bgr(bgr.copy()) if heading is not None else bgr.copy()
 
-    Args:
-        bgr: BGR image from the external (DroidCam) camera.
+        if obj is not None:
+            color = (0, 200, 0) if result.ready else (0, 0, 220)
+            cv2.rectangle(annotated, (obj.x1, obj.y1), (obj.x2, obj.y2), color, 2)
+            label = f"{obj.class_name} {obj.confidence:.0%}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            ty = obj.y1 - 6 if obj.y1 > th + 6 else obj.y2 + th + 6
+            cv2.rectangle(annotated, (obj.x1, ty - th - 2), (obj.x1 + tw + 2, ty + 2), color, cv2.FILLED)
+            cv2.putText(annotated, label, (obj.x1 + 1, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    Returns:
-        GraspReadiness with ready flag + reason + actionable next step.
-    """
+        verdict = "READY" if result.ready else "NOT READY"
+        cv2.putText(annotated, verdict, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (0, 200, 0) if result.ready else (0, 0, 220), 2, cv2.LINE_AA)
+
+        os.makedirs(config.SNAPSHOT_DIR, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        ms = int((time.time() % 1) * 1000)
+        path = os.path.join(config.SNAPSHOT_DIR, f"grasp_readiness_{ts}_{ms:03d}.jpg")
+        cv2.imwrite(path, annotated)
+        log.info("Grasp readiness debug image saved: %s", path)
+        return path
+    except Exception as exc:
+        log.warning("Failed to save grasp readiness debug image: %s", exc)
+        return None
+
+
+def _compute_readiness(
+    bgr: np.ndarray,
+) -> tuple[GraspReadiness, Heading | None, DetectedObject | None]:
+    """Core logic — returns (result, heading, selected_object) for debug annotation."""
     h, w = bgr.shape[:2]
     diag = math.hypot(w, h)
 
@@ -275,7 +310,7 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
             ready=False,
             reason="Robot not detected in frame — ensure the robot's yellow body is visible to the external camera.",
             action="Reposition the external camera or the robot so the yellow body is fully in view.",
-        )
+        ), None, None
 
     # ── 2. Detect objects ────────────────────────────────────────────────
     try:
@@ -286,7 +321,7 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
             ready=False,
             reason=f"Object detection failed: {exc}",
             action="Check that the YOLO model is installed and the image is valid.",
-        )
+        ), heading, None
 
     if not objects:
         log.info("YOLO found nothing — trying white-blob fallback")
@@ -297,7 +332,7 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
             ready=False,
             reason="No object detected in frame.",
             action="Ensure the target object is visible and not occluded. Try repositioning.",
-        )
+        ), heading, None
 
     # ── 3. Pick the best candidate ───────────────────────────────────────
     obj = _pick_target(objects, heading)
@@ -309,12 +344,12 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
             object_detected=True,
             object_class=objects[0].class_name,
             object_confidence=objects[0].confidence,
-        )
+        ), heading, None
 
-    ox, oy   = obj.center
-    bx, by   = heading.body_center
-    fw       = heading.forward
-    ax, ay   = heading.arrow_anchor
+    ox, oy = obj.center
+    bx, by = heading.body_center
+    fw     = heading.forward
+    ax, ay = heading.arrow_anchor
 
     # ── 4. Condition 2: arrow well over object ───────────────────────────
     dx, dy = ox - bx, oy - by
@@ -325,13 +360,11 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
     arrow_over = t > 0 and perp_dist < obj.radius * _ARROW_OVER_FRAC
 
     # ── 5. Condition 1: object touching robot body ───────────────────────
-    # Distance from arrow_anchor (body front edge) to the nearest point on
-    # the object bounding box.
     near_x = float(max(obj.x1, min(ax, obj.x2)))
     near_y = float(max(obj.y1, min(ay, obj.y2)))
-    dist_to_front = math.hypot(ax - near_x, ay - near_y)
+    dist_to_front     = math.hypot(ax - near_x, ay - near_y)
     body_touch_thresh = diag * _BODY_TOUCH_FRAC
-    touches_body = dist_to_front < body_touch_thresh
+    touches_body      = dist_to_front < body_touch_thresh
 
     common = dict(
         object_detected=True,
@@ -353,7 +386,7 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
                 f"(perp={perp_dist:.0f}px < {obj.radius * _ARROW_OVER_FRAC:.0f}px threshold)."
             ),
             **common,
-        )
+        ), heading, obj
 
     # Build actionable feedback
     if not touches_body and not arrow_over:
@@ -380,7 +413,27 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
             )
             action = "Adjust heading so the green arrow passes through the object's center."
 
-    return GraspReadiness(ready=False, reason=reason, action=action, **common)
+    return GraspReadiness(ready=False, reason=reason, action=action, **common), heading, obj
+
+
+def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
+    """Check whether the scene is ready for the gripper to close.
+
+    Args:
+        bgr: BGR image from the external (DroidCam) camera.
+
+    Returns:
+        GraspReadiness with ready flag + reason + actionable next step.
+    """
+    result, heading, obj = _compute_readiness(bgr)
+    log.info(
+        "Grasp readiness: ready=%s | %s%s",
+        result.ready,
+        result.reason,
+        f" | action: {result.action}" if result.action else "",
+    )
+    _save_debug_image(bgr, heading, obj, result)
+    return result
 
 
 def check_grasp_readiness_jpeg_bytes(jpeg: bytes) -> GraspReadiness:
