@@ -233,7 +233,7 @@ def drive_degrees(
 def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """
     Move the arm by *degrees*. Positive = down, negative = up.
-    After any downward move, raises 13° to keep the gripper clear of the ground
+    After any downward move, raises 17° to keep the gripper clear of the ground
     and maximise wheel normal force.
 
     Args:
@@ -242,12 +242,12 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """
     result = move_motor(config.PORT_ARM, -degrees, speed)  # motor is physically inverted; negate so positive=down as documented
     if degrees > 0:
-        move_motor(config.PORT_ARM, 13, speed)  # raise 13° so gripper clears the ground
+        move_motor(config.PORT_ARM, 17, speed)  # raise 17° so gripper clears the ground
     return result
 
 
 def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
-    """Lower arm fully to ground level, then raise 13° for wheel clearance."""
+    """Lower arm fully to ground level, then raise 17° for wheel clearance."""
     return move_arm(config.ARM_DOWN_DEG, speed)
 
 

@@ -15,8 +15,8 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Arm & gripper
   ─────────────
-  move_arm               Move arm up or down (downward moves end with a 13° raise)
-  lower_arm              Lower arm fully to ground then raise 13° for wheel clearance
+  move_arm               Move arm up or down (downward moves end with a 17° raise)
+  lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
   control_gripper        Open or close the gripper
 
   High-level actions
@@ -516,7 +516,7 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
-    suffix = "; then raises 13° to clear gripper from ground" if degrees > 0 else ""
+    suffix = "; then raises 17° to clear gripper from ground" if degrees > 0 else ""
     expected_str = expected if expected else (
         f"arm moves {direction} by ~{abs(degrees)}°{suffix} — visible in 3rd party cam (arm angle "
         f"changes); front camera may show arm entering or leaving frame; wheels and gripper unchanged"
@@ -533,7 +533,7 @@ def move_arm(degrees: int, speed: int = 30, expected: str = "", context: str = "
 @mcp.tool()
 def lower_arm(speed: int = 30, expected: str = "", context: str = "") -> dict:
     """
-    Lower the robot arm fully to ground level, then raise it 13° to keep the
+    Lower the robot arm fully to ground level, then raise it 17° to keep the
     gripper clear of the floor and maximise wheel normal force. Captures
     before/after images and returns a Gemini-generated `change_description`.
 
@@ -546,11 +546,11 @@ def lower_arm(speed: int = 30, expected: str = "", context: str = "") -> dict:
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     expected_str = expected if expected else (
-        f"arm lowers fully to ground level (~{config.ARM_DOWN_DEG}°), then raises 13° "
+        f"arm lowers fully to ground level (~{config.ARM_DOWN_DEG}°), then raises 17° "
         "so the gripper just clears the floor; final arm position is slightly above ground"
     )
     return _with_change_analysis(
-        f"lower arm to ground level then raise 13° at speed {speed}",
+        f"lower arm to ground level then raise 17° at speed {speed}",
         expected_str,
         lambda: robot_mod.lower_arm(speed),
         context=context,
