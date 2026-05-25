@@ -342,6 +342,24 @@ def _draw_flow_arrows(dst: np.ndarray, prev_gray: np.ndarray, curr_gray: np.ndar
     return out
 
 
+def flow_magnitudes(frames_gray: list[np.ndarray]) -> list[float]:
+    """Return mean optical-flow magnitude for each consecutive frame pair.
+
+    Result length is len(frames_gray) - 1; index i is the mean magnitude
+    between frames[i] and frames[i+1]. Uses the same Farneback parameters
+    as _draw_flow_arrows so all flow logic stays consistent.
+    """
+    mags: list[float] = []
+    for i in range(len(frames_gray) - 1):
+        flow = cv2.calcOpticalFlowFarneback(
+            frames_gray[i], frames_gray[i + 1], None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.1, flags=0,
+        )
+        mags.append(float(np.mean(np.hypot(flow[..., 0], flow[..., 1]))))
+    return mags
+
+
 def annotate_flow_sequence_bgr(
     annotated: list[np.ndarray],
     raw: list[np.ndarray] | None = None,

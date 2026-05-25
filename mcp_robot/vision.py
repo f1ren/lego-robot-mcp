@@ -346,12 +346,52 @@ def _ollama_describe_video(
     return text
 
 
+def _peak_motion_index(frames_b64: Sequence[str]) -> int:
+    """Return the index (1..n-1) of the frame with the highest optical-flow magnitude.
+
+    Decodes frames to grayscale and delegates to heading.flow_magnitudes so the
+    Farneback parameters stay in one place. Falls back to int(n*2/3) on any error.
+    """
+    import cv2
+    from mcp_robot.heading import flow_magnitudes
+
+    n = len(frames_b64)
+    fallback = int(n * 2 / 3)
+    if n < 3:
+        return n // 2
+    try:
+        decoded: list[np.ndarray] = []
+        for b64 in frames_b64:
+            data = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return fallback
+            decoded.append(img)
+        mags = flow_magnitudes(decoded)
+        # mags[i] is the flow between frame i and frame i+1;
+        # the frame that is the *destination* of peak flow is at index argmax+1.
+        return int(np.argmax(mags)) + 1
+    except Exception:
+        return fallback
+
+
 def _subsample_frames(
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
+    raw_labeled_frames: Sequence[tuple[str, str]] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Return 3 frames per camera (first, ~2/3, last), grouped by camera — 6 total for two cameras."""
+    """Return 3 frames per camera (first, peak-motion, last), grouped by camera.
+
+    The inner frame is selected by optical flow: the frame with the highest mean
+    flow magnitude from its predecessor, computed on raw_labeled_frames when
+    provided so heading-arrow pixels don't produce spurious vectors.
+    """
     paths = list(frame_paths) if frame_paths else [None] * len(labeled_frames)
+
+    raw_camera_b64s: dict[str, list[str]] = {}
+    if raw_labeled_frames is not None:
+        for label, b64 in raw_labeled_frames:
+            raw_camera_b64s.setdefault(label, []).append(b64)
 
     # Group by camera, preserving original indices for path lookup
     camera_indices: dict[str, list[int]] = {}
@@ -360,12 +400,17 @@ def _subsample_frames(
 
     out_frames: list[tuple[str, str]] = []
     out_paths: list[str | None] = []
-    for indices in camera_indices.values():
+    for label, indices in camera_indices.items():
         n = len(indices)
         if n <= 3:
             picks = indices
         else:
-            picks = sorted({indices[0], indices[int(n * 2 / 3)], indices[-1]})
+            raw_b64s = raw_camera_b64s.get(label)
+            if raw_b64s and len(raw_b64s) == n:
+                inner_local = _peak_motion_index(raw_b64s)
+            else:
+                inner_local = int(n * 2 / 3)
+            picks = sorted({indices[0], indices[inner_local], indices[-1]})
         for i in picks:
             out_frames.append(labeled_frames[i])
             out_paths.append(paths[i])
@@ -402,7 +447,7 @@ def describe_action_video(
         log.info("Video is static — skipping VQA for action %r", action)
         return "Verdict: NO — no motion detected in video\nChanges: No motion was detected in the captured video frames; the robot may not have moved."
 
-    labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths)
+    labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths, motion_frames)
 
     # Collapse each camera's subsampled frames into a single stacked composite.
     cameras_ordered: dict[str, list[tuple[int, str]]] = {}
