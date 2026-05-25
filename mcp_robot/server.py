@@ -55,6 +55,14 @@ from mcp_robot import config, heading, viz, vision
 log = logging.getLogger(__name__)
 _stop = threading.Event()
 
+# Motor encoder positions are relative to wherever the motors were when the
+# server started (or last power-cycled). Reporting them on the very first
+# get_robot_state call would give the AI meaningless baseline numbers that
+# look authoritative but carry no positional information. We suppress them
+# on the first call and only emit them from the second call onward, when the
+# AI already has a prior reading to delta-compare against.
+_state_call_count = 0
+
 # ── initialization tracker ────────────────────────────────────────────────────
 
 _INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
@@ -723,16 +731,10 @@ def get_robot_state() -> list[ImageContent | TextContent]:
     cameras (Pi Camera = front view; DroidCam = wider third-person view).
     Call this before planning any sequence of actions.
     """
+    global _state_call_count
     log.info("[TOOL] get_robot_state")
     try:
-        positions = robot_mod.get_all_positions()
-        summary = (
-            f"Motor positions — "
-            f"left_wheel: {positions['left_wheel']}°, "
-            f"right_wheel: {positions['right_wheel']}°, "
-            f"arm: {positions['arm']}°, "
-            f"gripper: {positions['gripper']}°"
-        )
+        _state_call_count += 1
         content: list[ImageContent | TextContent] = []
         try:
             droid_frame = cam_mod.capture_droidcam_still()
@@ -740,7 +742,16 @@ def get_robot_state() -> list[ImageContent | TextContent]:
             content.append(_thumbnail_image_content(droid_frame["frame"]))
         except Exception as exc:
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
-        content.append(TextContent(type="text", text=summary))
+        if _state_call_count > 1:
+            positions = robot_mod.get_all_positions()
+            summary = (
+                f"Motor positions — "
+                f"left_wheel: {positions['left_wheel']}°, "
+                f"right_wheel: {positions['right_wheel']}°, "
+                f"arm: {positions['arm']}°, "
+                f"gripper: {positions['gripper']}°"
+            )
+            content.append(TextContent(type="text", text=summary))
         return content
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
