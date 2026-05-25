@@ -51,6 +51,7 @@ from mcp.types import ImageContent, TextContent
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
 from mcp_robot import config, heading, viz, vision
+from mcp_robot import grasp_readiness as grasp_mod
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -616,6 +617,38 @@ def put() -> dict:
         robot_mod.put,
         annotate=False,  # arrow masks gripper/arm state — suppress for put action
     )
+
+
+# ── grasp readiness ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def check_grasp_readiness() -> list[TextContent]:
+    """
+    CV-based grasp readiness check using the external (DroidCam) camera.
+
+    Captures a live frame, runs YOLO object detection, and verifies two
+    conditions required before closing the gripper:
+      1. The target object is touching the robot's front body.
+      2. The green forward-arrow passes well over the object's center of mass
+         (not merely touching its edge).
+
+    Returns a verdict, a human-readable reason, and — when not ready — an
+    actionable next step (drive closer, adjust heading, etc.).
+    """
+    log.info("[TOOL] check_grasp_readiness")
+    try:
+        frame_result = cam_mod.capture_droidcam_still()
+        raw = base64.b64decode(frame_result["frame"])
+        import numpy as _np, cv2 as _cv2
+        arr = _np.frombuffer(raw, dtype=_np.uint8)
+        bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+        if bgr is None:
+            return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
+        result = grasp_mod.check_grasp_readiness(bgr)
+        return [TextContent(type="text", text=result.to_text())]
+    except Exception as exc:
+        log.warning("[TOOL] check_grasp_readiness error: %s", exc)
+        return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
 # ── camera ────────────────────────────────────────────────────────────────────
