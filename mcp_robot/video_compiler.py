@@ -76,7 +76,7 @@ def compile_task_video(
             all_paths.extend(sorted(
                 os.path.join(action_dir, f)
                 for f in os.listdir(action_dir)
-                if f.endswith(".jpg")
+                if f.endswith(".jpg") and "droidcam" in f
             ))
         except Exception as exc:
             log.warning("Skipping action dir %s: %s", action_dir, exc)
@@ -92,25 +92,32 @@ def compile_task_video(
     n = len(imgs)
     in_motion = [False] * n
     for i in range(n - 1):
-        gray_a = cv2.cvtColor(imgs[i][1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        gray_b = cv2.cvtColor(imgs[i + 1][1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        if float(np.mean(np.abs(gray_a - gray_b))) > MOTION_THRESHOLD:
+        try:
+            gray_a = cv2.cvtColor(imgs[i][1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            gray_b = cv2.cvtColor(imgs[i + 1][1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            diff = float(np.mean(np.abs(gray_a - gray_b)))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to process frames: {imgs[i][0]!r} and {imgs[i + 1][0]!r}") from exc
+        if diff > MOTION_THRESHOLD:
             in_motion[i] = True
             in_motion[i + 1] = True
 
-    motion_imgs = [imgs[i][1] for i, flag in enumerate(in_motion) if flag]
+    motion_imgs = [(imgs[i][0], imgs[i][1]) for i, flag in enumerate(in_motion) if flag]
     log.info("compile_video: %d/%d motion frames", len(motion_imgs), n)
 
     if not motion_imgs:
         return CompileResult(None, n, 0, len(action_dirs))
 
-    h, w = motion_imgs[0].shape[:2]
+    h, w = motion_imgs[0][1].shape[:2]
     out_dir_expanded = os.path.expanduser(out_dir)
     os.makedirs(out_dir_expanded, exist_ok=True)
     video_path = os.path.join(out_dir_expanded, f"task_video_{time.strftime('%Y%m%d_%H%M%S')}.mp4")
     writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (w, h))
-    for img in motion_imgs:
-        writer.write(img if img.shape[:2] == (h, w) else cv2.resize(img, (w, h)))
+    for fp, img in motion_imgs:
+        try:
+            writer.write(img if img.shape[:2] == (h, w) else cv2.resize(img, (w, h)))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write frame: {fp!r}") from exc
     writer.release()
 
     log.info("Task video written: %s (%d/%d motion frames from %d actions since %s)",
