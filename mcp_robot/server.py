@@ -585,6 +585,19 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
         except Exception as exc:
             return _err(str(exc))
 
+    # Gate: check grasp readiness before closing.
+    frame_result = cam_mod.capture_droidcam_still()
+    import numpy as _np, cv2 as _cv2
+    raw = base64.b64decode(frame_result["frame"])
+    arr = _np.frombuffer(raw, dtype=_np.uint8)
+    bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+    if bgr is None:
+        return _err("Grasp readiness gate: could not decode external camera frame.")
+    readiness = grasp_mod.check_grasp_readiness(bgr)
+    if not readiness.ready:
+        log.warning("[TOOL] control_gripper blocked by grasp readiness gate: %s", readiness.reason)
+        return _err(f"Grasp readiness check failed — gripper NOT closed.\n{readiness.to_text()}")
+
     # Closing: verify that any object between the fingers is now grasped.
     expected_str = expected if expected else (
         "gripper jaws close (gap narrows; if an object is between them, it is now grasped); robot pose and arm unchanged"
