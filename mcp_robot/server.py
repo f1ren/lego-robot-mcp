@@ -628,7 +628,7 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
             return _err(str(exc))
 
     # Gate: check grasp readiness before closing.
-    frame_result = cam_mod.capture_droidcam_still()
+    frame_result = cam_mod.capture_droidcam_still(annotate=False)
     import numpy as _np, cv2 as _cv2
     raw = base64.b64decode(frame_result["frame"])
     arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -699,7 +699,7 @@ def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
     """
     log.info("[TOOL] check_grasp_readiness target_class=%s", target_class)
     try:
-        frame_result = cam_mod.capture_droidcam_still()
+        frame_result = cam_mod.capture_droidcam_still(annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         import numpy as _np, cv2 as _cv2
         arr = _np.frombuffer(raw, dtype=_np.uint8)
