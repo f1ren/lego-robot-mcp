@@ -228,6 +228,26 @@ def drive_degrees(
     return result
 
 
+def turn(body_degrees: float, speed: int) -> dict:
+    """
+    Rotate the robot body by *body_degrees* in place (both wheels counter-rotating).
+
+    Positive body_degrees = clockwise when viewed from above.
+    Negative body_degrees = counter-clockwise when viewed from above.
+
+    The encoder travel per wheel is computed from the configured wheel geometry:
+        encoder_deg = abs(body_degrees) * TURN_ENCODER_DEG_PER_BODY_DEG
+    """
+    encoder_deg = int(abs(body_degrees) * config.TURN_ENCODER_DEG_PER_BODY_DEG)
+    if body_degrees >= 0:
+        # CW: left wheel forward, right wheel backward
+        left_speed, right_speed = speed, -speed
+    else:
+        # CCW: left wheel backward, right wheel forward
+        left_speed, right_speed = -speed, speed
+    return drive_degrees(encoder_deg, left_speed, right_speed)
+
+
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:

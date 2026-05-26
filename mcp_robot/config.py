@@ -35,6 +35,17 @@ GRIPPER_CLOSED_DEG = int(os.getenv("GRIPPER_CLOSED_DEG", "90"))
 ARM_UP_DEG   = int(os.getenv("ARM_UP_DEG",   "0"))    # home / retracted
 ARM_DOWN_DEG = int(os.getenv("ARM_DOWN_DEG", "90"))   # extended / lowered
 
+# ── Wheel geometry (for body-angle → encoder-degree conversion) ──────────────
+# Measure on the actual robot.  All values in mm.
+# encoder_deg_per_body_deg = TRACK_WIDTH_MM / WHEEL_DIAMETER_MM
+# Override TURN_ENCODER_DEG_PER_BODY_DEG directly to skip the geometry math.
+WHEEL_DIAMETER_MM = float(os.getenv("WHEEL_DIAMETER_MM", "56.0"))
+TRACK_WIDTH_MM    = float(os.getenv("TRACK_WIDTH_MM",    "123.0"))
+TURN_ENCODER_DEG_PER_BODY_DEG = float(
+    os.getenv("TURN_ENCODER_DEG_PER_BODY_DEG",
+              str(TRACK_WIDTH_MM / WHEEL_DIAMETER_MM))
+)
+
 # ── Speed limits ─────────────────────────────────────────────────────────────
 # Minimum absolute speed for any motor action. Below this threshold motion is
 # too slow for the CV pipeline to reliably detect, making success verification

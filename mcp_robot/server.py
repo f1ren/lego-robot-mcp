@@ -495,6 +495,48 @@ def drive_degrees(
     )
 
 
+@mcp.tool()
+def turn(
+    body_degrees: float,
+    speed: int = 20,
+    expected: str = "",
+    context: str = "",
+) -> dict:
+    """
+    Rotate the robot body in place by an exact number of degrees.
+
+    Conversion: encoder_deg = abs(body_degrees) * (TRACK_WIDTH_MM / WHEEL_DIAMETER_MM).
+    Defaults: track_width=123 mm, wheel_diameter=56 mm → ratio ≈ 2.2.
+    Override via TURN_ENCODER_DEG_PER_BODY_DEG env var if calibration drifts.
+
+    Pass the `object_angle_deg` value returned by get_robot_state / get_external_camera_image
+    directly as body_degrees to face the detected object.
+
+    Args:
+        body_degrees: Signed rotation in degrees viewed from above.
+                      Positive = clockwise (CW), negative = counter-clockwise (CCW).
+        speed:        Wheel speed, 15–20.
+        expected:     Short description of the expected outcome
+                      (e.g. "robot rotates ~45° CW to face the cup").
+        context:      Why this action is being taken and hints for evaluation.
+    """
+    log.info("[TOOL] turn body_degrees=%r speed=%r", body_degrees, speed)
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+    direction = "CW" if body_degrees >= 0 else "CCW"
+    encoder_deg = int(abs(body_degrees) * config.TURN_ENCODER_DEG_PER_BODY_DEG)
+    desc = f"turn {body_degrees}° ({direction}), encoder_deg={encoder_deg}"
+    expected_str = expected if expected else (
+        f"robot rotates ~{abs(body_degrees):.0f}° {direction} in place"
+    )
+    return _with_change_analysis(
+        desc, expected_str,
+        lambda: robot_mod.turn(body_degrees, speed),
+        context=context,
+        vqa_cameras={"droidcam"},
+    )
+
+
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
