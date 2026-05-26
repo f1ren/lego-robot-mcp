@@ -648,7 +648,7 @@ def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
 
     Args:
         target_class: the type of object to look for.  Supported values:
-            "cup"    — matches YOLO classes cup / bottle / vase  (default)
+            "cup"    — matches YOLO classes cup / bowl / bottle / vase  (default)
             "ball"   — matches sports ball / orange / apple
             "bottle" — matches bottle / cup / vase
 

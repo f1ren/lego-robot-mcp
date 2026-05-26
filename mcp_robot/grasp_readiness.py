@@ -45,7 +45,7 @@ _BODY_TOUCH_FRAC = 0.08
 # Maps a canonical target_class name to the set of COCO class names YOLO may
 # use for that object.  Add rows here as new object types are introduced.
 _CLASS_SYNONYMS: dict[str, frozenset[str]] = {
-    "cup":    frozenset({"cup", "bottle", "vase"}),
+    "cup":    frozenset({"cup", "bowl", "bottle", "vase"}),
     "ball":   frozenset({"sports ball", "orange", "apple"}),
     "bottle": frozenset({"bottle", "cup", "vase"}),
 }
