@@ -11,3 +11,6 @@ build/
 # Code generated
 memory/
 output/
+
+# Test files
+tests/fixtures/*/annotated/

@@ -337,6 +337,14 @@ def _compute_readiness(
             **common,
         ), heading, obj
 
+    # Rotation hint: angle + CW/CCW needed to align arrow with object center.
+    # Cross product (fw × to_object) in image coords (y-down):
+    # positive → object is clockwise from current heading (viewed from above).
+    cross = fw[0] * dy - fw[1] * dx
+    rot_dir = "CW" if cross > 0 else "CCW"
+    rot_deg = math.degrees(math.atan2(perp_dist, max(t, 1.0)))
+    rot_hint = f"{rot_deg:.0f}° {rot_dir}"
+
     # Build actionable feedback
     if not touches_body and not arrow_over:
         reason = (
@@ -344,7 +352,7 @@ def _compute_readiness(
             f"(front-gap={dist_to_front:.0f}px, need <{body_touch_thresh:.0f}px) "
             f"and arrow misses its center (perp={perp_dist:.0f}px)."
         )
-        action = "Drive forward toward the object to close the gap."
+        action = f"Turn {rot_hint} to align the arrow, then drive forward to close the gap."
     elif not touches_body:
         reason = (
             f"Object is not close enough to the robot body "
@@ -360,7 +368,7 @@ def _compute_readiness(
                 f"Arrow does not pass well over the object "
                 f"(perp offset={perp_dist:.0f}px, need <{obj.radius * _ARROW_OVER_FRAC:.0f}px)."
             )
-            action = "Adjust heading so the green arrow passes through the object's center."
+            action = f"Turn {rot_hint} so the green arrow passes through the object's center."
 
     return GraspReadiness(ready=False, reason=reason, action=action, **common), heading, obj
 
