@@ -55,8 +55,11 @@ SPEED_MAX = int(os.getenv("SPEED_MAX", "20"))
 
 # ── Default speeds (range -100 to 100) ───────────────────────────────────────
 DEFAULT_WHEEL_SPEED   = int(os.getenv("DEFAULT_WHEEL_SPEED",   "50"))
-DEFAULT_ARM_SPEED     = int(os.getenv("DEFAULT_ARM_SPEED",     "30"))
+DEFAULT_ARM_SPEED     = int(os.getenv("DEFAULT_ARM_SPEED",     "15"))
 DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
+
+# Arm motor speed cap — slower to avoid jitter, especially with a load.
+ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
