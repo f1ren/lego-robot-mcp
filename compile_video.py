@@ -12,6 +12,7 @@ import argparse
 import logging
 import os
 
+from mcp_robot import config
 from mcp_robot.video_compiler import compile_task_video
 
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "output/snapshots")
@@ -22,7 +23,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser(description="Compile a task video from snapshot folders.")
     parser.add_argument("since", help="Start timestamp (log format, folder format, or UNIX float)")
-    parser.add_argument("--fps", type=float, default=5.0, help="Output playback FPS (default 5.0)")
+    parser.add_argument("--fps", type=float, default=config.DROIDCAM_CAPTURE_FPS,
+                        help=f"Output playback FPS (default {config.DROIDCAM_CAPTURE_FPS})")
     args = parser.parse_args()
 
     result = compile_task_video(args.since, SNAPSHOT_DIR, args.fps)
