@@ -638,14 +638,17 @@ def capture_droidcam_still(annotate: bool = True) -> dict:
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None}
     """
-    def _maybe_annotate(b64: str) -> str:
-        return _heading.annotate_jpeg_b64(b64) if annotate else b64
+    def _maybe_annotate(b64: str) -> tuple[str, float | None]:
+        if not annotate:
+            return b64, None
+        from mcp_robot import grasp_readiness as _gr
+        return _gr.annotate_frame_with_object_b64(b64)
 
     cached = _droidcam_cache.latest()
     if cached is not None:
-        frame = _maybe_annotate(cached["frame"])
+        frame, angle_deg = _maybe_annotate(cached["frame"])
         path = _save_snapshot(frame, "droidcam")
-        return {**cached, "frame": frame, "path": path}
+        return {**cached, "frame": frame, "path": path, "object_angle_deg": angle_deg}
 
     import cv2
 
@@ -657,8 +660,8 @@ def capture_droidcam_still(annotate: bool = True) -> dict:
         if not ok:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64 = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
+        b64, angle_deg = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
         path = _save_snapshot(b64, "droidcam")
-        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path}
+        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path, "object_angle_deg": angle_deg}
     finally:
         cap.release()

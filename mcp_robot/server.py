@@ -793,6 +793,17 @@ def get_robot_state() -> list[ImageContent | TextContent]:
             droid_frame = cam_mod.capture_droidcam_still()
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(droid_frame["frame"]))
+            angle_deg = droid_frame.get("object_angle_deg")
+            if angle_deg is not None:
+                rot_dir = "CW" if angle_deg > 0 else "CCW"
+                content.append(TextContent(
+                    type="text",
+                    text=(
+                        f"Object-to-heading angle: {abs(angle_deg):.0f}° {rot_dir} "
+                        f"(positive=CW=right, negative=CCW=left, viewed from above). "
+                        f"Use this when deciding how much to turn before approaching."
+                    ),
+                ))
         except Exception as exc:
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         if _state_call_count > 1:

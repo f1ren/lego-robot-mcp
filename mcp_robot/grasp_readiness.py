@@ -24,7 +24,12 @@ import cv2
 import numpy as np
 
 from mcp_robot import config
-from mcp_robot.heading import Heading, annotate_bgr, detect_heading
+from mcp_robot.heading import (
+    Heading,
+    annotate_bgr,
+    detect_heading,
+    compute_heading_to_object_angle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -408,3 +413,50 @@ def check_grasp_readiness_b64(b64: str, target_class: str = "cup") -> GraspReadi
     except Exception:
         return GraspReadiness(ready=False, reason="Could not decode base64 image.")
     return check_grasp_readiness_jpeg_bytes(raw, target_class=target_class)
+
+
+# ── combined heading + object annotation ──────────────────────────────────────
+
+def annotate_frame_with_object(
+    bgr: np.ndarray,
+    target_class: str = "cup",
+) -> tuple[np.ndarray, float | None]:
+    """Detect heading + YOLO object, annotate frame with arrow + bbox + angle line.
+
+    Returns (annotated_bgr, angle_deg) where angle_deg is None when heading or
+    object is not detected.  Positive angle = object is CW from forward.
+    Falls back to heading-only annotation on YOLO failure.
+    """
+    heading = detect_heading(bgr)
+    if heading is None:
+        return bgr, None
+
+    objects = _yolo_detect(bgr, target_class=target_class)
+    obj = _pick_target(objects, heading) if objects else None
+    if obj is None:
+        return annotate_bgr(bgr), None
+
+    angle_deg = compute_heading_to_object_angle(heading, obj.center)
+    annotated = annotate_bgr(
+        bgr,
+        obj_center=obj.center,
+        obj_bbox=(obj.x1, obj.y1, obj.x2, obj.y2),
+    )
+    return annotated, angle_deg
+
+
+def annotate_frame_with_object_b64(
+    b64: str,
+    target_class: str = "cup",
+) -> tuple[str, float | None]:
+    """Base64 JPEG in/out version of annotate_frame_with_object."""
+    raw = base64.b64decode(b64)
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise RuntimeError("Could not decode base64 JPEG for object annotation")
+    annotated, angle = annotate_frame_with_object(bgr, target_class)
+    ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    if not ok:
+        raise RuntimeError("cv2.imencode failed in annotate_frame_with_object_b64")
+    return base64.b64encode(buf.tobytes()).decode(), angle

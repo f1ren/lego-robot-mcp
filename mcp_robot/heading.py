@@ -52,6 +52,8 @@ _ROI_EXPAND = 0.6
 _ARROW_COLOR_BGR = (0, 220, 0)   # bright green
 _ARROW_THICKNESS_FRAC = 0.006    # of image diagonal
 
+_OBJ_COLOR_BGR = (0, 165, 255)   # orange — object bbox, line, angle label
+
 
 @dataclass
 class Heading:
@@ -269,8 +271,64 @@ def _draw_arrow(bgr: np.ndarray, heading: Heading) -> np.ndarray:
     return cv2.addWeighted(overlay, 0.50, bgr, 0.50, 0)
 
 
-def annotate_bgr(bgr: np.ndarray) -> np.ndarray:
-    """Return `bgr` with a green forward arrow if heading is detected, else as-is."""
+def compute_heading_to_object_angle(heading: Heading, obj_center: tuple[int, int]) -> float:
+    """Signed angle in degrees from forward to the vector pointing at obj_center.
+
+    Positive → object is clockwise from forward (image y-down, viewed from above).
+    Negative → counter-clockwise.
+    """
+    bx, by = heading.body_center
+    ox, oy = obj_center
+    dx, dy = ox - bx, oy - by
+    fw = heading.forward
+    dot = fw[0] * dx + fw[1] * dy
+    cross = fw[0] * dy - fw[1] * dx
+    return math.degrees(math.atan2(cross, dot))
+
+
+def _draw_object_annotation(
+    bgr: np.ndarray,
+    heading: Heading,
+    obj_center: tuple[int, int],
+    obj_bbox: tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """Overlay object location on bgr: bbox, line from body to object, angle label."""
+    h, w = bgr.shape[:2]
+    diag = float(np.hypot(w, h))
+    thickness = max(1, int(diag * 0.004))
+
+    out = bgr.copy()
+    bx, by = heading.body_center
+    ox, oy = obj_center
+
+    angle_deg = compute_heading_to_object_angle(heading, obj_center)
+    rot_dir = "CW" if angle_deg > 0 else "CCW"
+
+    if obj_bbox is not None:
+        x1, y1, x2, y2 = obj_bbox
+        cv2.rectangle(out, (x1, y1), (x2, y2), _OBJ_COLOR_BGR, thickness)
+
+    cv2.line(out, (bx, by), (ox, oy), _OBJ_COLOR_BGR, max(1, thickness - 1), cv2.LINE_AA)
+    cv2.circle(out, (ox, oy), max(4, thickness * 2), _OBJ_COLOR_BGR, -1)
+
+    angle_text = f"{abs(angle_deg):.0f}° {rot_dir}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.45, diag * 0.0007)
+    (tw, th), baseline = cv2.getTextSize(angle_text, font, font_scale, thickness)
+    mx = max(0, min(w - tw - 4, (bx + ox) // 2 - tw // 2))
+    my = max(th + 6, (by + oy) // 2 - 4)
+    cv2.rectangle(out, (mx - 2, my - th - 2), (mx + tw + 2, my + baseline), (0, 0, 0), cv2.FILLED)
+    cv2.putText(out, angle_text, (mx, my), font, font_scale, _OBJ_COLOR_BGR, thickness, cv2.LINE_AA)
+
+    return out
+
+
+def annotate_bgr(
+    bgr: np.ndarray,
+    obj_center: tuple[int, int] | None = None,
+    obj_bbox: tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """Return `bgr` with a green forward arrow (+ optional object annotation) if heading detected."""
     try:
         heading = detect_heading(bgr)
     except Exception as exc:
@@ -278,7 +336,10 @@ def annotate_bgr(bgr: np.ndarray) -> np.ndarray:
         return bgr
     if heading is None:
         return bgr
-    return _draw_arrow(bgr, heading)
+    out = _draw_arrow(bgr, heading)
+    if obj_center is not None:
+        out = _draw_object_annotation(out, heading, obj_center, obj_bbox)
+    return out
 
 
 def annotate_jpeg_bytes(buf: bytes) -> bytes:
