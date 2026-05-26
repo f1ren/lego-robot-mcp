@@ -635,20 +635,27 @@ def put() -> dict:
 # ── grasp readiness ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def check_grasp_readiness() -> list[TextContent]:
+def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
     """
     CV-based grasp readiness check using the external (DroidCam) camera.
 
-    Captures a live frame, runs YOLO object detection, and verifies two
-    conditions required before closing the gripper:
+    Captures a live frame, runs YOLO object detection filtered to *target_class*
+    (and its common synonyms), and verifies two conditions required before
+    closing the gripper:
       1. The target object is touching the robot's front body.
       2. The green forward-arrow passes well over the object's center of mass
          (not merely touching its edge).
 
+    Args:
+        target_class: the type of object to look for.  Supported values:
+            "cup"    — matches YOLO classes cup / bottle / vase  (default)
+            "ball"   — matches sports ball / orange / apple
+            "bottle" — matches bottle / cup / vase
+
     Returns a verdict, a human-readable reason, and — when not ready — an
     actionable next step (drive closer, adjust heading, etc.).
     """
-    log.info("[TOOL] check_grasp_readiness")
+    log.info("[TOOL] check_grasp_readiness target_class=%s", target_class)
     try:
         frame_result = cam_mod.capture_droidcam_still()
         raw = base64.b64decode(frame_result["frame"])
@@ -657,7 +664,7 @@ def check_grasp_readiness() -> list[TextContent]:
         bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
         if bgr is None:
             return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
-        result = grasp_mod.check_grasp_readiness(bgr)
+        result = grasp_mod.check_grasp_readiness(bgr, target_class=target_class)
         return [TextContent(type="text", text=result.to_text())]
     except Exception as exc:
         log.warning("[TOOL] check_grasp_readiness error: %s", exc)

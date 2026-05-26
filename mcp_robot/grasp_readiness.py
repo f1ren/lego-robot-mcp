@@ -42,13 +42,13 @@ _ARROW_OVER_FRAC = 0.55
 # diagonal to count as "touching robot body".
 _BODY_TOUCH_FRAC = 0.08
 
-# Blob fallback: HSV ranges for light/white objects (paper ball on wood floor)
-_BLOB_S_MAX     = 80    # low saturation → near-white/grey
-_BLOB_V_MIN     = 150   # high brightness
-_BLOB_AREA_MIN  = 0.0008  # fraction of frame area
-_BLOB_AREA_MAX  = 0.06
-_BLOB_CIRC_MIN  = 0.25    # 4π·area/perimeter² — filters cables and noise
-_BLOB_ASPECT_MAX = 2.5    # filters elongated objects (cables)
+# Maps a canonical target_class name to the set of COCO class names YOLO may
+# use for that object.  Add rows here as new object types are introduced.
+_CLASS_SYNONYMS: dict[str, frozenset[str]] = {
+    "cup":    frozenset({"cup", "bottle", "vase"}),
+    "ball":   frozenset({"sports ball", "orange", "apple"}),
+    "bottle": frozenset({"bottle", "cup", "vase"}),
+}
 
 # ── data classes ──────────────────────────────────────────────────────────────
 
@@ -148,9 +148,14 @@ def _load_model():
     return _yolo_model
 
 
-def _yolo_detect(bgr: np.ndarray) -> list[DetectedObject]:
+def _yolo_detect(
+    bgr: np.ndarray,
+    target_class: str = "cup",
+) -> list[DetectedObject]:
+    """Run YOLO and return only detections matching *target_class* (or its synonyms)."""
     model = _load_model()
     results = model(bgr, conf=_YOLO_CONF, iou=_YOLO_IOU, verbose=False)
+    allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
     objects: list[DetectedObject] = []
     for r in results:
         if r.boxes is None:
@@ -160,65 +165,11 @@ def _yolo_detect(bgr: np.ndarray) -> list[DetectedObject]:
             conf   = float(box.conf[0].item())
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
             name = model.names.get(cls_id, str(cls_id))
-            objects.append(DetectedObject(name, conf, x1, y1, x2, y2))
-    log.info("YOLO detected %d objects: %s",
-             len(objects), [(o.class_name, f"{o.confidence:.2f}") for o in objects])
-    return objects
-
-
-# ── white-blob fallback detector ─────────────────────────────────────────────
-
-# Yellow HSV range (robot body) — reuse same ranges as heading.py so we can
-# exclude the body pixels from white-blob candidates.
-_YELLOW_HSV_LO = np.array([15, 130, 100], dtype=np.uint8)
-_YELLOW_HSV_HI = np.array([35, 255, 255], dtype=np.uint8)
-
-
-def _blob_detect(bgr: np.ndarray) -> list[DetectedObject]:
-    """Fallback: find light-coloured, roughly-circular blobs that are not the robot body.
-
-    Designed for a white crumpled paper ball on a wooden floor, but works for
-    any light-coloured object of similar shape/size.
-    """
-    h, w = bgr.shape[:2]
-    frame_area = float(h * w)
-
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-
-    # Mask for light/white objects
-    white_mask = cv2.inRange(
-        hsv,
-        np.array([0,   0,   _BLOB_V_MIN], dtype=np.uint8),
-        np.array([179, _BLOB_S_MAX, 255], dtype=np.uint8),
-    )
-
-    # Exclude the yellow robot body (dilated generously so cables near it are suppressed too)
-    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
-    yellow_mask = cv2.dilate(yellow_mask, np.ones((25, 25), np.uint8))
-    white_mask  = cv2.bitwise_and(white_mask, cv2.bitwise_not(yellow_mask))
-
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN,  np.ones((5, 5), np.uint8))
-    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-
-    contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    objects: list[DetectedObject] = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        if not (_BLOB_AREA_MIN * frame_area < area < _BLOB_AREA_MAX * frame_area):
-            continue
-        peri = cv2.arcLength(c, True)
-        if peri < 1:
-            continue
-        circularity = 4.0 * math.pi * area / (peri * peri)
-        if circularity < _BLOB_CIRC_MIN:
-            continue
-        x, y, bw, bh = cv2.boundingRect(c)
-        aspect = max(bw, bh) / max(min(bw, bh), 1)
-        if aspect > _BLOB_ASPECT_MAX:
-            continue
-        objects.append(DetectedObject("object", 0.5, x, y, x + bw, y + bh))
-
-    log.info("Blob fallback detected %d candidate(s)", len(objects))
+            if name in allowed:
+                objects.append(DetectedObject(name, conf, x1, y1, x2, y2))
+    log.info("YOLO detected %d object(s) matching '%s': %s",
+             len(objects), target_class,
+             [(o.class_name, f"{o.confidence:.2f}") for o in objects])
     return objects
 
 
@@ -298,6 +249,7 @@ def _save_debug_image(
 
 def _compute_readiness(
     bgr: np.ndarray,
+    target_class: str = "cup",
 ) -> tuple[GraspReadiness, Heading | None, DetectedObject | None]:
     """Core logic — returns (result, heading, selected_object) for debug annotation."""
     h, w = bgr.shape[:2]
@@ -314,7 +266,7 @@ def _compute_readiness(
 
     # ── 2. Detect objects ────────────────────────────────────────────────
     try:
-        objects = _yolo_detect(bgr)
+        objects = _yolo_detect(bgr, target_class=target_class)
     except Exception as exc:
         log.warning("YOLO detection failed: %s", exc)
         return GraspReadiness(
@@ -324,13 +276,10 @@ def _compute_readiness(
         ), heading, None
 
     if not objects:
-        log.info("YOLO found nothing — trying white-blob fallback")
-        objects = _blob_detect(bgr)
-
-    if not objects:
+        allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
         return GraspReadiness(
             ready=False,
-            reason="No object detected in frame.",
+            reason=f"No '{target_class}' detected in frame (looking for: {', '.join(sorted(allowed))}).",
             action="Ensure the target object is visible and not occluded. Try repositioning.",
         ), heading, None
 
@@ -416,16 +365,17 @@ def _compute_readiness(
     return GraspReadiness(ready=False, reason=reason, action=action, **common), heading, obj
 
 
-def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
+def check_grasp_readiness(bgr: np.ndarray, target_class: str = "cup") -> GraspReadiness:
     """Check whether the scene is ready for the gripper to close.
 
     Args:
         bgr: BGR image from the external (DroidCam) camera.
+        target_class: canonical object type to look for (see _CLASS_SYNONYMS).
 
     Returns:
         GraspReadiness with ready flag + reason + actionable next step.
     """
-    result, heading, obj = _compute_readiness(bgr)
+    result, heading, obj = _compute_readiness(bgr, target_class=target_class)
     log.info(
         "Grasp readiness: ready=%s | %s%s",
         result.ready,
@@ -436,17 +386,17 @@ def check_grasp_readiness(bgr: np.ndarray) -> GraspReadiness:
     return result
 
 
-def check_grasp_readiness_jpeg_bytes(jpeg: bytes) -> GraspReadiness:
+def check_grasp_readiness_jpeg_bytes(jpeg: bytes, target_class: str = "cup") -> GraspReadiness:
     arr = np.frombuffer(jpeg, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
         return GraspReadiness(ready=False, reason="Could not decode image.", action="Provide a valid JPEG frame.")
-    return check_grasp_readiness(bgr)
+    return check_grasp_readiness(bgr, target_class=target_class)
 
 
-def check_grasp_readiness_b64(b64: str) -> GraspReadiness:
+def check_grasp_readiness_b64(b64: str, target_class: str = "cup") -> GraspReadiness:
     try:
         raw = base64.b64decode(b64)
     except Exception:
         return GraspReadiness(ready=False, reason="Could not decode base64 image.")
-    return check_grasp_readiness_jpeg_bytes(raw)
+    return check_grasp_readiness_jpeg_bytes(raw, target_class=target_class)
