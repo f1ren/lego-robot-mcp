@@ -604,20 +604,23 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
 # ── gripper ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def control_gripper(action: str, speed: int = 20, expected: str = "", context: str = "") -> dict:
+def control_gripper(action: str, speed: int = 20, expected: str = "", context: str = "", target_class: str = "cup") -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
     Gemini-generated `change_description`.
 
     Args:
-        action:   "open" or "close".
-        speed:    Motor speed, 15–20.
-        expected: Short, precise description of the expected outcome
-                  (e.g. "gripper closes around the ball").
-        context:  Why this action is being taken and hints for evaluation
-                  (e.g. "grasping paper ball; previous close attempt slipped off").
+        action:       "open" or "close".
+        speed:        Motor speed, 15–20.
+        expected:     Short, precise description of the expected outcome
+                      (e.g. "gripper closes around the ball").
+        context:      Why this action is being taken and hints for evaluation
+                      (e.g. "grasping paper ball; previous close attempt slipped off").
+        target_class: Object class used by the grasp-readiness gate before
+                      closing the gripper (e.g. "cup", "ball", "button", "any").
+                      Default: "cup".
     """
-    log.info("[TOOL] control_gripper action=%r speed=%r", action, speed)
+    log.info("[TOOL] control_gripper action=%r speed=%r target_class=%r", action, speed, target_class)
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
@@ -636,7 +639,7 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
     bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
     if bgr is None:
         return _err("Grasp readiness gate: could not decode external camera frame.")
-    readiness = grasp_mod.check_grasp_readiness(bgr)
+    readiness = grasp_mod.check_grasp_readiness(bgr, target_class=target_class)
     if not readiness.ready:
         log.warning("[TOOL] control_gripper blocked by grasp readiness gate: %s", readiness.reason)
         return _err(f"Grasp readiness check failed — gripper NOT closed.\n{readiness.to_text()}")
@@ -821,32 +824,42 @@ def capture_external_video_clip(
 
 
 @mcp.tool()
-def get_robot_state() -> list[ImageContent | TextContent]:
+def get_robot_state(target_class: str = "cup") -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
     cameras (Pi Camera = front view; DroidCam = wider third-person view).
     Call this before planning any sequence of actions.
+
+    Args:
+        target_class: Object type to detect and annotate in the external
+                      camera frame.  The detected object's angle relative to
+                      the robot's heading is computed and returned so you know
+                      how much to turn before approaching.
+                      Supported values: "cup", "ball", "bottle", "button", "any".
+                      Default: "cup".  Pass "any" to annotate the closest/most
+                      forward object regardless of class.
     """
     global _state_call_count
-    log.info("[TOOL] get_robot_state")
+    log.info("[TOOL] get_robot_state target_class=%r", target_class)
     try:
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
         try:
-            droid_frame = cam_mod.capture_droidcam_still()
+            droid_frame = cam_mod.capture_droidcam_still(target_class=target_class)
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(droid_frame["frame"]))
             angle_deg = droid_frame.get("object_angle_deg")
             if angle_deg is not None:
                 rot_dir = "CW" if angle_deg > 0 else "CCW"
-                content.append(TextContent(
-                    type="text",
-                    text=(
-                        f"Object-to-heading angle: {abs(angle_deg):.0f}° {rot_dir} "
-                        f"(positive=CW=right, negative=CCW=left, viewed from above). "
-                        f"Use this when deciding how much to turn before approaching."
-                    ),
-                ))
+                angle_text = (
+                    f"Object-to-heading angle: {abs(angle_deg):.0f}° {rot_dir} "
+                    f"(positive=CW=right, negative=CCW=left, viewed from above). "
+                    f"Use this when deciding how much to turn before approaching."
+                )
+                log.info("get_robot_state heading result: %s", angle_text)
+                content.append(TextContent(type="text", text=angle_text))
+            else:
+                log.info("get_robot_state heading result: no '%s' object detected — angle not computed", target_class)
         except Exception as exc:
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         if _state_call_count > 1:

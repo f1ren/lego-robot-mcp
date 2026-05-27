@@ -620,7 +620,7 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
         cap.release()
 
 
-def capture_droidcam_still(annotate: bool = True) -> dict:
+def capture_droidcam_still(annotate: bool = True, target_class: str = "cup") -> dict:
     """
     Return the most recent DroidCam frame.
 
@@ -631,18 +631,34 @@ def capture_droidcam_still(annotate: bool = True) -> dict:
     detected (see mcp_robot.heading).
 
     Args:
-        annotate: If True (default), overlay the heading arrow. Pass False
-                  when the frame is destined for VLM change analysis to avoid
-                  the arrow causing spurious motion detections.
+        annotate:     If True (default), overlay the heading arrow. Pass False
+                      when the frame is destined for VLM change analysis to avoid
+                      the arrow causing spurious motion detections.
+        target_class: Object class to detect and annotate (e.g. "cup", "ball",
+                      "button", "any").  The detected object's angle relative to
+                      the robot's heading is included in the returned dict.
 
     Returns:
-        {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None}
+        {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
+         "object_angle_deg": float | None}
     """
     def _maybe_annotate(b64: str) -> tuple[str, float | None]:
         if not annotate:
             return b64, None
         from mcp_robot import grasp_readiness as _gr
-        return _gr.annotate_frame_with_object_b64(b64)
+        annotated_b64, angle_deg = _gr.annotate_frame_with_object_b64(b64, target_class=target_class)
+        if angle_deg is not None:
+            rot_dir = "CW" if angle_deg > 0 else "CCW"
+            log.info(
+                "Heading analysis: target_class=%r — object at %.1f° %s from forward",
+                target_class, abs(angle_deg), rot_dir,
+            )
+        else:
+            log.info(
+                "Heading analysis: target_class=%r — no matching object detected; heading arrow only",
+                target_class,
+            )
+        return annotated_b64, angle_deg
 
     cached = _droidcam_cache.latest()
     if cached is not None:

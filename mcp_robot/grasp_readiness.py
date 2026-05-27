@@ -49,10 +49,18 @@ _BODY_TOUCH_FRAC = 0.08
 
 # Maps a canonical target_class name to the set of COCO class names YOLO may
 # use for that object.  Add rows here as new object types are introduced.
-_CLASS_SYNONYMS: dict[str, frozenset[str]] = {
+# Use None to accept ALL YOLO detections (e.g. when the target is not a COCO
+# class and no synonym is a good proxy — annotation falls back to the
+# highest-confidence object in front of the robot).
+_CLASS_SYNONYMS: dict[str, frozenset[str] | None] = {
     "cup":    frozenset({"cup", "bowl", "bottle", "vase"}),
     "ball":   frozenset({"sports ball", "orange", "apple"}),
     "bottle": frozenset({"bottle", "cup", "vase"}),
+    # "button" is not a COCO class; best-effort proxies that may visually
+    # overlap with physical push-buttons or button panels.
+    "button": frozenset({"remote", "mouse", "keyboard", "cell phone"}),
+    # "any" accepts every YOLO detection — picks the most forward object.
+    "any":    None,
 }
 
 # ── data classes ──────────────────────────────────────────────────────────────
@@ -157,10 +165,20 @@ def _yolo_detect(
     bgr: np.ndarray,
     target_class: str = "cup",
 ) -> list[DetectedObject]:
-    """Run YOLO and return only detections matching *target_class* (or its synonyms)."""
+    """Run YOLO and return only detections matching *target_class* (or its synonyms).
+
+    If *target_class* maps to None in _CLASS_SYNONYMS (the "any" sentinel), or
+    if the key is absent AND the literal class name does not appear in the YOLO
+    vocabulary, all detections are returned so the caller can pick the best one.
+    """
     model = _load_model()
     results = model(bgr, conf=_YOLO_CONF, iou=_YOLO_IOU, verbose=False)
-    allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
+
+    # Resolve allowed set.  None → accept everything (e.g. "any" or unknown class).
+    raw_synonyms = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
+    accept_all = raw_synonyms is None
+    allowed: frozenset[str] = frozenset() if accept_all else raw_synonyms  # type: ignore[assignment]
+
     objects: list[DetectedObject] = []
     for r in results:
         if r.boxes is None:
@@ -170,10 +188,10 @@ def _yolo_detect(
             conf   = float(box.conf[0].item())
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
             name = model.names.get(cls_id, str(cls_id))
-            if name in allowed:
+            if accept_all or name in allowed:
                 objects.append(DetectedObject(name, conf, x1, y1, x2, y2))
-    log.info("YOLO detected %d object(s) matching '%s': %s",
-             len(objects), target_class,
+    log.info("YOLO detected %d object(s) matching '%s' (accept_all=%s): %s",
+             len(objects), target_class, accept_all,
              [(o.class_name, f"{o.confidence:.2f}") for o in objects])
     return objects
 
@@ -281,10 +299,14 @@ def _compute_readiness(
         ), heading, None
 
     if not objects:
-        allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
+        raw_allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
+        looking_for = (
+            "any object" if raw_allowed is None
+            else ", ".join(sorted(raw_allowed))
+        )
         return GraspReadiness(
             ready=False,
-            reason=f"No '{target_class}' detected in frame (looking for: {', '.join(sorted(allowed))}).",
+            reason=f"No '{target_class}' detected in frame (looking for: {looking_for}).",
             action="Ensure the target object is visible and not occluded. Try repositioning.",
         ), heading, None
 
