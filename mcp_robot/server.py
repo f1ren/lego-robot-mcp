@@ -32,7 +32,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
 
   Vision / localization
   ─────────────────────
-  locate_object               VLM-based localization of arbitrary objects (Claude Sonnet)
+  locate_object               VLM-based localization of arbitrary objects (Gemini Flash)
 
 Run with:
     python3 -m mcp_robot.server
@@ -743,13 +743,13 @@ def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
 @mcp.tool()
 def locate_object(description: str) -> list[ImageContent | TextContent]:
     """
-    Locate an arbitrary object using Claude Sonnet vision localization.
+    Locate an arbitrary object using Gemini Flash vision localization.
 
     Use this for objects that YOLO cannot detect — anything outside the COCO-80
     class set, such as "light switch", "door handle", "power outlet",
     "red cable connector", "white box on the shelf", etc.
 
-    Captures the external (DroidCam) camera, asks Claude Sonnet to find the
+    Captures the external (DroidCam) camera, asks Gemini Flash to find the
     object described by *description*, and returns:
       • An annotated frame with the heading arrow, object bounding box, and
         angle label overlaid.
@@ -774,7 +774,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
         if bgr is None:
             return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
 
-        # Ask Claude Sonnet to locate the object
+        # Ask Gemini Flash to locate the object
         vlm_result = vision.locate_object_vlm(bgr, description)
         if vlm_result is None:
             # Return an unannotated (heading-arrow only) frame + helpful message
@@ -825,7 +825,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
             TextContent(
                 type="text",
                 text=(
-                    f"Located '{description}' via Claude Sonnet VLM "
+                    f"Located '{description}' via Gemini Flash VLM "
                     f"(conf={confidence:.0%}) at pixel bbox [{x1},{y1},{x2},{y2}], "
                     f"center={obj_center}."
                 ),

@@ -98,15 +98,13 @@ GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL          = os.getenv("GEMINI_MODEL",          "gemini-robotics-er-1.6-preview")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
+# Model used for free-text object localization (locate_object tool / VLM fallback).
+# Flash is fast and cheap; override with LOCATE_OBJECT_MODEL if needed.
+LOCATE_OBJECT_MODEL = os.getenv("LOCATE_OBJECT_MODEL", "gemini-2.0-flash")
+
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
-
-# ── Anthropic (Claude) object localization ────────────────────────────────────
-# Used as a fallback when YOLO cannot detect the target class (e.g., "light switch").
-# Set ANTHROPIC_API_KEY to enable; leave empty to skip VLM fallback.
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL",   "claude-sonnet-4-6")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging

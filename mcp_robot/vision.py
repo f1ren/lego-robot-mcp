@@ -512,10 +512,11 @@ def locate_object_vlm(
     description: str,
 ) -> tuple[tuple[int, int, int, int], float, str] | None:
     """
-    Ask Claude Sonnet to locate an object described in free text.
+    Ask Gemini Flash to locate an object described in free text.
 
     This is the primary path for objects that YOLO cannot detect (e.g. "light
     switch", "door handle", "red button") — anything outside the COCO-80 set.
+    Uses the existing Gemini client and GEMINI_API_KEY; no extra credentials needed.
 
     Args:
         bgr:         BGR image (from the external DroidCam camera).
@@ -530,22 +531,15 @@ def locate_object_vlm(
 
     import cv2 as _cv2
 
-    if not config.ANTHROPIC_API_KEY:
-        log.warning("locate_object_vlm: ANTHROPIC_API_KEY not set — VLM localization disabled")
-        return None
+    if not config.GEMINI_API_KEY:
+        raise RuntimeError("locate_object_vlm: GEMINI_API_KEY not set — VLM localization disabled")
 
-    try:
-        import anthropic
-    except ImportError:
-        log.warning("locate_object_vlm: anthropic SDK not installed — pip install anthropic")
-        return None
+    from google.genai import types as _gtypes
 
     h, w = bgr.shape[:2]
     ok, buf = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, 90])
     if not ok:
-        log.warning("locate_object_vlm: failed to encode image as JPEG")
-        return None
-    b64 = base64.b64encode(buf.tobytes()).decode()
+        raise RuntimeError("locate_object_vlm: failed to encode image as JPEG")
 
     prompt = (
         f"Find '{description}' in this image.\n\n"
@@ -560,47 +554,38 @@ def locate_object_vlm(
         "Return only the JSON, no markdown, no other text."
     )
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = _get_gemini_client()
+    if client is None:
+        raise RuntimeError("locate_object_vlm: Gemini client unavailable")
+
+    parts = [
+        _gtypes.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"),
+        _gtypes.Part.from_text(text=prompt),
+    ]
+
     t0 = time.monotonic()
-    try:
-        msg = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
-            max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": b64,
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-        )
-    except Exception as exc:
-        log.warning("locate_object_vlm: Claude API call failed: %s", exc)
-        return None
+    resp = client.models.generate_content(
+        model=config.LOCATE_OBJECT_MODEL,
+        contents=[_gtypes.Content(role="user", parts=parts)],
+    )
+    text = (resp.text or "").strip()
 
     elapsed = time.monotonic() - t0
-    text = msg.content[0].text.strip()
-    log.info("VLM locate '%s' (%.1fs):\n%s", description, elapsed, text)
+    log.info("VLM locate '%s' model=%s (%.1fs):\n%s",
+             description, config.LOCATE_OBJECT_MODEL, elapsed, text)
 
     # Strip markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
-        log.warning("locate_object_vlm: no JSON found in response: %s", text)
-        return None
+        log.error("locate_object_vlm: no JSON found in response: %s", text)
+        raise RuntimeError(f"locate_object_vlm: Gemini returned no JSON — raw: {text!r}")
 
     try:
         data = json.loads(m.group())
     except json.JSONDecodeError as exc:
-        log.warning("locate_object_vlm: JSON parse error: %s — raw: %s", exc, text)
-        return None
+        log.error("locate_object_vlm: JSON parse error: %s — raw: %s", exc, text)
+        raise RuntimeError(f"locate_object_vlm: JSON parse error: {exc} — raw: {text!r}") from exc
 
     if not data.get("found", True):
         log.info("locate_object_vlm: '%s' not found in frame", description)
@@ -612,8 +597,8 @@ def locate_object_vlm(
         x2 = int(data["x2"] * w)
         y2 = int(data["y2"] * h)
     except (KeyError, TypeError) as exc:
-        log.warning("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
-        return None
+        log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
+        raise RuntimeError(f"locate_object_vlm: missing bbox fields in response: {data}") from exc
 
     # Clamp to image bounds
     x1 = max(0, min(w - 1, x1))
@@ -621,8 +606,8 @@ def locate_object_vlm(
     x2 = max(0, min(w - 1, x2))
     y2 = max(0, min(h - 1, y2))
     if x2 <= x1 or y2 <= y1:
-        log.warning("locate_object_vlm: degenerate bbox [%d,%d,%d,%d] — ignoring", x1, y1, x2, y2)
-        return None
+        log.error("locate_object_vlm: degenerate bbox [%d,%d,%d,%d] — ignoring", x1, y1, x2, y2)
+        raise RuntimeError(f"locate_object_vlm: degenerate bbox [{x1},{y1},{x2},{y2}] from response: {data}")
 
     confidence = float(data.get("confidence", 0.7))
     note = str(data.get("note", ""))
