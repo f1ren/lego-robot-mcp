@@ -620,7 +620,11 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
         cap.release()
 
 
-def capture_droidcam_still(annotate: bool = True, target_class: str = "cup") -> dict:
+def capture_droidcam_still(
+    annotate: bool = True,
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> dict:
     """
     Return the most recent DroidCam frame.
 
@@ -631,12 +635,15 @@ def capture_droidcam_still(annotate: bool = True, target_class: str = "cup") -> 
     detected (see mcp_robot.heading).
 
     Args:
-        annotate:     If True (default), overlay the heading arrow. Pass False
-                      when the frame is destined for VLM change analysis to avoid
-                      the arrow causing spurious motion detections.
-        target_class: Object class to detect and annotate (e.g. "cup", "ball",
-                      "button", "any").  The detected object's angle relative to
-                      the robot's heading is included in the returned dict.
+        annotate:               If True (default), overlay the heading arrow. Pass
+                                False when the frame is destined for VLM change
+                                analysis to avoid the arrow causing spurious motion
+                                detections.
+        target_class_yolo:      YOLO class key to detect (e.g. "cup", "ball", "any").
+                                The detected object's angle relative to the robot's
+                                heading is included in the returned dict.
+        target_class_free_text: Free-text description for Gemini Flash fallback when
+                                YOLO finds nothing (e.g. "light switch").
 
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
@@ -646,17 +653,21 @@ def capture_droidcam_still(annotate: bool = True, target_class: str = "cup") -> 
         if not annotate:
             return b64, None
         from mcp_robot import grasp_readiness as _gr
-        annotated_b64, angle_deg = _gr.annotate_frame_with_object_b64(b64, target_class=target_class)
+        annotated_b64, angle_deg = _gr.annotate_frame_with_object_b64(
+            b64,
+            target_class_yolo=target_class_yolo,
+            target_class_free_text=target_class_free_text,
+        )
         if angle_deg is not None:
             rot_dir = "CW" if angle_deg > 0 else "CCW"
             log.info(
-                "Heading analysis: target_class=%r — object at %.1f° %s from forward",
-                target_class, abs(angle_deg), rot_dir,
+                "Heading analysis: yolo=%r free_text=%r — object at %.1f° %s from forward",
+                target_class_yolo, target_class_free_text, abs(angle_deg), rot_dir,
             )
         else:
             log.info(
-                "Heading analysis: target_class=%r — no matching object detected; heading arrow only",
-                target_class,
+                "Heading analysis: yolo=%r free_text=%r — no matching object detected; heading arrow only",
+                target_class_yolo, target_class_free_text,
             )
         return annotated_b64, angle_deg
 

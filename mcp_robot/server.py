@@ -625,23 +625,33 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
 # ── gripper ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def control_gripper(action: str, speed: int = 20, expected: str = "", context: str = "", target_class: str = "cup") -> dict:
+def control_gripper(
+    action: str,
+    speed: int = 20,
+    expected: str = "",
+    context: str = "",
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
     Gemini-generated `change_description`.
 
     Args:
-        action:       "open" or "close".
-        speed:        Motor speed, 15–20.
-        expected:     Short, precise description of the expected outcome
-                      (e.g. "gripper closes around the ball").
-        context:      Why this action is being taken and hints for evaluation
-                      (e.g. "grasping paper ball; previous close attempt slipped off").
-        target_class: Object class used by the grasp-readiness gate before
-                      closing the gripper (e.g. "cup", "ball", "button", "any").
-                      Default: "cup".
+        action:                 "open" or "close".
+        speed:                  Motor speed, 15–20.
+        expected:               Short, precise description of the expected outcome
+                                (e.g. "gripper closes around the ball").
+        context:                Why this action is being taken and hints for
+                                evaluation (e.g. "grasping paper ball; previous
+                                close attempt slipped off").
+        target_class_yolo:      YOLO class for the grasp-readiness gate
+                                (e.g. "cup", "ball", "any"). Default: "cup".
+        target_class_free_text: Free-text description for Gemini Flash fallback
+                                when YOLO finds nothing (e.g. "light switch").
     """
-    log.info("[TOOL] control_gripper action=%r speed=%r target_class=%r", action, speed, target_class)
+    log.info("[TOOL] control_gripper action=%r speed=%r yolo=%r free_text=%r",
+             action, speed, target_class_yolo, target_class_free_text)
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
@@ -660,7 +670,11 @@ def control_gripper(action: str, speed: int = 20, expected: str = "", context: s
     bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
     if bgr is None:
         return _err("Grasp readiness gate: could not decode external camera frame.")
-    readiness = grasp_mod.check_grasp_readiness(bgr, target_class=target_class)
+    readiness = grasp_mod.check_grasp_readiness(
+        bgr,
+        target_class_yolo=target_class_yolo,
+        target_class_free_text=target_class_free_text,
+    )
     if not readiness.ready:
         log.warning("[TOOL] control_gripper blocked by grasp readiness gate: %s", readiness.reason)
         return _err(f"Grasp readiness check failed — gripper NOT closed.\n{readiness.to_text()}")
@@ -702,27 +716,33 @@ def put() -> dict:
 # ── grasp readiness ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
+def check_grasp_readiness(
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> list[TextContent]:
     """
     CV-based grasp readiness check using the external (DroidCam) camera.
 
-    Captures a live frame, runs YOLO object detection filtered to *target_class*
-    (and its common synonyms), and verifies two conditions required before
-    closing the gripper:
+    Captures a live frame and verifies two conditions required before closing
+    the gripper:
       1. The target object is touching the robot's front body.
-      2. The green forward-arrow passes well over the object's center of mass
-         (not merely touching its edge).
+      2. The green forward-arrow passes well over the object's center of mass.
 
     Args:
-        target_class: the type of object to look for.  Supported values:
-            "cup"    — matches YOLO classes cup / bowl / bottle / vase  (default)
-            "ball"   — matches sports ball / orange / apple
-            "bottle" — matches bottle / cup / vase
+        target_class_yolo:      YOLO class to look for. Supported values:
+                                  "cup"    — cup / bowl / bottle / vase  (default)
+                                  "ball"   — sports ball / orange / apple
+                                  "bottle" — bottle / cup / vase
+                                  "any"    — most-forward object of any class
+                                Pass "" to skip YOLO entirely.
+        target_class_free_text: Free-text description sent to Gemini Flash when
+                                YOLO finds nothing (e.g. "light switch").
+                                Leave empty to disable the VLM path.
 
     Returns a verdict, a human-readable reason, and — when not ready — an
     actionable next step (drive closer, adjust heading, etc.).
     """
-    log.info("[TOOL] check_grasp_readiness target_class=%s", target_class)
+    log.info("[TOOL] check_grasp_readiness yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
     try:
         frame_result = cam_mod.capture_droidcam_still(annotate=False)
         raw = base64.b64decode(frame_result["frame"])
@@ -731,7 +751,11 @@ def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
         bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
         if bgr is None:
             return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
-        result = grasp_mod.check_grasp_readiness(bgr, target_class=target_class)
+        result = grasp_mod.check_grasp_readiness(
+            bgr,
+            target_class_yolo=target_class_yolo,
+            target_class_free_text=target_class_free_text,
+        )
         return [TextContent(type="text", text=result.to_text())]
     except Exception as exc:
         log.warning("[TOOL] check_grasp_readiness error: %s", exc)
@@ -954,28 +978,38 @@ def capture_external_video_clip(
 
 
 @mcp.tool()
-def get_robot_state(target_class: str = "cup") -> list[ImageContent | TextContent]:
+def get_robot_state(
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
     cameras (Pi Camera = front view; DroidCam = wider third-person view).
     Call this before planning any sequence of actions.
 
     Args:
-        target_class: Object type to detect and annotate in the external
-                      camera frame.  The detected object's angle relative to
-                      the robot's heading is computed and returned so you know
-                      how much to turn before approaching.
-                      Supported values: "cup", "ball", "bottle", "button", "any".
-                      Default: "cup".  Pass "any" to annotate the closest/most
-                      forward object regardless of class.
+        target_class_yolo:      YOLO class to detect and annotate in the external
+                                camera frame. Supported values:
+                                  "cup"    → cup, bowl, bottle, vase  (default)
+                                  "ball"   → sports ball, orange, apple
+                                  "bottle" → bottle, cup, vase
+                                  "any"    → most-forward object of any class
+                                Pass "" to skip YOLO.
+        target_class_free_text: Free-text description for Gemini Flash when YOLO
+                                finds nothing (e.g. "light switch", "door handle").
+                                The detected object's angle from the robot's heading
+                                is returned so you know how much to turn.
     """
     global _state_call_count
-    log.info("[TOOL] get_robot_state target_class=%r", target_class)
+    log.info("[TOOL] get_robot_state yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
     try:
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
         try:
-            droid_frame = cam_mod.capture_droidcam_still(target_class=target_class)
+            droid_frame = cam_mod.capture_droidcam_still(
+                target_class_yolo=target_class_yolo,
+                target_class_free_text=target_class_free_text,
+            )
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(droid_frame["frame"]))
             angle_deg = droid_frame.get("object_angle_deg")
@@ -989,7 +1023,8 @@ def get_robot_state(target_class: str = "cup") -> list[ImageContent | TextConten
                 log.info("get_robot_state heading result: %s", angle_text)
                 content.append(TextContent(type="text", text=angle_text))
             else:
-                log.info("get_robot_state heading result: no '%s' object detected — angle not computed", target_class)
+                log.info("get_robot_state heading result: no object detected (yolo=%r free_text=%r) — angle not computed",
+                         target_class_yolo, target_class_free_text)
         except Exception as exc:
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         if _state_call_count > 1:

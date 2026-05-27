@@ -298,7 +298,8 @@ def _save_debug_image(
 
 def _compute_readiness(
     bgr: np.ndarray,
-    target_class: str = "cup",
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
 ) -> tuple[GraspReadiness, Heading | None, DetectedObject | None]:
     """Core logic — returns (result, heading, selected_object) for debug annotation."""
     h, w = bgr.shape[:2]
@@ -314,35 +315,45 @@ def _compute_readiness(
         ), None, None
 
     # ── 2. Detect objects ────────────────────────────────────────────────
-    try:
-        objects = _yolo_detect(bgr, target_class=target_class)
-    except Exception as exc:
-        log.warning("YOLO detection failed: %s", exc)
-        return GraspReadiness(
-            ready=False,
-            reason=f"Object detection failed: {exc}",
-            action="Check that the YOLO model is installed and the image is valid.",
-        ), heading, None
+    objects: list[DetectedObject] = []
+    if target_class_yolo:
+        try:
+            objects = _yolo_detect(bgr, target_class=target_class_yolo)
+        except Exception as exc:
+            log.warning("YOLO detection failed: %s", exc)
+            return GraspReadiness(
+                ready=False,
+                reason=f"Object detection failed: {exc}",
+                action="Check that the YOLO model is installed and the image is valid.",
+            ), heading, None
 
     if not objects:
-        raw_allowed = _CLASS_SYNONYMS.get(target_class, frozenset({target_class}))
+        raw_allowed = _CLASS_SYNONYMS.get(target_class_yolo, frozenset({target_class_yolo})) if target_class_yolo else None
         looking_for = (
             "any object" if raw_allowed is None
             else ", ".join(sorted(raw_allowed))
         )
-        # VLM fallback: YOLO found nothing → try Claude Sonnet localization
-        vlm_obj = _vlm_detect(bgr, target_class)
-        if vlm_obj is not None:
-            log.info("_compute_readiness: YOLO found nothing for '%s'; VLM found it at %s (conf=%.2f)",
-                     target_class, vlm_obj.center, vlm_obj.confidence)
-            objects = [vlm_obj]
+        # VLM path: try Gemini Flash if a free-text description was provided
+        if target_class_free_text:
+            vlm_obj = _vlm_detect(bgr, target_class_free_text)
+            if vlm_obj is not None:
+                log.info("_compute_readiness: YOLO found nothing for %r; VLM found '%s' at %s (conf=%.2f)",
+                         target_class_yolo or "(skipped)", target_class_free_text,
+                         vlm_obj.center, vlm_obj.confidence)
+                objects = [vlm_obj]
+            else:
+                return GraspReadiness(
+                    ready=False,
+                    reason=(
+                        f"No '{target_class_yolo}' detected by YOLO (looking for: {looking_for})"
+                        f" and Gemini Flash also did not find '{target_class_free_text}'."
+                    ),
+                    action="Ensure the target object is visible and not occluded. Try repositioning.",
+                ), heading, None
         else:
             return GraspReadiness(
                 ready=False,
-                reason=(
-                    f"No '{target_class}' detected in frame by YOLO (looking for: {looking_for})"
-                    " and VLM localization also found nothing."
-                ),
+                reason=f"No '{target_class_yolo}' detected in frame (looking for: {looking_for}).",
                 action="Ensure the target object is visible and not occluded. Try repositioning.",
             ), heading, None
 
@@ -436,17 +447,27 @@ def _compute_readiness(
     return GraspReadiness(ready=False, reason=reason, action=action, **common), heading, obj
 
 
-def check_grasp_readiness(bgr: np.ndarray, target_class: str = "cup") -> GraspReadiness:
+def check_grasp_readiness(
+    bgr: np.ndarray,
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> GraspReadiness:
     """Check whether the scene is ready for the gripper to close.
 
     Args:
         bgr: BGR image from the external (DroidCam) camera.
-        target_class: canonical object type to look for (see _CLASS_SYNONYMS).
+        target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS).
+        target_class_free_text: free-text description for Gemini Flash fallback
+            (e.g. "light switch"). Used only when YOLO finds nothing.
 
     Returns:
         GraspReadiness with ready flag + reason + actionable next step.
     """
-    result, heading, obj = _compute_readiness(bgr, target_class=target_class)
+    result, heading, obj = _compute_readiness(
+        bgr,
+        target_class_yolo=target_class_yolo,
+        target_class_free_text=target_class_free_text,
+    )
     log.info(
         "Grasp readiness: ready=%s | %s%s",
         result.ready,
@@ -457,34 +478,45 @@ def check_grasp_readiness(bgr: np.ndarray, target_class: str = "cup") -> GraspRe
     return result
 
 
-def check_grasp_readiness_jpeg_bytes(jpeg: bytes, target_class: str = "cup") -> GraspReadiness:
+def check_grasp_readiness_jpeg_bytes(
+    jpeg: bytes,
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> GraspReadiness:
     arr = np.frombuffer(jpeg, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
         return GraspReadiness(ready=False, reason="Could not decode image.", action="Provide a valid JPEG frame.")
-    return check_grasp_readiness(bgr, target_class=target_class)
+    return check_grasp_readiness(bgr, target_class_yolo=target_class_yolo, target_class_free_text=target_class_free_text)
 
 
-def check_grasp_readiness_b64(b64: str, target_class: str = "cup") -> GraspReadiness:
+def check_grasp_readiness_b64(
+    b64: str,
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+) -> GraspReadiness:
     try:
         raw = base64.b64decode(b64)
     except Exception:
         return GraspReadiness(ready=False, reason="Could not decode base64 image.")
-    return check_grasp_readiness_jpeg_bytes(raw, target_class=target_class)
+    return check_grasp_readiness_jpeg_bytes(raw, target_class_yolo=target_class_yolo, target_class_free_text=target_class_free_text)
 
 
 # ── combined heading + object annotation ──────────────────────────────────────
 
 def annotate_frame_with_object(
     bgr: np.ndarray,
-    target_class: str = "cup",
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
 ) -> tuple[np.ndarray, float | None]:
     """Detect heading + object, annotate frame with arrow + bbox + angle line.
 
     Detection strategy:
-      1. YOLO (fast, reliable for COCO-80 classes).
-      2. If YOLO returns nothing, fall back to Claude Sonnet VLM localization
-         (handles arbitrary free-text descriptions like "light switch").
+      1. YOLO — if *target_class_yolo* is non-empty, run YOLO filtered to that
+         canonical class (see _CLASS_SYNONYMS).
+      2. Gemini Flash VLM — if YOLO finds nothing and *target_class_free_text*
+         is non-empty, query Gemini Flash with that free-text description.
+         Use this for objects outside COCO-80, e.g. "light switch".
 
     Returns (annotated_bgr, angle_deg) where angle_deg is None when heading or
     object is not detected.  Positive angle = object is CW from forward.
@@ -494,12 +526,12 @@ def annotate_frame_with_object(
     if heading is None:
         return bgr, None
 
-    objects = _yolo_detect(bgr, target_class=target_class)
+    objects = _yolo_detect(bgr, target_class=target_class_yolo) if target_class_yolo else []
     obj = _pick_target(objects, heading) if objects else None
 
-    # VLM fallback: YOLO found nothing → ask Claude Sonnet to locate it
-    if obj is None:
-        obj = _vlm_detect(bgr, target_class)
+    # VLM path: YOLO found nothing (or was skipped) → ask Gemini Flash
+    if obj is None and target_class_free_text:
+        obj = _vlm_detect(bgr, target_class_free_text)
 
     if obj is None:
         return annotate_bgr(bgr), None
@@ -515,7 +547,8 @@ def annotate_frame_with_object(
 
 def annotate_frame_with_object_b64(
     b64: str,
-    target_class: str = "cup",
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
 ) -> tuple[str, float | None]:
     """Base64 JPEG in/out version of annotate_frame_with_object."""
     raw = base64.b64decode(b64)
@@ -523,7 +556,11 @@ def annotate_frame_with_object_b64(
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
         raise RuntimeError("Could not decode base64 JPEG for object annotation")
-    annotated, angle = annotate_frame_with_object(bgr, target_class)
+    annotated, angle = annotate_frame_with_object(
+        bgr,
+        target_class_yolo=target_class_yolo,
+        target_class_free_text=target_class_free_text,
+    )
     ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
     if not ok:
         raise RuntimeError("cv2.imencode failed in annotate_frame_with_object_b64")
