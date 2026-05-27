@@ -196,6 +196,32 @@ def _yolo_detect(
     return objects
 
 
+# ── VLM fallback detector ─────────────────────────────────────────────────────
+
+def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
+    """
+    Call Claude Sonnet to locate *description* in *bgr*.
+
+    Used when YOLO finds no matching objects for non-COCO classes (e.g. "light
+    switch", "door handle"). Returns a DetectedObject so the rest of the
+    heading-angle pipeline can operate unchanged.
+    """
+    from mcp_robot import vision as _vision
+    try:
+        result = _vision.locate_object_vlm(bgr, description)
+        if result is None:
+            return None
+        (x1, y1, x2, y2), confidence, _note = result
+        return DetectedObject(
+            class_name=description,
+            confidence=confidence,
+            x1=x1, y1=y1, x2=x2, y2=y2,
+        )
+    except Exception as exc:
+        log.warning("VLM detect fallback failed for '%s': %s", description, exc)
+        return None
+
+
 # ── object selection ──────────────────────────────────────────────────────────
 
 def _pick_target(objects: list[DetectedObject], h: Heading) -> DetectedObject | None:
@@ -304,11 +330,21 @@ def _compute_readiness(
             "any object" if raw_allowed is None
             else ", ".join(sorted(raw_allowed))
         )
-        return GraspReadiness(
-            ready=False,
-            reason=f"No '{target_class}' detected in frame (looking for: {looking_for}).",
-            action="Ensure the target object is visible and not occluded. Try repositioning.",
-        ), heading, None
+        # VLM fallback: YOLO found nothing → try Claude Sonnet localization
+        vlm_obj = _vlm_detect(bgr, target_class)
+        if vlm_obj is not None:
+            log.info("_compute_readiness: YOLO found nothing for '%s'; VLM found it at %s (conf=%.2f)",
+                     target_class, vlm_obj.center, vlm_obj.confidence)
+            objects = [vlm_obj]
+        else:
+            return GraspReadiness(
+                ready=False,
+                reason=(
+                    f"No '{target_class}' detected in frame by YOLO (looking for: {looking_for})"
+                    " and VLM localization also found nothing."
+                ),
+                action="Ensure the target object is visible and not occluded. Try repositioning.",
+            ), heading, None
 
     # ── 3. Pick the best candidate ───────────────────────────────────────
     obj = _pick_target(objects, heading)
@@ -443,11 +479,16 @@ def annotate_frame_with_object(
     bgr: np.ndarray,
     target_class: str = "cup",
 ) -> tuple[np.ndarray, float | None]:
-    """Detect heading + YOLO object, annotate frame with arrow + bbox + angle line.
+    """Detect heading + object, annotate frame with arrow + bbox + angle line.
+
+    Detection strategy:
+      1. YOLO (fast, reliable for COCO-80 classes).
+      2. If YOLO returns nothing, fall back to Claude Sonnet VLM localization
+         (handles arbitrary free-text descriptions like "light switch").
 
     Returns (annotated_bgr, angle_deg) where angle_deg is None when heading or
     object is not detected.  Positive angle = object is CW from forward.
-    Falls back to heading-only annotation on YOLO failure.
+    Falls back to heading-only annotation on YOLO/VLM failure.
     """
     heading = detect_heading(bgr)
     if heading is None:
@@ -455,6 +496,11 @@ def annotate_frame_with_object(
 
     objects = _yolo_detect(bgr, target_class=target_class)
     obj = _pick_target(objects, heading) if objects else None
+
+    # VLM fallback: YOLO found nothing → ask Claude Sonnet to locate it
+    if obj is None:
+        obj = _vlm_detect(bgr, target_class)
+
     if obj is None:
         return annotate_bgr(bgr), None
 

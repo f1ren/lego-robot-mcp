@@ -102,6 +102,12 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
 
+# ── Anthropic (Claude) object localization ────────────────────────────────────
+# Used as a fallback when YOLO cannot detect the target class (e.g., "light switch").
+# Set ANTHROPIC_API_KEY to enable; leave empty to skip VLM fallback.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL",   "claude-sonnet-4-6")
+
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # RERUN_ENABLED=1          enable rerun logging
 # RERUN_MODE=spawn         launch the desktop viewer (default)

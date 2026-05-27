@@ -507,6 +507,129 @@ def describe_action_video(
         return f"(vision analysis failed: {exc})"
 
 
+def locate_object_vlm(
+    bgr: np.ndarray,
+    description: str,
+) -> tuple[tuple[int, int, int, int], float, str] | None:
+    """
+    Ask Claude Sonnet to locate an object described in free text.
+
+    This is the primary path for objects that YOLO cannot detect (e.g. "light
+    switch", "door handle", "red button") — anything outside the COCO-80 set.
+
+    Args:
+        bgr:         BGR image (from the external DroidCam camera).
+        description: Free-text description of what to find.
+
+    Returns:
+        ((x1, y1, x2, y2), confidence, note) with pixel bbox coordinates and a
+        short explanation, or None if the object is not found / API unavailable.
+    """
+    import json
+    import re
+
+    import cv2 as _cv2
+
+    if not config.ANTHROPIC_API_KEY:
+        log.warning("locate_object_vlm: ANTHROPIC_API_KEY not set — VLM localization disabled")
+        return None
+
+    try:
+        import anthropic
+    except ImportError:
+        log.warning("locate_object_vlm: anthropic SDK not installed — pip install anthropic")
+        return None
+
+    h, w = bgr.shape[:2]
+    ok, buf = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        log.warning("locate_object_vlm: failed to encode image as JPEG")
+        return None
+    b64 = base64.b64encode(buf.tobytes()).decode()
+
+    prompt = (
+        f"Find '{description}' in this image.\n\n"
+        "Return ONLY a JSON object with these fields:\n"
+        "  \"found\": true if the object is visible, false otherwise\n"
+        "  \"x1\": left edge as a fraction of image width  (0.0–1.0)\n"
+        "  \"y1\": top edge as a fraction of image height (0.0–1.0)\n"
+        "  \"x2\": right edge as a fraction of image width  (0.0–1.0)\n"
+        "  \"y2\": bottom edge as a fraction of image height (0.0–1.0)\n"
+        "  \"confidence\": how certain you are (0.0–1.0)\n"
+        "  \"note\": one brief sentence describing what you found and where\n\n"
+        "Return only the JSON, no markdown, no other text."
+    )
+
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    t0 = time.monotonic()
+    try:
+        msg = client.messages.create(
+            model=config.ANTHROPIC_MODEL,
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+    except Exception as exc:
+        log.warning("locate_object_vlm: Claude API call failed: %s", exc)
+        return None
+
+    elapsed = time.monotonic() - t0
+    text = msg.content[0].text.strip()
+    log.info("VLM locate '%s' (%.1fs):\n%s", description, elapsed, text)
+
+    # Strip markdown code fences if present
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        log.warning("locate_object_vlm: no JSON found in response: %s", text)
+        return None
+
+    try:
+        data = json.loads(m.group())
+    except json.JSONDecodeError as exc:
+        log.warning("locate_object_vlm: JSON parse error: %s — raw: %s", exc, text)
+        return None
+
+    if not data.get("found", True):
+        log.info("locate_object_vlm: '%s' not found in frame", description)
+        return None
+
+    try:
+        x1 = int(data["x1"] * w)
+        y1 = int(data["y1"] * h)
+        x2 = int(data["x2"] * w)
+        y2 = int(data["y2"] * h)
+    except (KeyError, TypeError) as exc:
+        log.warning("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
+        return None
+
+    # Clamp to image bounds
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(0, min(w - 1, x2))
+    y2 = max(0, min(h - 1, y2))
+    if x2 <= x1 or y2 <= y1:
+        log.warning("locate_object_vlm: degenerate bbox [%d,%d,%d,%d] — ignoring", x1, y1, x2, y2)
+        return None
+
+    confidence = float(data.get("confidence", 0.7))
+    note = str(data.get("note", ""))
+    log.info("locate_object_vlm: bbox=[%d,%d,%d,%d] conf=%.2f note=%r", x1, y1, x2, y2, confidence, note)
+    return (x1, y1, x2, y2), confidence, note
+
+
 def stack_frames(frames_b64: Sequence[str], quality: int = 90) -> str:
     """
     Composite N frames into one image where later frames appear more opaque.

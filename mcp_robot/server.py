@@ -30,6 +30,10 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   capture_front_video_clip    Capture N-second clip from Pi Camera
   capture_external_video_clip Capture N-second clip from DroidCam
 
+  Vision / localization
+  ─────────────────────
+  locate_object               VLM-based localization of arbitrary objects (Claude Sonnet)
+
 Run with:
     python3 -m mcp_robot.server
 """
@@ -714,6 +718,115 @@ def check_grasp_readiness(target_class: str = "cup") -> list[TextContent]:
         return [TextContent(type="text", text=result.to_text())]
     except Exception as exc:
         log.warning("[TOOL] check_grasp_readiness error: %s", exc)
+        return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+# ── VLM object localization ───────────────────────────────────────────────────
+
+@mcp.tool()
+def locate_object(description: str) -> list[ImageContent | TextContent]:
+    """
+    Locate an arbitrary object using Claude Sonnet vision localization.
+
+    Use this for objects that YOLO cannot detect — anything outside the COCO-80
+    class set, such as "light switch", "door handle", "power outlet",
+    "red cable connector", "white box on the shelf", etc.
+
+    Captures the external (DroidCam) camera, asks Claude Sonnet to find the
+    object described by *description*, and returns:
+      • An annotated frame with the heading arrow, object bounding box, and
+        angle label overlaid.
+      • The angle from the robot's current forward direction to the object
+        (positive = CW, negative = CCW, viewed from above).
+      • A short note from the VLM describing what it found.
+
+    Pass the returned angle directly to `turn(body_degrees=<angle>)` to face
+    the object before driving toward it.
+
+    Args:
+        description: Free-text description of the object to find, e.g.
+                     "light switch", "door handle", "yellow power strip".
+    """
+    log.info("[TOOL] locate_object description=%r", description)
+    try:
+        # Capture external camera (unannotated — VLM should see the raw scene)
+        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+        raw = base64.b64decode(frame_result["frame"])
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
+
+        # Ask Claude Sonnet to locate the object
+        vlm_result = vision.locate_object_vlm(bgr, description)
+        if vlm_result is None:
+            # Return an unannotated (heading-arrow only) frame + helpful message
+            annotated_bgr = heading.annotate_bgr(bgr)
+            ok, buf = cv2.imencode(".jpg", annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            frame_b64 = base64.b64encode(buf.tobytes()).decode() if ok else frame_result["frame"]
+            return [
+                _image_content(frame_b64),
+                TextContent(
+                    type="text",
+                    text=(
+                        f"Object not found: '{description}' was not detected in the external "
+                        "camera frame. Check that the object is visible and try again."
+                    ),
+                ),
+            ]
+
+        (x1, y1, x2, y2), confidence, note = vlm_result
+        obj_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+
+        # Compute heading angle to object
+        h_result = heading.detect_heading(bgr)
+        angle_deg: float | None = None
+        angle_text = ""
+        if h_result is not None:
+            angle_deg = heading.compute_heading_to_object_angle(h_result, obj_center)
+            rot_dir = "CW" if angle_deg > 0 else "CCW"
+            angle_text = (
+                f"Object-to-heading angle: {abs(angle_deg):.0f}° {rot_dir} "
+                f"(positive=CW, negative=CCW, viewed from above). "
+                f"Pass this as body_degrees to turn() to face the object."
+            )
+
+        # Annotate frame: heading arrow + object bbox + angle line
+        annotated_bgr = heading.annotate_bgr(
+            bgr,
+            obj_center=obj_center,
+            obj_bbox=(x1, y1, x2, y2),
+        )
+        ok, buf = cv2.imencode(".jpg", annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            frame_b64 = frame_result["frame"]
+        else:
+            frame_b64 = base64.b64encode(buf.tobytes()).decode()
+
+        content: list[ImageContent | TextContent] = [
+            _image_content(frame_b64),
+            TextContent(
+                type="text",
+                text=(
+                    f"Located '{description}' via Claude Sonnet VLM "
+                    f"(conf={confidence:.0%}) at pixel bbox [{x1},{y1},{x2},{y2}], "
+                    f"center={obj_center}."
+                ),
+            ),
+        ]
+        if note:
+            content.append(TextContent(type="text", text=f"VLM note: {note}"))
+        if angle_text:
+            content.append(TextContent(type="text", text=angle_text))
+        elif h_result is None:
+            content.append(TextContent(
+                type="text",
+                text="Heading not detected — robot yellow body not visible; angle cannot be computed.",
+            ))
+        return content
+
+    except Exception as exc:
+        log.warning("[TOOL] locate_object error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
