@@ -311,7 +311,7 @@ def _draw_object_annotation(
     cv2.line(out, (bx, by), (ox, oy), _OBJ_COLOR_BGR, max(1, thickness - 1), cv2.LINE_AA)
     cv2.circle(out, (ox, oy), max(4, thickness * 2), _OBJ_COLOR_BGR, -1)
 
-    angle_text = f"{abs(angle_deg):.0f}° {rot_dir}"
+    angle_text = f"{abs(angle_deg):.0f}{rot_dir}"
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.45, diag * 0.0007)
     (tw, th), baseline = cv2.getTextSize(angle_text, font, font_scale, thickness)

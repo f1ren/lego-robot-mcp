@@ -417,7 +417,7 @@ def _compute_readiness(
     cross = fw[0] * dy - fw[1] * dx
     rot_dir = "CW" if cross > 0 else "CCW"
     rot_deg = math.degrees(math.atan2(perp_dist, max(t, 1.0)))
-    rot_hint = f"{rot_deg:.0f}° {rot_dir}"
+    rot_hint = f"{rot_deg:.0f}{rot_dir}"
 
     # Build actionable feedback
     if not touches_body and not arrow_over:
