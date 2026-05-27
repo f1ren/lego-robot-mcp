@@ -567,6 +567,9 @@ def locate_object_vlm(
     resp = client.models.generate_content(
         model=config.LOCATE_OBJECT_MODEL,
         contents=[_gtypes.Content(role="user", parts=parts)],
+        config=_gtypes.GenerateContentConfig(
+            thinking_config=_gtypes.ThinkingConfig(thinking_budget=0),
+        ),
     )
     text = (resp.text or "").strip()
 

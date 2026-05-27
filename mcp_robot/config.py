@@ -100,7 +100,7 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
 # Model used for free-text object localization (locate_object tool / VLM fallback).
 # Flash is fast and cheap; override with LOCATE_OBJECT_MODEL if needed.
-LOCATE_OBJECT_MODEL = os.getenv("LOCATE_OBJECT_MODEL", "gemini-2.0-flash")
+LOCATE_OBJECT_MODEL = os.getenv("LOCATE_OBJECT_MODEL", "gemini-2.5-flash")
 
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
