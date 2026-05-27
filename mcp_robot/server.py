@@ -117,26 +117,36 @@ def _err(msg: str) -> dict:
     return {"ok": False, "error": msg}
 
 
-_MAX_PIXELS = 1_000_000  # ~1 megapixel cap for images sent to AI agents
-_STATE_MAX_PIXELS = 76_800  # 320×240 — small thumbnail for get_robot_state
+# Image size caps for frames returned to the MCP client (i.e. shown to Claude).
+# Claude Code truncates MCP tool output at ~25 000 tokens.  A 640×480 JPEG at
+# quality 85 is ~80–120 KB, which base64-encodes to ~110–160 KB (~30–46 K
+# tokens) — well over the limit.  Keep all client-visible images small:
+#   • _MAX_PIXELS  = 172 800 ≈ 480×360 — used for single-frame image tools
+#   • _CLIP_MAX_PIXELS = 76 800 ≈ 320×240 — used for multi-frame video clips
+#   • _STATE_MAX_PIXELS = 76 800 ≈ 320×240 — compact thumbnail for get_robot_state
+# VQA calls (Gemini / Ollama) are made server-side and receive the full-res
+# frames from disk — this cap only affects what arrives in the Claude context.
+_MAX_PIXELS       = 172_800   # ≈480×360 — ~15–30 KB JPEG → ~6–12 K tokens
+_CLIP_MAX_PIXELS  =  76_800   # ≈320×240 — per-frame cap for video clips
+_STATE_MAX_PIXELS =  76_800   # ≈320×240 — small thumbnail for get_robot_state
 
 
-def _scale_jpeg_b64(frame_b64: str, max_pixels: int = _MAX_PIXELS, quality: int = 85) -> str:
-    """Scale a base64 JPEG down to ≤ max_pixels, preserving aspect ratio."""
+def _scale_jpeg_b64(frame_b64: str, max_pixels: int = _MAX_PIXELS, quality: int = 70) -> str:
+    """Scale and re-encode a base64 JPEG to ≤ max_pixels at the given quality.
+
+    Always re-encodes (never passes through raw bytes) so the quality reduction
+    is applied even when the frame is already within the pixel budget.
+    """
     raw = base64.b64decode(frame_b64)
     arr = np.frombuffer(raw, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         return frame_b64
     h, w = img.shape[:2]
-    if w * h <= max_pixels and quality == 85:
-        return frame_b64  # already small enough, avoid re-encoding
-    if w * h <= max_pixels:
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        return base64.b64encode(buf.tobytes()).decode() if ok else frame_b64
-    scale = (max_pixels / (w * h)) ** 0.5
-    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    if w * h > max_pixels:
+        scale = (max_pixels / (w * h)) ** 0.5
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         return frame_b64
@@ -144,7 +154,14 @@ def _scale_jpeg_b64(frame_b64: str, max_pixels: int = _MAX_PIXELS, quality: int 
 
 
 def _image_content(frame_b64: str) -> ImageContent:
+    """Single-frame image at ≈480×360, quality 70 (~15–30 KB, ~5–10 K tokens)."""
     return ImageContent(type="image", data=_scale_jpeg_b64(frame_b64), mimeType="image/jpeg")
+
+
+def _clip_image_content(frame_b64: str) -> ImageContent:
+    """Per-frame image for video clips at ≈320×240, quality 65 (~8–15 KB, ~3–5 K tokens)."""
+    data = _scale_jpeg_b64(frame_b64, max_pixels=_CLIP_MAX_PIXELS, quality=65)
+    return ImageContent(type="image", data=data, mimeType="image/jpeg")
 
 
 def _thumbnail_image_content(frame_b64: str) -> ImageContent:
@@ -893,7 +910,7 @@ def capture_front_video_clip(
             )
         ]
         for frame_b64 in result["frames"]:
-            content.append(_image_content(frame_b64))
+            content.append(_clip_image_content(frame_b64))
         vqa = vision.describe_clip("pi_camera", result["frames"], result.get("paths"))
         if vqa:
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
@@ -924,7 +941,7 @@ def capture_external_video_clip(
             )
         ]
         for frame_b64 in result["frames"]:
-            content.append(_image_content(frame_b64))
+            content.append(_clip_image_content(frame_b64))
         vqa = vision.describe_clip(
             "droidcam", result["frames"], result.get("paths"),
             raw_frames=result.get("raw_frames"),
