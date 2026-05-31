@@ -1,8 +1,9 @@
 """
 Unit tests for navigation.detect_obstacles and navigation.plan_path.
 
-Uses the existing droidcam_cup.jpg fixture (robot body + cup visible) so
-no live camera or robot connection is required.
+Uses droidcam_nav_obstacle.jpg — a live-captured frame showing the robot on the
+right, a cup on the upper-left, and a wooden cabinet across the top that blocks
+the straight-line path.  No live camera or robot connection required.
 
 Each test run saves its debug images to tests/fixtures/navigation/annotated/:
   step_00_raw.jpg          — unmodified fixture frame
@@ -17,7 +18,7 @@ import unittest
 import cv2
 
 FIXTURES    = pathlib.Path(__file__).parent / "fixtures"
-CUP_IMG     = FIXTURES / "grasp_readiness" / "droidcam_cup.jpg"
+CUP_IMG     = FIXTURES / "navigation" / "droidcam_nav_obstacle.jpg"
 ANNOTATED   = FIXTURES / "navigation" / "annotated"
 
 
@@ -140,8 +141,8 @@ class TestNavigation(unittest.TestCase):
     # ── debug images saved ────────────────────────────────────────────────────
 
     def test_debug_images_written(self):
-        """save_debug_images must write all three expected files."""
-        for key in ("raw", "obstacle_mask", "nav_overlay"):
+        """save_debug_images must write raw, obstacle_mask, depth, and nav_overlay."""
+        for key in ("raw", "obstacle_mask", "depth", "nav_overlay"):
             self.assertIn(key, self._saved, f"Missing key '{key}' in saved dict")
             path = pathlib.Path(self._saved[key])
             self.assertTrue(path.exists(), f"File not written: {path}")
