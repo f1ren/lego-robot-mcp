@@ -369,6 +369,20 @@ def _with_change_analysis(
         vqa_paths = [frame_paths[i] for i in vqa_indices]
     else:
         vqa_labeled, vqa_raw, vqa_paths = labeled, raw_labeled, frame_paths
+
+    # Build per-camera stacks from all annotated frames (not just VQA subset).
+    cam_frames: dict[str, list[str]] = {}
+    for lbl, b64 in labeled:
+        cam_frames.setdefault(lbl, []).append(b64)
+    cam_stacks = [
+        vision.stack_frames(cam_b64s) if len(cam_b64s) > 1 else cam_b64s[0]
+        for cam_b64s in cam_frames.values()
+    ]
+    viz.log_annotated_images(
+        cam_stacks[0] if len(cam_stacks) > 0 else None,
+        cam_stacks[1] if len(cam_stacks) > 1 else None,
+    )
+
     description = vision.describe_action_video(
         action_desc, expected, vqa_labeled, vqa_paths, context=context,
         raw_labeled_frames=vqa_raw,
@@ -841,10 +855,18 @@ def navigate_to(
             ok_enc, overlay_buf = cv2.imencode(
                 ".jpg", overlay_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82]
             )
+            overlay_b64: str | None = None
             if ok_enc:
-                key_frames_b64.append(
-                    base64.b64encode(overlay_buf.tobytes()).decode()
-                )
+                overlay_b64 = base64.b64encode(overlay_buf.tobytes()).decode()
+                key_frames_b64.append(overlay_b64)
+
+            # Obstacle mask (green=free, red=blocked) as companion image.
+            mask_vis = np.zeros_like(bgr)
+            mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
+            mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
+            ok_mask, mask_buf = cv2.imencode(".jpg", mask_vis, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            mask_b64 = base64.b64encode(mask_buf.tobytes()).decode() if ok_mask else None
+            viz.log_annotated_images(mask_b64, overlay_b64)
 
             # ── 8. Termination checks ─────────────────────────────────────
             if nav_mod.at_target(obs_map):
@@ -1053,6 +1075,7 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
     log.info("[TOOL] get_front_camera_image")
     try:
         result = cam_mod.capture_still()
+        viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
@@ -1074,6 +1097,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     log.info("[TOOL] get_external_camera_image")
     try:
         result = cam_mod.capture_droidcam_still()
+        viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
@@ -1181,6 +1205,7 @@ def get_robot_state(
                 target_class_yolo=target_class_yolo,
                 target_class_free_text=target_class_free_text,
             )
+            viz.log_annotated_images(droid_frame["frame"])
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(droid_frame["frame"]))
             angle_deg = droid_frame.get("object_angle_deg")

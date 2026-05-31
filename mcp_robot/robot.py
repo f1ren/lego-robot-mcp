@@ -12,7 +12,7 @@ On error they raise RuntimeError (caught and wrapped by the MCP server).
 """
 from __future__ import annotations
 
-from mcp_robot import config, viz
+from mcp_robot import config
 from mcp_robot.rpi_client import get_client
 
 # ── RPi script templates ──────────────────────────────────────────────────────
@@ -118,7 +118,6 @@ def get_all_positions() -> dict:
         "gripper":     raw.get(config.PORT_GRIPPER),
         "ports":       raw,
     }
-    viz.log_motor_positions(positions)
     return positions
 
 
@@ -136,9 +135,6 @@ def move_motor(port: str, degrees: int, speed: int) -> dict:
         _MOVE_SINGLE_MOTOR.format(port=port, degrees=degrees, speed=speed),
         timeout=max(30, abs(degrees) // 10 + 5),
     )
-    name = _PORT_TO_NAME.get(port, port)
-    viz.log_motor_positions({name: result["start"]})
-    viz.log_motor_positions({name: result["end"]})
     return result
 
 
@@ -160,19 +156,14 @@ def drive(
     # Left motor (A) is physically inverted — negate so positive = forward matches right wheel convention.
     # Verified: MotorPair('A','B').run_for_seconds(1, -20, 20) moves forward.
     if duration_s == 0:
-        result = get_client().run_python(
+        return get_client().run_python(
             _STOP_WHEELS.format(
                 left_port=config.PORT_LEFT_WHEEL,
                 right_port=config.PORT_RIGHT_WHEEL,
             )
         )
-        viz.log_motor_positions({
-            "left_wheel":  result.get("left"),
-            "right_wheel": result.get("right"),
-        })
-        return result
 
-    result = get_client().run_python(
+    return get_client().run_python(
         _DRIVE_WHEELS.format(
             left_port=config.PORT_LEFT_WHEEL,
             right_port=config.PORT_RIGHT_WHEEL,
@@ -182,11 +173,6 @@ def drive(
         ),
         timeout=int(duration_s + 10),
     )
-    viz.log_motor_positions({
-        "left_wheel":  result.get("left"),
-        "right_wheel": result.get("right"),
-    })
-    return result
 
 
 def drive_degrees(
@@ -211,7 +197,7 @@ def drive_degrees(
         left_speed:  Left wheel speed, -100 to 100. Positive = forward.
         right_speed: Right wheel speed, -100 to 100. Positive = forward.
     """
-    result = get_client().run_python(
+    return get_client().run_python(
         _DRIVE_WHEELS_BY_DEGREES.format(
             left_port=config.PORT_LEFT_WHEEL,
             right_port=config.PORT_RIGHT_WHEEL,
@@ -221,11 +207,6 @@ def drive_degrees(
         ),
         timeout=max(30, abs(degrees) // 50 + 10),
     )
-    viz.log_motor_positions({
-        "left_wheel":  result.get("left"),
-        "right_wheel": result.get("right"),
-    })
-    return result
 
 
 def turn(body_degrees: float, speed: int) -> dict:

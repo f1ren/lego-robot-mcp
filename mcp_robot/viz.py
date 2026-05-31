@@ -46,7 +46,10 @@ def _send_blueprint() -> None:
                 rrb.Spatial2DView(name="Pi Camera", origin="camera/rpi"),
                 rrb.Spatial2DView(name="DroidCam", origin="camera/droidcam"),
             ),
-            rrb.TimeSeriesView(name="Motors", origin="motors"),
+            rrb.Vertical(
+                rrb.Spatial2DView(name="Annotated A", origin="action/image_a"),
+                rrb.Spatial2DView(name="Annotated B", origin="action/image_b"),
+            ),
         ),
         collapse_panels=True,
     )
@@ -127,22 +130,20 @@ def log_droidcam_frame(frame_b64: str, timestamp: float) -> None:
 
 
 
-_motor_series_logged: set[str] = set()
+def log_annotated_images(img_a_b64: str | None, img_b_b64: str | None = None) -> None:
+    """Log a pair of annotated action images to the Rerun viewer.
 
-
-def log_motor_positions(positions: dict) -> None:
-    """Log a {port: degrees} dict as scalar timeseries."""
+    img_a: left panel (e.g. first VQA frame, obstacle mask, or camera still)
+    img_b: right panel (e.g. last VQA frame, nav overlay) — optional
+    """
     if not _ensure_init():
         return
     rr = _rr()
     rr.set_time("time", timestamp=time.time())
-    for port, deg in positions.items():
-        if isinstance(deg, (int, float)):
-            entity = f"motors/{port}"
-            if entity not in _motor_series_logged:
-                rr.log(entity, rr.SeriesLines(names=[port]), static=True)
-                _motor_series_logged.add(entity)
-            rr.log(entity, rr.Scalars(float(deg)))
+    if img_a_b64:
+        rr.log("action/image_a", rr.Image(_b64_to_numpy(img_a_b64)))
+    if img_b_b64:
+        rr.log("action/image_b", rr.Image(_b64_to_numpy(img_b_b64)))
 
 
 def flush() -> None:
