@@ -34,8 +34,13 @@ log = logging.getLogger(__name__)
 
 # HSV ranges tuned against tests/fixtures/*/droidcam_*.jpg.
 # OpenCV HSV: H in [0,179], S in [0,255], V in [0,255].
-_YELLOW_HSV_LO = np.array([15, 130, 100], dtype=np.uint8)
-_YELLOW_HSV_HI = np.array([35, 255, 255], dtype=np.uint8)
+# Public so navigation.py can reuse the same thresholds for floor exclusion.
+YELLOW_HSV_LO = np.array([15, 130, 100], dtype=np.uint8)
+YELLOW_HSV_HI = np.array([35, 255, 255], dtype=np.uint8)
+
+# Keep private aliases for any internal usage below (avoids touching every reference).
+_YELLOW_HSV_LO = YELLOW_HSV_LO
+_YELLOW_HSV_HI = YELLOW_HSV_HI
 
 # Gripper jaws + arm: low value (dark), low-to-medium saturation.
 _BLACK_V_MAX = 70

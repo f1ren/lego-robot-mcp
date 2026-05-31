@@ -56,6 +56,7 @@ import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
 from mcp_robot import config, heading, viz, vision
 from mcp_robot import grasp_readiness as grasp_mod
+from mcp_robot import navigation as nav_mod
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -719,6 +720,217 @@ def check_grasp_readiness(
     except Exception as exc:
         log.warning("[TOOL] check_grasp_readiness error: %s", exc)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+# ── navigation ────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def navigate_to(
+    target_class_yolo: str = "cup",
+    target_class_free_text: str = "",
+    max_steps: int = 6,
+) -> list[ImageContent | TextContent]:
+    """
+    Navigate the robot toward a target object using CV-based obstacle avoidance.
+
+    At every step the tool:
+      1. Captures an external (DroidCam) frame and detects robot + target.
+      2. Builds a pixel-resolution obstacle map (floor segmentation + yellow-body
+         exclusion) and a coarse navigable grid.
+      3. Runs A* from the robot's grid cell to the target's grid cell.
+      4. Saves step_NN_raw.jpg, step_NN_obstacle_mask.jpg, and
+         step_NN_nav_overlay.jpg to SNAPSHOT_DIR/navigate_to_<ts>/ for
+         visual verification and unit-test fixtures.
+      5. Executes the next turn + drive command (with full video recording and
+         VQA via _with_change_analysis, same as all other motor tools).
+      6. Repeats until the robot is at the target, the path is blocked, or
+         max_steps is reached.
+
+    Returns a stacked composite of all per-step overlay frames so you can
+    see the full trajectory at a glance, plus a text log.
+
+    Args:
+        target_class_yolo:      YOLO class for the target (e.g. "cup", "ball",
+                                "bottle", "any"). Pass "" to skip YOLO.
+        target_class_free_text: Free-text description for Gemini Flash fallback
+                                when YOLO finds nothing (e.g. "light switch").
+        max_steps:              Maximum navigation steps (default 6).
+    """
+    log.info("[TOOL] navigate_to yolo=%r free_text=%r max_steps=%r",
+             target_class_yolo, target_class_free_text, max_steps)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    nav_dir = os.path.join(config.SNAPSHOT_DIR, f"navigate_to_{ts}") if config.SNAPSHOT_DIR else ""
+
+    key_frames_b64: list[str] = []
+    step_logs: list[str] = []
+    outcome = "max_steps_reached"
+
+    try:
+        for step in range(max_steps):
+            parts: list[str] = [f"=== Step {step + 1}/{max_steps} ==="]
+
+            # ── 1. Capture external frame ─────────────────────────────────
+            try:
+                frame_result = cam_mod.capture_droidcam_still(annotate=False)
+            except Exception as exc:
+                parts.append(f"Camera capture failed: {exc}")
+                step_logs.append("\n".join(parts))
+                outcome = "camera_error"
+                break
+
+            raw_bytes = base64.b64decode(frame_result["frame"])
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is None:
+                parts.append("Could not decode camera frame")
+                step_logs.append("\n".join(parts))
+                outcome = "camera_error"
+                break
+
+            # ── 2. Detect robot heading (reuses heading.detect_heading) ───
+            h_result = heading.detect_heading(bgr)
+            if h_result is None:
+                parts.append("WARNING: robot yellow body not detected — heading unknown")
+            else:
+                parts.append(f"Robot at {h_result.body_center}, "
+                             f"forward={tuple(round(v, 2) for v in h_result.forward)}")
+
+            # ── 3. Detect target (same path as grasp_readiness + locate_object) ──
+            target_obj = None
+            if target_class_yolo:
+                try:
+                    objects = grasp_mod._yolo_detect(bgr, target_class=target_class_yolo)
+                    if objects:
+                        target_obj = (
+                            grasp_mod._pick_target(objects, h_result)
+                            if h_result is not None
+                            else max(objects, key=lambda o: o.confidence)
+                        )
+                except Exception as exc:
+                    parts.append(f"YOLO error: {exc}")
+
+            if target_obj is None and target_class_free_text:
+                target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+
+            if target_obj is None:
+                parts.append(f"Target not detected "
+                             f"({target_class_yolo or target_class_free_text})")
+            else:
+                parts.append(f"Target '{target_obj.class_name}' "
+                             f"at {target_obj.center} conf={target_obj.confidence:.0%}")
+
+            # ── 4. Obstacle detection ─────────────────────────────────────
+            obs_map = nav_mod.detect_obstacles(bgr, h_result, target_obj)
+            free_frac = (obs_map.free_mask > 0).mean()
+            parts.append(f"Obstacle map: {free_frac:.0%} free space")
+
+            # ── 5. Path planning ──────────────────────────────────────────
+            plan = nav_mod.plan_path(obs_map)
+            parts.append(f"Path: {plan.reason}")
+
+            # ── 6. Save debug images (raw frame for testing + overlays) ───
+            if nav_dir:
+                try:
+                    nav_mod.save_debug_images(bgr, obs_map, plan, nav_dir, step)
+                except Exception as exc:
+                    log.warning("Failed to save nav debug images: %s", exc)
+
+            # ── 7. Collect key frame as b64 (nav overlay) ─────────────────
+            overlay_bgr = nav_mod.draw_nav_overlay(bgr, obs_map, plan, step + 1)
+            ok_enc, overlay_buf = cv2.imencode(
+                ".jpg", overlay_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82]
+            )
+            if ok_enc:
+                key_frames_b64.append(
+                    base64.b64encode(overlay_buf.tobytes()).decode()
+                )
+
+            # ── 8. Termination checks ─────────────────────────────────────
+            if nav_mod.at_target(obs_map):
+                parts.append("AT TARGET — navigation complete")
+                step_logs.append("\n".join(parts))
+                outcome = "success"
+                break
+
+            if not plan.reachable:
+                parts.append(f"PATH BLOCKED — {plan.reason}")
+                step_logs.append("\n".join(parts))
+                outcome = "path_blocked"
+                break
+
+            # ── 9. Execute next step ──────────────────────────────────────
+            turn_deg, drive_s = nav_mod.commands_for_step(obs_map, plan, h_result)
+            parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_s:.1f}s")
+
+            nav_ctx = (
+                f"navigating to {target_class_yolo or target_class_free_text}; "
+                f"step {step + 1}/{max_steps}"
+            )
+
+            if abs(turn_deg) > 8:
+                direction = "CW" if turn_deg > 0 else "CCW"
+                _td = float(turn_deg)
+                _with_change_analysis(
+                    f"navigate_to step {step + 1} — turn {turn_deg:+.0f}°",
+                    f"robot rotates ~{abs(turn_deg):.0f}° {direction} in place",
+                    lambda td=_td: robot_mod.turn(td, config.SPEED_MAX),
+                    context=nav_ctx,
+                    vqa_cameras={"droidcam"},
+                )
+
+            _ds = float(drive_s)
+            _with_change_analysis(
+                f"navigate_to step {step + 1} — drive {drive_s:.1f}s forward",
+                f"robot moves forward ~{drive_s:.1f}s toward target",
+                lambda ds=_ds: robot_mod.drive(
+                    config.SPEED_MAX, config.SPEED_MAX, ds
+                ),
+                context=nav_ctx,
+                vqa_cameras={"droidcam"},
+            )
+
+            step_logs.append("\n".join(parts))
+
+        else:
+            step_logs.append(
+                f"Reached max_steps ({max_steps}) without arriving at target"
+            )
+
+    except Exception as exc:
+        log.warning("[TOOL] navigate_to error: %s", exc, exc_info=True)
+        step_logs.append(f"ERROR: {exc}")
+        outcome = "error"
+
+    # ── Final report ───────────────────────────────────────────────────────
+    content: list[ImageContent | TextContent] = []
+
+    if key_frames_b64:
+        try:
+            stacked_b64 = (
+                vision.stack_frames(key_frames_b64)
+                if len(key_frames_b64) > 1
+                else key_frames_b64[0]
+            )
+            content.append(_image_content(stacked_b64))
+        except Exception as exc:
+            log.warning("navigate_to: could not stack key frames: %s", exc)
+
+    outcome_text = {
+        "success":           "Navigation successful — robot is at the target.",
+        "path_blocked":      "Navigation failed — no obstacle-free path found.",
+        "camera_error":      "Navigation aborted — camera error.",
+        "error":             "Navigation aborted — unexpected error.",
+        "max_steps_reached": f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
+    }.get(outcome, outcome)
+
+    log_text = "\n\n".join(step_logs) if step_logs else "(no steps executed)"
+    if nav_dir:
+        log_text += f"\n\nDebug images: {nav_dir}"
+    content.append(
+        TextContent(type="text", text=f"Navigate-to outcome: {outcome_text}\n\n{log_text}")
+    )
+    return content
 
 
 # ── VLM object localization ───────────────────────────────────────────────────
