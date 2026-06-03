@@ -738,6 +738,29 @@ def check_grasp_readiness(
 
 # ── navigation ────────────────────────────────────────────────────────────────
 
+def _nav_track_motor(
+    base_overlay: np.ndarray,
+    stop_event: threading.Event,
+) -> None:
+    """Background thread for navigate_to: stream DroidCam frames with CV
+    robot-position tracking overlaid on the planned path to Rerun.
+
+    Called while motors are running; replaces VQA for step verification.
+    """
+    trail: list[tuple[int, int]] = []
+
+    def _on_frame(bgr: np.ndarray, ts: float) -> None:
+        robot_px = nav_mod.detect_robot_px(bgr)
+        if robot_px is not None:
+            trail.append(robot_px)
+            if len(trail) > 40:
+                trail.pop(0)
+        tracking = nav_mod.draw_tracking_overlay(base_overlay, trail)
+        viz.log_nav_tracking(tracking, ts)
+
+    cam_mod.stream_droidcam_bgr(_on_frame, stop_event)
+
+
 @mcp.tool()
 def navigate_to(
     target_class_yolo: str = "cup",
@@ -755,8 +778,9 @@ def navigate_to(
       4. Saves step_NN_raw.jpg, step_NN_obstacle_mask.jpg, and
          step_NN_nav_overlay.jpg to SNAPSHOT_DIR/navigate_to_<ts>/ for
          visual verification and unit-test fixtures.
-      5. Executes the next turn + drive command (with full video recording and
-         VQA via _with_change_analysis, same as all other motor tools).
+      5. Executes the next turn + drive command while a background thread
+         continuously tracks the robot's yellow body via CV and streams the
+         live position overlaid on the planned path to Rerun (navigation/tracking).
       6. Repeats until the robot is at the target, the path is blocked, or
          max_steps is reached.
 
@@ -885,32 +909,27 @@ def navigate_to(
             turn_deg, drive_s = nav_mod.commands_for_step(obs_map, plan, h_result)
             parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_s:.1f}s")
 
-            nav_ctx = (
-                f"navigating to {target_class_yolo or target_class_free_text}; "
-                f"step {step + 1}/{max_steps}"
+            # CV tracking thread streams robot position on the planned path to
+            # Rerun in real-time — no VQA needed during motor execution.
+            _track_stop = threading.Event()
+            _track_thread = threading.Thread(
+                target=_nav_track_motor,
+                args=(overlay_bgr, _track_stop),
+                daemon=True,
             )
-
-            if abs(turn_deg) > 8:
-                direction = "CW" if turn_deg > 0 else "CCW"
-                _td = float(turn_deg)
-                _with_change_analysis(
-                    f"navigate_to step {step + 1} — turn {turn_deg:+.0f}°",
-                    f"robot rotates ~{abs(turn_deg):.0f}° {direction} in place",
-                    lambda td=_td: robot_mod.turn(td, config.SPEED_MAX),
-                    context=nav_ctx,
-                    vqa_cameras={"droidcam"},
-                )
-
-            _ds = float(drive_s)
-            _with_change_analysis(
-                f"navigate_to step {step + 1} — drive {drive_s:.1f}s forward",
-                f"robot moves forward ~{drive_s:.1f}s toward target",
-                lambda ds=_ds: robot_mod.drive(
-                    config.SPEED_MAX, config.SPEED_MAX, ds
-                ),
-                context=nav_ctx,
-                vqa_cameras={"droidcam"},
-            )
+            _track_thread.start()
+            try:
+                if abs(turn_deg) > 8:
+                    direction = "CW" if turn_deg > 0 else "CCW"
+                    log.info("[navigate_to] step %d — turn %+.0f° %s",
+                             step + 1, turn_deg, direction)
+                    robot_mod.turn(float(turn_deg), config.SPEED_MAX)
+                log.info("[navigate_to] step %d — drive %.1fs forward",
+                         step + 1, drive_s)
+                robot_mod.drive(config.SPEED_MAX, config.SPEED_MAX, float(drive_s))
+            finally:
+                _track_stop.set()
+                _track_thread.join(timeout=3.0)
 
             step_logs.append("\n".join(parts))
 

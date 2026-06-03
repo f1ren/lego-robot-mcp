@@ -717,6 +717,41 @@ def at_target(obs_map: ObstacleMap) -> bool:
     return dist <= obs_map.robot_radius_px + obs_map.target_radius_px
 
 
+def detect_robot_px(bgr: np.ndarray) -> tuple[int, int] | None:
+    """Return the robot's yellow-body centroid as (x, y) pixel coords, or None.
+
+    Cheap enough to call on every DroidCam frame during motor execution.
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, YELLOW_HSV_LO, YELLOW_HSV_HI)
+    ys, xs = np.where(yellow > 0)
+    if len(xs) < 200:
+        return None
+    return (int(xs.mean()), int(ys.mean()))
+
+
+def draw_tracking_overlay(
+    base_overlay: np.ndarray,
+    trail: list[tuple[int, int]],
+) -> np.ndarray:
+    """Draw live robot positions (trail) onto a pre-planned nav overlay image.
+
+    Older positions are rendered dimmer; the newest is a bright cyan dot + ring.
+    base_overlay must already contain the A* path and obstacle tint.
+    """
+    out = base_overlay.copy()
+    n = len(trail)
+    for i, px in enumerate(trail):
+        alpha = 0.3 + 0.7 * (i + 1) / max(n, 1)
+        c = int(alpha * 255)
+        cv2.circle(out, px, 4, (0, c, c), -1)
+    if trail:
+        rx, ry = trail[-1]
+        cv2.circle(out, (rx, ry), 12, (0, 255, 255), 2)
+        cv2.circle(out, (rx, ry), 5,  (0, 255, 255), -1)
+    return out
+
+
 def save_debug_images(
     bgr: np.ndarray,
     obs_map: ObstacleMap,

@@ -620,6 +620,55 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
         cap.release()
 
 
+def stream_droidcam_bgr(
+    on_frame,
+    stop_event: threading.Event,
+) -> None:
+    """Deliver a continuous stream of BGR frames from DroidCam.
+
+    If _droidcam_cache already holds frames newer than 2 s (meaning
+    stream_droidcam() is running), polls the cache so we don't open a
+    competing VideoCapture connection (DroidCam only allows one client).
+    Otherwise opens a short-lived VideoCapture for the duration of the call.
+
+    on_frame(bgr: np.ndarray, ts: float) is called for each new frame.
+    Returns when stop_event is set or the stream ends.
+    """
+    import cv2 as _cv2
+    import numpy as _np
+
+    entry = _droidcam_cache.latest()
+    use_cache = entry is not None and (time.time() - entry.get("ts", 0.0)) < 2.0
+
+    if use_cache:
+        last_ts = 0.0
+        while not stop_event.is_set():
+            e = _droidcam_cache.latest()
+            if e is None or e.get("ts", 0.0) <= last_ts:
+                time.sleep(0.03)
+                continue
+            last_ts = e["ts"]
+            raw = base64.b64decode(e["frame"])
+            arr = _np.frombuffer(raw, dtype=_np.uint8)
+            bgr = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+            if bgr is not None:
+                on_frame(bgr, last_ts)
+        return
+
+    cap = _cv2.VideoCapture(config.DROIDCAM_URL)
+    if not cap.isOpened():
+        log.warning("stream_droidcam_bgr: cannot open DroidCam at %s", config.DROIDCAM_URL)
+        return
+    try:
+        while not stop_event.is_set():
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            on_frame(bgr, time.time())
+    finally:
+        cap.release()
+
+
 def capture_droidcam_still(
     annotate: bool = True,
     target_class_yolo: str = "cup",

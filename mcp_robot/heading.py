@@ -132,63 +132,9 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         return None
     bx, by, bw, bh = cv2.boundingRect(body)
 
-    # ── 2. Find black gripper inside an expanded ROI around the body ──────
-    pad_x = int(bw * _ROI_EXPAND)
-    pad_y = int(bh * _ROI_EXPAND)
-    x0 = max(0, bx - pad_x)
-    y0 = max(0, by - pad_y)
-    x1 = min(w, bx + bw + pad_x)
-    y1 = min(h, by + bh + pad_y)
-
-    roi_hsv = hsv[y0:y1, x0:x1]
-    black_mask = cv2.inRange(
-        roi_hsv,
-        np.array([0,   0,   0], dtype=np.uint8),
-        np.array([179, _BLACK_S_MAX, _BLACK_V_MAX], dtype=np.uint8),
-    )
-    # Suppress black pixels that overlap the yellow body itself — the gripper
-    # is what extends *beyond* the body.
-    body_mask_full = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(body_mask_full, [body], -1, 255, thickness=cv2.FILLED)
-    body_mask_dilated = cv2.dilate(body_mask_full, np.ones((9, 9), np.uint8))
-    body_in_roi = body_mask_dilated[y0:y1, x0:x1]
-    black_mask = cv2.bitwise_and(black_mask, cv2.bitwise_not(body_in_roi))
-    black_mask = cv2.morphologyEx(
-        black_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
-    )
-    # Close with a larger kernel so multi-finger gripper jaws fuse into one blob.
-    black_mask = cv2.morphologyEx(
-        black_mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8)
-    )
-
-    # Pick the black blob that best represents the gripper. We score by
-    # area × distance-from-body-center so that big protrusions beat both
-    # small far-away noise (e.g. cables) and big-but-central regions
-    # (e.g. wheel hubs and the shadow under the body).
-    contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
-    bcx, bcy = body_center
-    best_score = -1.0
-    arrow_anchor: tuple[int, int] | None = None
-    gripper_area = 0
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area < min_area:
-            continue
-        gc = _centroid(c)
-        if gc is None:
-            continue
-        cx_full, cy_full = gc[0] + x0, gc[1] + y0
-        dist = float(np.hypot(cx_full - bcx, cy_full - bcy))
-        score = area * dist
-        if score > best_score:
-            best_score = score
-            arrow_anchor = (cx_full, cy_full)
-            gripper_area = int(area)
-    if arrow_anchor is None:
-        return None
-
-    # ── 3. Forward direction from dominant Hough lines on the body ────────
+    # ── 2. Forward direction from dominant Hough lines on the body ────────
+    # Compute the long axis BEFORE gripper detection so we can use it to
+    # score gripper candidates by alignment with the axis (see step 3).
     # The LEGO chassis presents many long parallel edges (brick rows, top
     # and bottom panel edges) all aligned with the body's long axis. We
     # detect Canny edges within a yellow-restricted ROI, run a probabilistic
@@ -227,6 +173,64 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     dom_deg = int(np.argmax(smoothed))
     a = math.radians(dom_deg)
     axis = (math.cos(a), math.sin(a))
+
+    # ── 3. Find black gripper inside an expanded ROI around the body ──────
+    pad_x = int(bw * _ROI_EXPAND)
+    pad_y = int(bh * _ROI_EXPAND)
+    x0 = max(0, bx - pad_x)
+    y0 = max(0, by - pad_y)
+    x1 = min(w, bx + bw + pad_x)
+    y1 = min(h, by + bh + pad_y)
+
+    roi_hsv = hsv[y0:y1, x0:x1]
+    black_mask = cv2.inRange(
+        roi_hsv,
+        np.array([0,   0,   0], dtype=np.uint8),
+        np.array([179, _BLACK_S_MAX, _BLACK_V_MAX], dtype=np.uint8),
+    )
+    # Suppress black pixels that overlap the yellow body itself — the gripper
+    # is what extends *beyond* the body.
+    body_mask_full = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(body_mask_full, [body], -1, 255, thickness=cv2.FILLED)
+    body_mask_dilated = cv2.dilate(body_mask_full, np.ones((9, 9), np.uint8))
+    body_in_roi = body_mask_dilated[y0:y1, x0:x1]
+    black_mask = cv2.bitwise_and(black_mask, cv2.bitwise_not(body_in_roi))
+    black_mask = cv2.morphologyEx(
+        black_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+    # Close with a larger kernel so multi-finger gripper jaws fuse into one blob.
+    black_mask = cv2.morphologyEx(
+        black_mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8)
+    )
+
+    # Pick the black blob that best represents the gripper. Score by
+    # area × |projection onto body long axis| so that off-axis noise (cables,
+    # shadows perpendicular to the forward direction) cannot outscore the
+    # actual gripper which sits at one end of the body's long axis.
+    contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
+    bcx, bcy = body_center
+    best_score = -1.0
+    arrow_anchor: tuple[int, int] | None = None
+    gripper_area = 0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        gc = _centroid(c)
+        if gc is None:
+            continue
+        cx_full, cy_full = gc[0] + x0, gc[1] + y0
+        ddx, ddy = cx_full - bcx, cy_full - bcy
+        along = abs(ddx * axis[0] + ddy * axis[1])
+        score = area * along
+        if score > best_score:
+            best_score = score
+            arrow_anchor = (cx_full, cy_full)
+            gripper_area = int(area)
+    if arrow_anchor is None:
+        return None
+
     # Disambiguate front-vs-back using the gripper centroid: forward points
     # toward the gripper, away from the body interior.
     dx = arrow_anchor[0] - body_center[0]

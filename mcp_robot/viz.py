@@ -146,6 +146,20 @@ def log_annotated_images(img_a_b64: str | None, img_b_b64: str | None = None) ->
         rr.log("action/image_b", rr.Image(_b64_to_numpy(img_b_b64)))
 
 
+def log_nav_tracking(bgr: "np.ndarray", ts: float | None = None) -> None:
+    """Stream a nav-tracking frame to Rerun (reuses action/image_b panel).
+
+    bgr: OpenCV BGR numpy array (the draw_tracking_overlay output).
+    """
+    if not _ensure_init():
+        return
+    import cv2 as _cv2
+    rr = _rr()
+    rr.set_time("time", timestamp=ts if ts is not None else time.time())
+    rgb = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
+    rr.log("action/image_b", rr.Image(rgb))
+
+
 def flush() -> None:
     """Flush and close the rerun stream. Call before a short-lived script exits."""
     rr = _rr()
