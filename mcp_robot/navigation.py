@@ -17,6 +17,7 @@ import heapq
 import logging
 import math
 import os
+from collections import deque
 from dataclasses import dataclass, field
 
 import cv2
@@ -41,12 +42,14 @@ _GRID_ROWS = 60
 # are classified as navigable floor.
 _DEPTH_GRAD_N_SIGMA = 2.5
 
-# Obstacle inflation in grid cells (robot half-width clearance).
-_ROBOT_RADIUS_CELLS = 2
+# Minimum obstacle inflation in grid cells — used when the robot body cannot
+# be detected.  Normally the inflation radius is derived from the yellow body
+# bounding box so the path stays at least one robot-width from obstacles.
+_MIN_ROBOT_RADIUS_CELLS = 3
 
-# "At target" threshold: stop navigating when robot centroid is within this
-# fraction of the image diagonal from the target centroid.
-_AT_GOAL_FRAC = 0.10
+# Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
+# 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
+_CSPACE_BUFFER_SCALE = 1.2
 
 # Fixed drive duration per navigation step (seconds).
 _DRIVE_STEP_S = 1.2
@@ -108,6 +111,8 @@ class ObstacleMap:
     target_px: tuple[int, int] | None
     robot_grid: tuple[int, int]      # (row, col) in grid
     target_grid: tuple[int, int] | None
+    robot_radius_px: float           # half robot body size (pixels); used for clearance
+    target_radius_px: float          # half target bounding box (pixels); 0 if no target
     depth_map: np.ndarray | None = field(default=None, repr=False)  # raw depth, for debug
 
 
@@ -141,6 +146,59 @@ def _robot_ring(yellow_raw: np.ndarray) -> np.ndarray | None:
     yellow_big = cv2.dilate(yellow_raw, np.ones((43, 43), np.uint8))
     ring = cv2.bitwise_and(yellow_big, cv2.bitwise_not(yellow_raw))
     return ring if (ring > 0).sum() >= 50 else None
+
+
+def _robot_footprint_mask(
+    yellow_raw: np.ndarray,
+    robot_radius_px: float,
+    nav_heading: Heading | None,
+) -> np.ndarray:
+    """Filled rotated-rectangle mask covering the full robot footprint.
+
+    Projects the yellow body pixels onto the heading's forward/side axes to find
+    the body extents, then expands:
+      • forward  — robot_radius_px * 1.5 extra (covers gripper arm + fingers)
+      • backward — robot_radius_px * 0.4 extra
+      • sides    — robot_radius_px * 0.6 extra (covers wheels)
+
+    Falls back to circular dilation when heading or yellow pixels are unavailable.
+    """
+    h, w = yellow_raw.shape[:2]
+    ys, xs = np.where(yellow_raw > 0)
+
+    if len(xs) < 10 or nav_heading is None:
+        _r = int(robot_radius_px)
+        return cv2.dilate(yellow_raw, np.ones((2 * _r + 1, 2 * _r + 1), np.uint8))
+
+    cx = float(nav_heading.body_center[0])
+    cy = float(nav_heading.body_center[1])
+    fw   = np.array(nav_heading.forward,        dtype=np.float64)  # unit forward
+    side = np.array([-fw[1], fw[0]],            dtype=np.float64)  # unit perpendicular
+
+    # Project yellow body pixels onto axes relative to body centre.
+    rel = np.stack([xs.astype(np.float64) - cx,
+                    ys.astype(np.float64) - cy], axis=1)
+    fwd_proj  = rel @ fw
+    side_proj = rel @ side
+
+    fwd_max  = float(fwd_proj.max())
+    fwd_min  = float(fwd_proj.min())
+    side_ext = float(max(abs(side_proj.max()), abs(side_proj.min())))
+
+    front = fwd_max  + robot_radius_px * 1.5   # generous forward for gripper
+    back  = fwd_min  - robot_radius_px * 0.4
+    half_w = side_ext + robot_radius_px * 0.6  # wheel clearance
+
+    corners = np.array([
+        [cx + fw[0] * front + side[0] * half_w,  cy + fw[1] * front + side[1] * half_w],
+        [cx + fw[0] * front - side[0] * half_w,  cy + fw[1] * front - side[1] * half_w],
+        [cx + fw[0] * back  - side[0] * half_w,  cy + fw[1] * back  - side[1] * half_w],
+        [cx + fw[0] * back  + side[0] * half_w,  cy + fw[1] * back  + side[1] * half_w],
+    ], dtype=np.int32)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [corners], 255)
+    return mask
 
 
 def _depth_gradient_floor_mask(
@@ -243,6 +301,90 @@ def _astar(
     return None
 
 
+def _nearest_free_cell(
+    grid: np.ndarray,
+    goal: tuple[int, int],
+) -> tuple[int, int] | None:
+    """BFS outward from goal; return the nearest cell where grid is True, or None.
+
+    Used to snap an ideal approach point that lands inside the Minkowski-sum
+    inflation buffer (yellow zone) to the boundary of the navigable C-space.
+    """
+    rows, cols = grid.shape
+    if grid[goal[0], goal[1]]:
+        return goal
+    visited: set[tuple[int, int]] = {goal}
+    q: deque[tuple[int, int]] = deque([goal])
+    while q:
+        r, c = q.popleft()
+        if grid[r, c]:
+            return (r, c)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    q.append((nr, nc))
+    return None
+
+
+def _bresenham_cells(
+    r0: int, c0: int, r1: int, c1: int
+):
+    """Yield every grid cell (row, col) on the straight line from (r0,c0) to (r1,c1)."""
+    dr, dc = abs(r1 - r0), abs(c1 - c0)
+    sr, sc = (1 if r1 > r0 else -1), (1 if c1 > c0 else -1)
+    err = dr - dc
+    r, c = r0, c0
+    while True:
+        yield (r, c)
+        if r == r1 and c == c1:
+            break
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r += sr
+        if e2 < dr:
+            err += dr
+            c += sc
+
+
+def _has_line_of_sight(
+    grid: np.ndarray,
+    a: tuple[int, int],
+    b: tuple[int, int],
+) -> bool:
+    """True if every cell on the Bresenham line from a to b is navigable."""
+    for r, c in _bresenham_cells(a[0], a[1], b[0], b[1]):
+        if not grid[r, c]:
+            return False
+    return True
+
+
+def _simplify_path(
+    path: list[tuple[int, int]],
+    grid: np.ndarray,
+) -> list[tuple[int, int]]:
+    """Reduce an A* path to the fewest straight segments via greedy line-of-sight.
+
+    Scans forward from each waypoint to find the farthest successor reachable
+    by a straight Bresenham line that stays entirely inside navigable cells.
+    """
+    if len(path) <= 2:
+        return path
+    simplified = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        j = len(path) - 1
+        while j > i + 1 and not _has_line_of_sight(grid, path[i], path[j]):
+            j -= 1
+        simplified.append(path[j])
+        i = j
+    return simplified
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def detect_obstacles(
@@ -268,10 +410,25 @@ def detect_obstacles(
     """
     h, w = bgr.shape[:2]
 
-    # ── 1. Yellow body mask and robot ring ────────────────────────────────
+    # ── 1. Yellow body mask, robot radius, and robot ring ────────────────
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     yellow_raw = cv2.inRange(hsv, YELLOW_HSV_LO, YELLOW_HSV_HI)
-    yellow_dilated = cv2.dilate(yellow_raw, np.ones((17, 17), np.uint8))
+
+    # Robot radius from the yellow body bounding box — computed first so we
+    # can use it to dilate the robot mask to the full footprint.
+    ys, xs = np.where(yellow_raw > 0)
+    if len(xs) > 10:
+        robot_radius_px = float(max(int(xs.max()) - int(xs.min()),
+                                    int(ys.max()) - int(ys.min()))) / 2.0
+    else:
+        robot_radius_px = 40.0  # fallback when body not visible
+
+    # Build a rotated-rectangle footprint mask that covers the full robot body
+    # (yellow chassis + wheels + gripper arm).  A rectangle oriented along the
+    # heading fits the robot much better than a circle, and extending further
+    # forward ensures the gripper fingers are also marked as obstacle-free.
+    yellow_dilated = _robot_footprint_mask(yellow_raw, robot_radius_px, nav_heading)
+
     ring = _robot_ring(yellow_raw)
 
     # ── 2. Depth gradient floor mask ─────────────────────────────────────
@@ -306,26 +463,57 @@ def detect_obstacles(
             x0, x1 = int(gc * cell_w), max(int(gc * cell_w) + 1, int((gc + 1) * cell_w))
             base_grid[gr, gc] = 255 if free_mask[y0:y1, x0:x1].mean() > 100 else 0
 
-    # ── 5. Inflate obstacles by robot clearance ───────────────────────────
-    r = _ROBOT_RADIUS_CELLS
-    struct = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    # ── 5. C-space: inflate obstacles by the robot disk radius ───────────
+    # Treat the robot as a disk of radius robot_radius_px.  Eroding the
+    # navigable grid by that disk is the Minkowski-sum expansion that converts
+    # the workspace into configuration space (C-space): A* then operates on
+    # robot-center points only, with all collision geometry baked in.
+    #
+    # Cells are not square, so we derive separate x/y radii in grid units to
+    # keep the clearance circular in pixel space (not stretched by cell aspect).
+    rx_cells = max(_MIN_ROBOT_RADIUS_CELLS, round(robot_radius_px * _CSPACE_BUFFER_SCALE / cell_w))
+    ry_cells = max(_MIN_ROBOT_RADIUS_CELLS, round(robot_radius_px * _CSPACE_BUFFER_SCALE / cell_h))
+    log.debug("Robot disk: %.1f px → (%d col, %d row) cells", robot_radius_px, rx_cells, ry_cells)
+
+    # The robot is not an obstacle to itself.  The depth-gradient floor mask
+    # correctly classifies the robot body as non-floor (it isn't), but that
+    # creates obstacle cells there.  After eroding by the robot-disk radius,
+    # those cells expand and can trap the robot inside its own C-space
+    # expansion.  Pre-marking the robot's disk in base_grid ensures it
+    # survives the erosion: erode(disk(r)) ⊇ {robot_center}.
+    robot_px: tuple[int, int] = nav_heading.body_center if nav_heading is not None else (w // 2, h // 2)
+    robot_grid = _px_to_grid(robot_px, w, h)
+    for _dr in range(-ry_cells, ry_cells + 1):
+        for _dc in range(-rx_cells, rx_cells + 1):
+            if (_dr / max(ry_cells, 1)) ** 2 + (_dc / max(rx_cells, 1)) ** 2 <= 1.0:
+                _gr = max(0, min(_GRID_ROWS - 1, robot_grid[0] + _dr))
+                _gc = max(0, min(_GRID_COLS - 1, robot_grid[1] + _dc))
+                base_grid[_gr, _gc] = 255
+
+    struct = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (2 * rx_cells + 1, 2 * ry_cells + 1),
+    )
     inflated = cv2.erode(base_grid, struct)
     grid = (inflated > 0)
 
-    # ── 7. Locate robot and target; ensure their cells are navigable ──────
-    robot_px: tuple[int, int] = nav_heading.body_center if nav_heading is not None else (w // 2, h // 2)
+    # ── 6. Locate target; ensure robot and target cells are navigable ─────
     target_px: tuple[int, int] | None = target.center if target is not None else None
 
-    robot_grid = _px_to_grid(robot_px, w, h)
+    # Target radius from YOLO bounding box.
+    if target is not None:
+        target_radius_px = float(max(target.x2 - target.x1,
+                                     target.y2 - target.y1)) / 2.0
+    else:
+        target_radius_px = 0.0
+
     target_grid = _px_to_grid(target_px, w, h) if target_px is not None else None
 
+    # Robot center is guaranteed navigable by the pre-marking above,
+    # but force it explicitly as a belt-and-suspenders measure.
+    # The target is intentionally NOT forced navigable — it is an obstacle,
+    # and plan_path snaps the approach goal to the nearest green C-space cell.
     grid[robot_grid[0], robot_grid[1]] = True
-    if target_grid is not None:
-        for dr in range(-1, 2):
-            for dc in range(-1, 2):
-                gr2 = max(0, min(_GRID_ROWS - 1, target_grid[0] + dr))
-                gc2 = max(0, min(_GRID_COLS - 1, target_grid[1] + dc))
-                grid[gr2, gc2] = True
 
     return ObstacleMap(
         free_mask=free_mask,
@@ -338,43 +526,95 @@ def detect_obstacles(
         target_px=target_px,
         robot_grid=robot_grid,
         target_grid=target_grid,
+        robot_radius_px=robot_radius_px,
+        target_radius_px=target_radius_px,
         depth_map=depth_map,
     )
 
 
+def _approach_goal(obs_map: ObstacleMap) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Return (approach_grid, approach_px) — the A* goal for the current step.
+
+    The goal is the point at distance (robot_radius + target_radius) from the
+    target center, along the current robot→target line.  This positions the robot
+    at grasp distance without overshooting into the target.
+
+    Returns None when no target is set or the robot is already within approach distance.
+    """
+    if obs_map.target_px is None:
+        return None
+    dx = obs_map.robot_px[0] - obs_map.target_px[0]
+    dy = obs_map.robot_px[1] - obs_map.target_px[1]
+    dist = math.hypot(dx, dy)
+    approach_r = obs_map.robot_radius_px + obs_map.target_radius_px
+    if dist <= approach_r:
+        return None  # already at grasp distance
+    # Unit vector from target toward robot; scale to approach_r
+    ux, uy = dx / dist, dy / dist
+    apx = int(obs_map.target_px[0] + ux * approach_r)
+    apy = int(obs_map.target_px[1] + uy * approach_r)
+    return _px_to_grid((apx, apy), obs_map.w, obs_map.h), (apx, apy)
+
+
 def plan_path(obs_map: ObstacleMap) -> NavPlan:
-    """Run A* from robot grid cell to target grid cell."""
+    """Run A* from the robot's grid cell to the nearest C-space-free approach point.
+
+    The ideal approach goal is the point at (robot_radius + target_radius) from the
+    target along the robot→target line.  That point often falls inside the Minkowski-sum
+    inflation buffer (yellow zone).  We snap it to the nearest navigable (green) cell
+    so A* always operates entirely within the collision-free C-space, never cutting
+    through the inflation buffer.
+    """
     if obs_map.target_grid is None:
         return NavPlan([], [], reachable=False, reason="No target detected")
 
+    approach = _approach_goal(obs_map)
+    if approach is None:
+        return NavPlan([obs_map.robot_grid], [obs_map.robot_px],
+                       reachable=True, reason="At grasp distance")
+
+    ideal_goal, goal_px = approach
     start = obs_map.robot_grid
-    goal  = obs_map.target_grid
 
-    if start == goal:
-        return NavPlan([start], [obs_map.robot_px], reachable=True, reason="Already at target")
+    # Always guarantee the robot's own cell is navigable.
+    g = obs_map.grid.copy()
+    g[start[0], start[1]] = True
 
-    path_grid = _astar(obs_map.grid, start, goal)
+    # Snap the approach goal to the nearest green C-space cell so the path
+    # never enters the Minkowski-sum inflation buffer (yellow zone).
+    goal = _nearest_free_cell(g, ideal_goal)
+    if goal is None:
+        return NavPlan([], [], reachable=False, reason="No free cell near approach")
+    if goal != ideal_goal:
+        goal_px = _grid_to_px(goal, obs_map.w, obs_map.h)
+        log.debug("Approach goal snapped from %s to nearest free cell %s", ideal_goal, goal)
+
+    path_grid = _astar(g, start, goal)
+
     if path_grid is None:
-        # Thin corridors (e.g. floor in shadow under cabinet) can be erased by
-        # obstacle inflation. Retry on the raw grid which preserves them at the
-        # cost of less clearance. Apply the same forced-navigable patches so
-        # robot and target cells are reachable.
-        fallback = obs_map.raw_grid.copy()
-        fallback[start[0], start[1]] = True
-        if obs_map.target_grid is not None:
-            for dr in range(-1, 2):
-                for dc in range(-1, 2):
-                    gr2 = max(0, min(_GRID_ROWS - 1, goal[0] + dr))
-                    gc2 = max(0, min(_GRID_COLS - 1, goal[1] + dc))
-                    fallback[gr2, gc2] = True
-        path_grid = _astar(fallback, start, goal)
-        if path_grid is not None:
-            log.info("navigate_to: inflated path blocked; using raw-grid path (reduced clearance)")
-        else:
-            log.warning("navigate_to: A* found no path from %s to %s", start, goal)
-            return NavPlan([], [], reachable=False, reason=f"No path from grid{start}→grid{goal}")
+        # Obstacle inflation may have sealed thin corridors — retry on the
+        # pre-inflation grid at reduced clearance.
+        g_raw = obs_map.raw_grid.copy()
+        g_raw[start[0], start[1]] = True
+        goal_raw = _nearest_free_cell(g_raw, ideal_goal)
+        if goal_raw is not None:
+            path_grid = _astar(g_raw, start, goal_raw)
+            if path_grid is not None:
+                goal = goal_raw
+                goal_px = _grid_to_px(goal_raw, obs_map.w, obs_map.h)
+                log.info("navigate_to: using raw-grid path (reduced clearance)")
+                path_grid = _simplify_path(path_grid, g_raw)
+        if path_grid is None:
+            log.warning("navigate_to: no path from %s to approach %s", start, goal)
+            return NavPlan([], [], reachable=False,
+                           reason=f"No path from grid{start}→approach{goal}")
+    else:
+        path_grid = _simplify_path(path_grid, g)
 
     path_px = [_grid_to_px(rc, obs_map.w, obs_map.h) for rc in path_grid]
+    # Replace the last waypoint with the exact sub-cell approach pixel.
+    if path_px:
+        path_px[-1] = goal_px
     return NavPlan(
         path_grid=path_grid,
         path_px=path_px,
@@ -410,6 +650,9 @@ def draw_nav_overlay(
         tx, ty = obs_map.target_px
         cv2.circle(out, (tx, ty), 10, _TARGET_COLOR, 2)
         cv2.putText(out, "T", (tx - 5, ty + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TARGET_COLOR, 1, cv2.LINE_AA)
+        # Grasp approach circle: robot should stop when its centre reaches this ring.
+        approach_r = int(obs_map.robot_radius_px + obs_map.target_radius_px)
+        cv2.circle(out, (tx, ty), approach_r, _TARGET_COLOR, 1, cv2.LINE_AA)
 
     label = f"Step {step} - {plan.reason}"
     cv2.rectangle(out, (4, 4), (len(label) * 9 + 8, 26), (0, 0, 0), cv2.FILLED)
@@ -460,14 +703,18 @@ def commands_for_step(
 
 
 def at_target(obs_map: ObstacleMap) -> bool:
-    """True when robot centroid is within _AT_GOAL_FRAC × diagonal of target."""
+    """True when robot is within grasp distance of the target.
+
+    Grasp distance = robot_radius + target_radius, i.e. the two objects are
+    just touching — the robot is ready to close the gripper.
+    """
     if obs_map.target_px is None:
         return False
     dist = math.hypot(
         obs_map.robot_px[0] - obs_map.target_px[0],
         obs_map.robot_px[1] - obs_map.target_px[1],
     )
-    return dist < math.hypot(obs_map.w, obs_map.h) * _AT_GOAL_FRAC
+    return dist <= obs_map.robot_radius_px + obs_map.target_radius_px
 
 
 def save_debug_images(
@@ -515,6 +762,46 @@ def save_debug_images(
             grad_path = os.path.join(outdir, f"step_{step:02d}_gradient_mask.jpg")
             cv2.imwrite(grad_path, grad_vis)
             saved["gradient_mask"] = grad_path
+
+    # C-space planning grid — three zones:
+    #   green  = navigable C-space  (robot centre may go here)
+    #   yellow = inflation buffer   (floor, but within robot-disk clearance of obstacle)
+    #   red    = hard obstacle      (not floor at all)
+    # Also draws the robot disk, target disk, approach circle, and planned path.
+    h_img, w_img = bgr.shape[:2]
+    raw_up  = cv2.resize(obs_map.raw_grid.astype(np.uint8) * 255,
+                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+    grid_up = cv2.resize(obs_map.grid.astype(np.uint8) * 255,
+                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+    cspace = np.zeros((h_img, w_img, 3), dtype=np.uint8)
+    cspace[grid_up  > 0]                     = (0, 160,   0)   # navigable C-space: green
+    cspace[(raw_up > 0) & (grid_up == 0)]    = (0, 200, 220)   # inflation buffer:  yellow
+    cspace[raw_up == 0]                      = (0,   0, 180)   # hard obstacle:     red
+    # Robot disk at current position
+    rx, ry = obs_map.robot_px
+    cv2.circle(cspace, (rx, ry), int(obs_map.robot_radius_px), _ROBOT_COLOR, 2, cv2.LINE_AA)
+    cv2.circle(cspace, (rx, ry), 4, _ROBOT_COLOR, -1)
+    cv2.putText(cspace, "R", (rx + int(obs_map.robot_radius_px) + 4, ry + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _ROBOT_COLOR, 1, cv2.LINE_AA)
+    # Target disk + approach circle (robot_r + target_r)
+    if obs_map.target_px is not None:
+        tx, ty = obs_map.target_px
+        cv2.circle(cspace, (tx, ty), int(obs_map.target_radius_px), _TARGET_COLOR, 2, cv2.LINE_AA)
+        cv2.circle(cspace, (tx, ty), 4, _TARGET_COLOR, -1)
+        cv2.putText(cspace, "T", (tx + int(obs_map.target_radius_px) + 4, ty + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TARGET_COLOR, 1, cv2.LINE_AA)
+        approach_r = int(obs_map.robot_radius_px + obs_map.target_radius_px)
+        cv2.circle(cspace, (tx, ty), approach_r, (0, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(cspace, "approach", (tx + approach_r + 4, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 220, 220), 1, cv2.LINE_AA)
+    # Planned path
+    if plan.reachable and len(plan.path_px) > 1:
+        pts = np.array(plan.path_px, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(cspace, [pts], False, _PATH_COLOR, 2, cv2.LINE_AA)
+        cv2.circle(cspace, plan.path_px[-1], 5, _PATH_COLOR, -1)
+    cspace_path = os.path.join(outdir, f"step_{step:02d}_cspace.jpg")
+    cv2.imwrite(cspace_path, cspace)
+    saved["cspace"] = cspace_path
 
     overlay_bgr = draw_nav_overlay(bgr, obs_map, plan, step)
     overlay_path = os.path.join(outdir, f"step_{step:02d}_nav_overlay.jpg")

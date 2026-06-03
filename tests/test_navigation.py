@@ -96,12 +96,18 @@ class TestNavigation(unittest.TestCase):
             self.assertIsNotNone(self._obs_map.target_px,
                                  "target_px is None even though target was detected")
 
-    def test_target_grid_navigable_when_set(self):
-        """Target grid cell must be made navigable for A* to reach it."""
-        if self._obs_map.target_grid is not None:
-            r, c = self._obs_map.target_grid
-            self.assertTrue(self._obs_map.grid[r, c],
-                            f"Target grid cell ({r},{c}) is not navigable")
+    def test_path_endpoint_in_cspace(self):
+        """The path's last cell must be in the navigable C-space (green zone).
+
+        The path must never end inside the Minkowski-sum inflation buffer —
+        the approach goal is snapped to the nearest free cell before A* runs.
+        """
+        if self._plan.reachable and self._plan.path_grid:
+            r, c = self._plan.path_grid[-1]
+            self.assertTrue(
+                self._obs_map.grid[r, c] or self._obs_map.raw_grid[r, c],
+                f"Path endpoint ({r},{c}) is not navigable in either grid",
+            )
 
     # ── Path planning ─────────────────────────────────────────────────────────
 
@@ -142,7 +148,7 @@ class TestNavigation(unittest.TestCase):
 
     def test_debug_images_written(self):
         """save_debug_images must write raw, obstacle_mask, depth, and nav_overlay."""
-        for key in ("raw", "obstacle_mask", "depth", "nav_overlay"):
+        for key in ("raw", "obstacle_mask", "depth", "cspace", "nav_overlay"):
             self.assertIn(key, self._saved, f"Missing key '{key}' in saved dict")
             path = pathlib.Path(self._saved[key])
             self.assertTrue(path.exists(), f"File not written: {path}")
