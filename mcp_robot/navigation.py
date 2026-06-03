@@ -474,12 +474,19 @@ def detect_obstacles(
     ry_cells = max(_MIN_ROBOT_RADIUS_CELLS, round(robot_radius_px * _CSPACE_BUFFER_SCALE / cell_h))
     log.debug("Robot disk: %.1f px → (%d col, %d row) cells", robot_radius_px, rx_cells, ry_cells)
 
-    # The robot is not an obstacle to itself.  The depth-gradient floor mask
-    # correctly classifies the robot body as non-floor (it isn't), but that
-    # creates obstacle cells there.  After eroding by the robot-disk radius,
-    # those cells expand and can trap the robot inside its own C-space
-    # expansion.  Pre-marking the robot's disk in base_grid ensures it
-    # survives the erosion: erode(disk(r)) ⊇ {robot_center}.
+    # Compute target position and radius early so they can be pre-marked.
+    target_px: tuple[int, int] | None = target.center if target is not None else None
+    if target is not None:
+        target_radius_px = float(max(target.x2 - target.x1,
+                                     target.y2 - target.y1)) / 2.0
+    else:
+        target_radius_px = 0.0
+
+    # Pre-mark both the robot disk and the target disk in base_grid so they
+    # survive C-space erosion.  Neither is an obstacle to itself: the
+    # depth-gradient mask classifies them as non-floor (which is correct), but
+    # that creates obstacle cells that the Minkowski-sum expansion would enlarge,
+    # trapping the robot or burying the target inside its own exclusion zone.
     robot_px: tuple[int, int] = nav_heading.body_center if nav_heading is not None else (w // 2, h // 2)
     robot_grid = _px_to_grid(robot_px, w, h)
     for _dr in range(-ry_cells, ry_cells + 1):
@@ -489,6 +496,18 @@ def detect_obstacles(
                 _gc = max(0, min(_GRID_COLS - 1, robot_grid[1] + _dc))
                 base_grid[_gr, _gc] = 255
 
+    if target_px is not None and target_radius_px > 0:
+        t_grid = _px_to_grid(target_px, w, h)
+        t_rx = max(1, round(target_radius_px / cell_w))
+        t_ry = max(1, round(target_radius_px / cell_h))
+        log.debug("Target disk: %.1f px → (%d col, %d row) cells", target_radius_px, t_rx, t_ry)
+        for _dr in range(-t_ry, t_ry + 1):
+            for _dc in range(-t_rx, t_rx + 1):
+                if (_dr / max(t_ry, 1)) ** 2 + (_dc / max(t_rx, 1)) ** 2 <= 1.0:
+                    _gr = max(0, min(_GRID_ROWS - 1, t_grid[0] + _dr))
+                    _gc = max(0, min(_GRID_COLS - 1, t_grid[1] + _dc))
+                    base_grid[_gr, _gc] = 255
+
     struct = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (2 * rx_cells + 1, 2 * ry_cells + 1),
@@ -496,22 +515,12 @@ def detect_obstacles(
     inflated = cv2.erode(base_grid, struct)
     grid = (inflated > 0)
 
-    # ── 6. Locate target; ensure robot and target cells are navigable ─────
-    target_px: tuple[int, int] | None = target.center if target is not None else None
-
-    # Target radius from YOLO bounding box.
-    if target is not None:
-        target_radius_px = float(max(target.x2 - target.x1,
-                                     target.y2 - target.y1)) / 2.0
-    else:
-        target_radius_px = 0.0
-
+    # ── 6. Finalise grid ─────────────────────────────────────────────────
     target_grid = _px_to_grid(target_px, w, h) if target_px is not None else None
 
-    # Robot center is guaranteed navigable by the pre-marking above,
-    # but force it explicitly as a belt-and-suspenders measure.
-    # The target is intentionally NOT forced navigable — it is an obstacle,
-    # and plan_path snaps the approach goal to the nearest green C-space cell.
+    # Belt-and-suspenders: force the robot's own cell navigable after erosion.
+    # The target is NOT forced — its cells survive or not based on surrounding
+    # floor, so the approach goal naturally snaps to connected green cells.
     grid[robot_grid[0], robot_grid[1]] = True
 
     return ObstacleMap(
