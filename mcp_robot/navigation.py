@@ -751,6 +751,43 @@ def draw_tracking_overlay(
     return out
 
 
+def build_cspace_bgr(
+    bgr: np.ndarray,
+    obs_map: ObstacleMap,
+    plan: NavPlan,
+) -> np.ndarray:
+    """Return a BGR image of the C-space planning grid with path overlay."""
+    h_img, w_img = bgr.shape[:2]
+    raw_up  = cv2.resize(obs_map.raw_grid.astype(np.uint8) * 255,
+                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+    grid_up = cv2.resize(obs_map.grid.astype(np.uint8) * 255,
+                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+    cspace = np.zeros((h_img, w_img, 3), dtype=np.uint8)
+    cspace[grid_up  > 0]                     = (0, 160,   0)
+    cspace[(raw_up > 0) & (grid_up == 0)]    = (0, 200, 220)
+    cspace[raw_up == 0]                      = (0,   0, 180)
+    rx, ry = obs_map.robot_px
+    cv2.circle(cspace, (rx, ry), int(obs_map.robot_radius_px), _ROBOT_COLOR, 2, cv2.LINE_AA)
+    cv2.circle(cspace, (rx, ry), 4, _ROBOT_COLOR, -1)
+    cv2.putText(cspace, "R", (rx + int(obs_map.robot_radius_px) + 4, ry + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _ROBOT_COLOR, 1, cv2.LINE_AA)
+    if obs_map.target_px is not None:
+        tx, ty = obs_map.target_px
+        cv2.circle(cspace, (tx, ty), int(obs_map.target_radius_px), _TARGET_COLOR, 2, cv2.LINE_AA)
+        cv2.circle(cspace, (tx, ty), 4, _TARGET_COLOR, -1)
+        cv2.putText(cspace, "T", (tx + int(obs_map.target_radius_px) + 4, ty + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TARGET_COLOR, 1, cv2.LINE_AA)
+        approach_r = int(obs_map.robot_radius_px + obs_map.target_radius_px)
+        cv2.circle(cspace, (tx, ty), approach_r, (0, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(cspace, "approach", (tx + approach_r + 4, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 220, 220), 1, cv2.LINE_AA)
+    if plan.reachable and len(plan.path_px) > 1:
+        pts = np.array(plan.path_px, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(cspace, [pts], False, _PATH_COLOR, 2, cv2.LINE_AA)
+        cv2.circle(cspace, plan.path_px[-1], 5, _PATH_COLOR, -1)
+    return cspace
+
+
 def save_debug_images(
     bgr: np.ndarray,
     obs_map: ObstacleMap,
@@ -807,35 +844,8 @@ def save_debug_images(
     cv2.imwrite(mask_path, mask_vis)
     saved["obstacle_mask"] = mask_path
 
-    # e — C-space planning grid: green=navigable, yellow=inflation buffer, red=obstacle
-    h_img, w_img = bgr.shape[:2]
-    raw_up  = cv2.resize(obs_map.raw_grid.astype(np.uint8) * 255,
-                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
-    grid_up = cv2.resize(obs_map.grid.astype(np.uint8) * 255,
-                         (w_img, h_img), interpolation=cv2.INTER_NEAREST)
-    cspace = np.zeros((h_img, w_img, 3), dtype=np.uint8)
-    cspace[grid_up  > 0]                     = (0, 160,   0)
-    cspace[(raw_up > 0) & (grid_up == 0)]    = (0, 200, 220)
-    cspace[raw_up == 0]                      = (0,   0, 180)
-    rx, ry = obs_map.robot_px
-    cv2.circle(cspace, (rx, ry), int(obs_map.robot_radius_px), _ROBOT_COLOR, 2, cv2.LINE_AA)
-    cv2.circle(cspace, (rx, ry), 4, _ROBOT_COLOR, -1)
-    cv2.putText(cspace, "R", (rx + int(obs_map.robot_radius_px) + 4, ry + 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _ROBOT_COLOR, 1, cv2.LINE_AA)
-    if obs_map.target_px is not None:
-        tx, ty = obs_map.target_px
-        cv2.circle(cspace, (tx, ty), int(obs_map.target_radius_px), _TARGET_COLOR, 2, cv2.LINE_AA)
-        cv2.circle(cspace, (tx, ty), 4, _TARGET_COLOR, -1)
-        cv2.putText(cspace, "T", (tx + int(obs_map.target_radius_px) + 4, ty + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TARGET_COLOR, 1, cv2.LINE_AA)
-        approach_r = int(obs_map.robot_radius_px + obs_map.target_radius_px)
-        cv2.circle(cspace, (tx, ty), approach_r, (0, 220, 220), 1, cv2.LINE_AA)
-        cv2.putText(cspace, "approach", (tx + approach_r + 4, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 220, 220), 1, cv2.LINE_AA)
-    if plan.reachable and len(plan.path_px) > 1:
-        pts = np.array(plan.path_px, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(cspace, [pts], False, _PATH_COLOR, 2, cv2.LINE_AA)
-        cv2.circle(cspace, plan.path_px[-1], 5, _PATH_COLOR, -1)
+    # e — C-space planning grid
+    cspace = build_cspace_bgr(bgr, obs_map, plan)
     cspace_path = p(outdir, f"step_{step:02d}_e_cspace.jpg")
     cv2.imwrite(cspace_path, cspace)
     saved["cspace"] = cspace_path

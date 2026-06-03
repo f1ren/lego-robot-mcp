@@ -156,11 +156,11 @@ class TestNavigation(unittest.TestCase):
                                f"File suspiciously small: {path}")
 
 
-class TestNavigationCurrent(unittest.TestCase):
-    """Navigation pipeline on the current live-captured DroidCam frame.
+class TestNavigationWestHeading(unittest.TestCase):
+    """Navigation pipeline on the west-heading DroidCam frame.
 
-    Fixture: tests/fixtures/navigation/droidcam_current.jpg
-    Outputs: tests/fixtures/navigation/annotated/current/
+    Fixture: tests/fixtures/navigation/droidcam_west_heading.jpg
+    Outputs: tests/fixtures/navigation/annotated/west_heading/
       step_00_raw.jpg           — unmodified frame
       step_00_obstacle_mask.jpg — green=free / red=obstacle
       step_00_depth.jpg         — Depth Anything V2 heat-map
@@ -171,8 +171,8 @@ class TestNavigationCurrent(unittest.TestCase):
     Inspect those images after the run to diagnose navigation issues.
     """
 
-    CURRENT_IMG = FIXTURES / "navigation" / "droidcam_current.jpg"
-    ANNOTATED_CURRENT = FIXTURES / "navigation" / "annotated" / "current"
+    CURRENT_IMG = FIXTURES / "navigation" / "droidcam_west_heading.jpg"
+    ANNOTATED_CURRENT = FIXTURES / "navigation" / "annotated" / "west_heading"
 
     @classmethod
     def setUpClass(cls):
@@ -200,11 +200,11 @@ class TestNavigationCurrent(unittest.TestCase):
             bgr, obs_map, nav_plan, str(cls.ANNOTATED_CURRENT), step=0
         )
 
-        print(f"\n[current] Heading:  {h_result.forward if h_result else 'not detected'}")
-        print(f"[current] Objects:  {[f'{o.class_name}@{o.confidence:.2f}' for o in objects]}")
-        print(f"[current] Robot px: {obs_map.robot_px},  Target px: {obs_map.target_px}")
-        print(f"[current] Plan:     {nav_plan.reason}")
-        print(f"[current] Images:   {list(saved.values())}")
+        print(f"\n[west_heading] Heading:  {h_result.forward if h_result else 'not detected'}")
+        print(f"[west_heading] Objects:  {[f'{o.class_name}@{o.confidence:.2f}' for o in objects]}")
+        print(f"[west_heading] Robot px: {obs_map.robot_px},  Target px: {obs_map.target_px}")
+        print(f"[west_heading] Plan:     {nav_plan.reason}")
+        print(f"[west_heading] Images:   {list(saved.values())}")
 
         cls._bgr     = bgr
         cls._heading = h_result

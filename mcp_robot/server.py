@@ -884,13 +884,11 @@ def navigate_to(
                 overlay_b64 = base64.b64encode(overlay_buf.tobytes()).decode()
                 key_frames_b64.append(overlay_b64)
 
-            # Obstacle mask (green=free, red=blocked) as companion image.
-            mask_vis = np.zeros_like(bgr)
-            mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
-            mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
-            ok_mask, mask_buf = cv2.imencode(".jpg", mask_vis, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            mask_b64 = base64.b64encode(mask_buf.tobytes()).decode() if ok_mask else None
-            viz.log_annotated_images(mask_b64, overlay_b64)
+            # C-space (planning grid + path) as image_a.
+            cspace_bgr = nav_mod.build_cspace_bgr(bgr, obs_map, plan)
+            ok_cs, cs_buf = cv2.imencode(".jpg", cspace_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            cspace_b64 = base64.b64encode(cs_buf.tobytes()).decode() if ok_cs else None
+            viz.log_annotated_images(cspace_b64, overlay_b64)
 
             # ── 8. Termination checks ─────────────────────────────────────
             if nav_mod.at_target(obs_map):
