@@ -81,8 +81,8 @@ def _ensure_init() -> bool:
                 _init_failed = True
                 return False
         _send_blueprint()
-        rr.log("action/image_a", rr.Clear(recursive=False))
-        rr.log("action/image_b", rr.Clear(recursive=False))
+        rr.log("action/image_a", rr.Clear(recursive=False), static=True)
+        rr.log("action/image_b", rr.Clear(recursive=False), static=True)
         _initialized = True
     return True
 
