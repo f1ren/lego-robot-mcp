@@ -156,5 +156,97 @@ class TestNavigation(unittest.TestCase):
                                f"File suspiciously small: {path}")
 
 
+class TestNavigationCurrent(unittest.TestCase):
+    """Navigation pipeline on the current live-captured DroidCam frame.
+
+    Fixture: tests/fixtures/navigation/droidcam_current.jpg
+    Outputs: tests/fixtures/navigation/annotated/current/
+      step_00_raw.jpg           — unmodified frame
+      step_00_obstacle_mask.jpg — green=free / red=obstacle
+      step_00_depth.jpg         — Depth Anything V2 heat-map
+      step_00_gradient_mask.jpg — depth-gradient floor classification
+      step_00_cspace.jpg        — C-space grid (green/yellow/red + path)
+      step_00_nav_overlay.jpg   — full overlay with robot R, target T, A* path
+
+    Inspect those images after the run to diagnose navigation issues.
+    """
+
+    CURRENT_IMG = FIXTURES / "navigation" / "droidcam_current.jpg"
+    ANNOTATED_CURRENT = FIXTURES / "navigation" / "annotated" / "current"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import _yolo_detect, _pick_target, _load_model
+        from mcp_robot.navigation import (
+            detect_obstacles, plan_path, save_debug_images,
+        )
+
+        _load_model()
+        cls.ANNOTATED_CURRENT.mkdir(parents=True, exist_ok=True)
+
+        bgr = _load(cls.CURRENT_IMG)
+        h_result = detect_heading(bgr)
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else (max(objects, key=lambda o: o.confidence) if objects else None)
+        )
+
+        obs_map = detect_obstacles(bgr, h_result, target)
+        nav_plan = plan_path(obs_map)
+        saved = save_debug_images(
+            bgr, obs_map, nav_plan, str(cls.ANNOTATED_CURRENT), step=0
+        )
+
+        print(f"\n[current] Heading:  {h_result.forward if h_result else 'not detected'}")
+        print(f"[current] Objects:  {[f'{o.class_name}@{o.confidence:.2f}' for o in objects]}")
+        print(f"[current] Robot px: {obs_map.robot_px},  Target px: {obs_map.target_px}")
+        print(f"[current] Plan:     {nav_plan.reason}")
+        print(f"[current] Images:   {list(saved.values())}")
+
+        cls._bgr     = bgr
+        cls._heading = h_result
+        cls._objects = objects
+        cls._target  = target
+        cls._obs_map = obs_map
+        cls._plan    = nav_plan
+        cls._saved   = saved
+
+    # ── sanity checks ──────────────────────────────────────────────────────────
+
+    def test_robot_body_detected(self):
+        """Yellow body must be visible so depth-gradient floor mask works."""
+        self.assertIsNotNone(self._heading, "Heading not detected — is the robot visible?")
+
+    def test_cup_detected(self):
+        """YOLO should find the blue cup in the current frame."""
+        names = [o.class_name for o in self._objects]
+        self.assertIn("cup", names, f"Cup not detected. YOLO found: {names}")
+
+    def test_free_mask_covers_floor(self):
+        """At least 20% of the frame should be navigable floor."""
+        frac = (self._obs_map.free_mask > 0).mean()
+        self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
+
+    def test_robot_grid_cell_navigable(self):
+        r, c = self._obs_map.robot_grid
+        self.assertTrue(self._obs_map.grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not navigable")
+
+    def test_plan_generated(self):
+        from mcp_robot.navigation import NavPlan
+        self.assertIsInstance(self._plan, NavPlan)
+        print(f"\n  plan reachable={self._plan.reachable}  reason={self._plan.reason}")
+
+    def test_debug_images_written(self):
+        for key in ("raw", "obstacle_mask", "depth", "cspace", "nav_overlay"):
+            self.assertIn(key, self._saved, f"Missing key '{key}'")
+            path = pathlib.Path(self._saved[key])
+            self.assertTrue(path.exists(), f"File not written: {path}")
+            self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
+
+
 if __name__ == "__main__":
     unittest.main()

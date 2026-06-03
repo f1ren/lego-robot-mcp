@@ -153,41 +153,38 @@ def _robot_footprint_mask(
     robot_radius_px: float,
     nav_heading: Heading | None,
 ) -> np.ndarray:
-    """Filled rotated-rectangle mask covering the full robot footprint.
+    """Rotated-rectangle mask sized to the full physical robot, not just the yellow board.
 
-    Projects the yellow body pixels onto the heading's forward/side axes to find
-    the body extents, then expands:
-      • forward  — robot_radius_px * 1.5 extra (covers gripper arm + fingers)
-      • backward — robot_radius_px * 0.4 extra
-      • sides    — robot_radius_px * 0.6 extra (covers wheels)
+    The yellow LEGO chassis is the reference rectangle.  Multipliers extend it
+    to cover the rest of the robot:
+      forward  ×2.25 — gripper arm + fingers protrude well in front of the board
+      backward ×1.25 — small rear overhang (wheels, battery cable)
+      sides    ×1.15 — wheels sit slightly outside the board on both sides
 
-    Falls back to circular dilation when heading or yellow pixels are unavailable.
+    Falls back to a small dilation of the raw yellow pixels when heading is
+    unavailable.
     """
     h, w = yellow_raw.shape[:2]
-    ys, xs = np.where(yellow_raw > 0)
 
-    if len(xs) < 10 or nav_heading is None:
-        _r = int(robot_radius_px)
-        return cv2.dilate(yellow_raw, np.ones((2 * _r + 1, 2 * _r + 1), np.uint8))
+    contours, _ = cv2.findContours(yellow_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours or nav_heading is None:
+        return cv2.dilate(yellow_raw, np.ones((25, 25), np.uint8))
+
+    main = max(contours, key=cv2.contourArea)
+    pts  = main.reshape(-1, 2).astype(np.float64)
 
     cx = float(nav_heading.body_center[0])
     cy = float(nav_heading.body_center[1])
-    fw   = np.array(nav_heading.forward,        dtype=np.float64)  # unit forward
-    side = np.array([-fw[1], fw[0]],            dtype=np.float64)  # unit perpendicular
+    fw   = np.array(nav_heading.forward, dtype=np.float64)
+    side = np.array([-fw[1], fw[0]],    dtype=np.float64)
 
-    # Project yellow body pixels onto axes relative to body centre.
-    rel = np.stack([xs.astype(np.float64) - cx,
-                    ys.astype(np.float64) - cy], axis=1)
+    rel       = pts - np.array([cx, cy])
     fwd_proj  = rel @ fw
     side_proj = rel @ side
 
-    fwd_max  = float(fwd_proj.max())
-    fwd_min  = float(fwd_proj.min())
-    side_ext = float(max(abs(side_proj.max()), abs(side_proj.min())))
-
-    front = fwd_max  + robot_radius_px * 1.5   # generous forward for gripper
-    back  = fwd_min  - robot_radius_px * 0.4
-    half_w = side_ext + robot_radius_px * 0.6  # wheel clearance
+    front  = float(fwd_proj.max())                               * 4.00
+    back   = float(fwd_proj.min())                               * 1.30
+    half_w = float(max(abs(side_proj.max()), abs(side_proj.min()))) * 1.30
 
     corners = np.array([
         [cx + fw[0] * front + side[0] * half_w,  cy + fw[1] * front + side[1] * half_w],
@@ -414,12 +411,14 @@ def detect_obstacles(
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     yellow_raw = cv2.inRange(hsv, YELLOW_HSV_LO, YELLOW_HSV_HI)
 
-    # Robot radius from the yellow body bounding box — computed first so we
-    # can use it to dilate the robot mask to the full footprint.
-    ys, xs = np.where(yellow_raw > 0)
-    if len(xs) > 10:
-        robot_radius_px = float(max(int(xs.max()) - int(xs.min()),
-                                    int(ys.max()) - int(ys.min()))) / 2.0
+    # Robot radius from the largest yellow contour's bounding box.
+    # Using all-yellow-pixel span would include stray floor/furniture pixels
+    # with similar hue, inflating the radius to frame-spanning values.
+    _y_contours, _ = cv2.findContours(yellow_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if _y_contours:
+        _main = max(_y_contours, key=cv2.contourArea)
+        _, _, _cw, _ch = cv2.boundingRect(_main)
+        robot_radius_px = float(max(_cw, _ch)) / 2.0
     else:
         robot_radius_px = 40.0  # fallback when body not visible
 
@@ -759,66 +758,70 @@ def save_debug_images(
     outdir: str,
     step: int,
 ) -> dict[str, str]:
-    """Write raw frame, free-space mask, depth map, and nav overlay to outdir."""
+    """Write pipeline debug images to outdir, prefixed a–f for alphabetical sort order.
+
+    a_raw              — unmodified input frame
+    b_depth            — Depth Anything V2 heat-map (INFERNO colormap)
+    c_depth_gradient   — floor classification from depth gradients alone (no robot body)
+    d_free_mask        — navigable floor after OR-ing in the robot body footprint
+    e_cspace           — C-space grid: green=navigable, yellow=inflation buffer, red=obstacle
+    f_nav_overlay      — final overlay: obstacle tint + A* path + R/T markers
+    """
     os.makedirs(outdir, exist_ok=True)
     saved: dict[str, str] = {}
+    p = os.path.join  # shorthand
 
-    raw_path = os.path.join(outdir, f"step_{step:02d}_raw.jpg")
+    # a — raw input
+    raw_path = p(outdir, f"step_{step:02d}_a_raw.jpg")
     cv2.imwrite(raw_path, bgr)
     saved["raw"] = raw_path
 
-    mask_vis = np.zeros_like(bgr)
-    mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
-    mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
-    mask_path = os.path.join(outdir, f"step_{step:02d}_obstacle_mask.jpg")
-    cv2.imwrite(mask_path, mask_vis)
-    saved["obstacle_mask"] = mask_path
-
     if obs_map.depth_map is not None:
         d = obs_map.depth_map
+
+        # b — depth heat-map
         d_norm = ((d - d.min()) / (d.max() - d.min() + 1e-8) * 255).astype(np.uint8)
         depth_vis = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
-        depth_path = os.path.join(outdir, f"step_{step:02d}_depth.jpg")
+        depth_path = p(outdir, f"step_{step:02d}_b_depth.jpg")
         cv2.imwrite(depth_path, depth_vis)
         saved["depth"] = depth_path
 
-        # Gradient mask: green=floor (gradient matches robot ring), red=obstacle.
-        depth_smooth = cv2.GaussianBlur(d, (9, 9), 0)
-        gx = cv2.Sobel(depth_smooth, cv2.CV_32F, 1, 0, ksize=5)
-        gy = cv2.Sobel(depth_smooth, cv2.CV_32F, 0, 1, ksize=5)
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        yellow_raw = cv2.inRange(hsv, YELLOW_HSV_LO, YELLOW_HSV_HI)
-        ring = _robot_ring(yellow_raw)
-        grad_mask = _depth_gradient_floor_mask(d, ring) if ring is not None else None
+        # c — depth-gradient floor mask (no robot body carve-out)
+        hsv_dbg = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        yellow_dbg = cv2.inRange(hsv_dbg, YELLOW_HSV_LO, YELLOW_HSV_HI)
+        ring_dbg = _robot_ring(yellow_dbg)
+        grad_mask = _depth_gradient_floor_mask(d, ring_dbg) if ring_dbg is not None else None
         if grad_mask is not None:
             grad_vis = np.zeros_like(bgr)
             grad_vis[grad_mask >  0] = (0, 160, 0)
             grad_vis[grad_mask == 0] = (0, 0, 180)
-            grad_path = os.path.join(outdir, f"step_{step:02d}_gradient_mask.jpg")
+            grad_path = p(outdir, f"step_{step:02d}_c_depth_gradient.jpg")
             cv2.imwrite(grad_path, grad_vis)
             saved["gradient_mask"] = grad_path
 
-    # C-space planning grid — three zones:
-    #   green  = navigable C-space  (robot centre may go here)
-    #   yellow = inflation buffer   (floor, but within robot-disk clearance of obstacle)
-    #   red    = hard obstacle      (not floor at all)
-    # Also draws the robot disk, target disk, approach circle, and planned path.
+    # d — free mask (gradient floor + robot footprint combined)
+    mask_vis = np.zeros_like(bgr)
+    mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
+    mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
+    mask_path = p(outdir, f"step_{step:02d}_d_free_mask.jpg")
+    cv2.imwrite(mask_path, mask_vis)
+    saved["obstacle_mask"] = mask_path
+
+    # e — C-space planning grid: green=navigable, yellow=inflation buffer, red=obstacle
     h_img, w_img = bgr.shape[:2]
     raw_up  = cv2.resize(obs_map.raw_grid.astype(np.uint8) * 255,
                          (w_img, h_img), interpolation=cv2.INTER_NEAREST)
     grid_up = cv2.resize(obs_map.grid.astype(np.uint8) * 255,
                          (w_img, h_img), interpolation=cv2.INTER_NEAREST)
     cspace = np.zeros((h_img, w_img, 3), dtype=np.uint8)
-    cspace[grid_up  > 0]                     = (0, 160,   0)   # navigable C-space: green
-    cspace[(raw_up > 0) & (grid_up == 0)]    = (0, 200, 220)   # inflation buffer:  yellow
-    cspace[raw_up == 0]                      = (0,   0, 180)   # hard obstacle:     red
-    # Robot disk at current position
+    cspace[grid_up  > 0]                     = (0, 160,   0)
+    cspace[(raw_up > 0) & (grid_up == 0)]    = (0, 200, 220)
+    cspace[raw_up == 0]                      = (0,   0, 180)
     rx, ry = obs_map.robot_px
     cv2.circle(cspace, (rx, ry), int(obs_map.robot_radius_px), _ROBOT_COLOR, 2, cv2.LINE_AA)
     cv2.circle(cspace, (rx, ry), 4, _ROBOT_COLOR, -1)
     cv2.putText(cspace, "R", (rx + int(obs_map.robot_radius_px) + 4, ry + 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, _ROBOT_COLOR, 1, cv2.LINE_AA)
-    # Target disk + approach circle (robot_r + target_r)
     if obs_map.target_px is not None:
         tx, ty = obs_map.target_px
         cv2.circle(cspace, (tx, ty), int(obs_map.target_radius_px), _TARGET_COLOR, 2, cv2.LINE_AA)
@@ -829,17 +832,17 @@ def save_debug_images(
         cv2.circle(cspace, (tx, ty), approach_r, (0, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(cspace, "approach", (tx + approach_r + 4, ty),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 220, 220), 1, cv2.LINE_AA)
-    # Planned path
     if plan.reachable and len(plan.path_px) > 1:
         pts = np.array(plan.path_px, dtype=np.int32).reshape(-1, 1, 2)
         cv2.polylines(cspace, [pts], False, _PATH_COLOR, 2, cv2.LINE_AA)
         cv2.circle(cspace, plan.path_px[-1], 5, _PATH_COLOR, -1)
-    cspace_path = os.path.join(outdir, f"step_{step:02d}_cspace.jpg")
+    cspace_path = p(outdir, f"step_{step:02d}_e_cspace.jpg")
     cv2.imwrite(cspace_path, cspace)
     saved["cspace"] = cspace_path
 
+    # f — nav overlay
     overlay_bgr = draw_nav_overlay(bgr, obs_map, plan, step)
-    overlay_path = os.path.join(outdir, f"step_{step:02d}_nav_overlay.jpg")
+    overlay_path = p(outdir, f"step_{step:02d}_f_nav_overlay.jpg")
     cv2.imwrite(overlay_path, overlay_bgr)
     saved["nav_overlay"] = overlay_path
 
