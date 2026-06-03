@@ -903,6 +903,8 @@ def navigate_to(
                 outcome = "path_blocked"
                 break
 
+            # break # TEMPORARILY STOP HERE as a dry run
+
             # ── 9. Execute next step ──────────────────────────────────────
             turn_deg, drive_s = nav_mod.commands_for_step(obs_map, plan, h_result)
             parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_s:.1f}s")
