@@ -501,12 +501,13 @@ def turn(
     """
     Rotate the robot body in place by an exact number of degrees.
 
+    Use only for fine-grained heading corrections when you are already close to the
+    target. For navigating toward an object, call navigate_to() instead — it handles
+    turning AND obstacle avoidance automatically.
+
     Conversion: encoder_deg = abs(body_degrees) * (TRACK_WIDTH_MM / WHEEL_DIAMETER_MM).
     Defaults: track_width=123 mm, wheel_diameter=56 mm → ratio ≈ 2.2.
     Override via TURN_ENCODER_DEG_PER_BODY_DEG env var if calibration drifts.
-
-    Pass the `object_angle_deg` value returned by get_robot_state / get_external_camera_image
-    directly as body_degrees to face the detected object.
 
     Args:
         body_degrees: Signed rotation in degrees viewed from above.
@@ -1232,8 +1233,9 @@ def get_robot_state(
                 rot_dir = "CW" if angle_deg > 0 else "CCW"
                 angle_text = (
                     f"Object-to-heading angle: {abs(angle_deg):.0f}° {rot_dir} "
-                    f"(positive=CW=right, negative=CCW=left, viewed from above). "
-                    f"Use this when deciding how much to turn before approaching."
+                    f"(positive=CW, negative=CCW, viewed from above). "
+                    f"Use navigate_to(yolo=..., free_text=...) to move toward the object "
+                    f"with automatic obstacle avoidance. Do NOT manually plan turn + drive sequences."
                 )
                 log.info("get_robot_state heading result: %s", angle_text)
                 content.append(TextContent(type="text", text=angle_text))
