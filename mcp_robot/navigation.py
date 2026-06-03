@@ -183,7 +183,7 @@ def _robot_footprint_mask(
     side_proj = rel @ side
 
     front  = float(fwd_proj.max())                               * 4.00
-    back   = float(fwd_proj.min())                               * 1.30
+    back   = float(fwd_proj.min())                               * 1.35
     half_w = float(max(abs(side_proj.max()), abs(side_proj.min()))) * 1.35
 
     corners = np.array([
