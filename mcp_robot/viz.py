@@ -64,15 +64,16 @@ def _ensure_init() -> bool:
     if rr is None or not config.RERUN_ENABLED:
         return False
     if not _initialized:
+        recording_id = f"lego_robot_{int(time.time())}"
         if config.RERUN_CONNECT:
-            rr.init("lego_robot", recording_id="lego_robot_session")
+            rr.init("lego_robot", recording_id=recording_id)
             rr.connect_grpc(config.RERUN_ADDR)
         elif config.RERUN_MODE == "serve":
-            rr.init("lego_robot", recording_id="lego_robot_session")
+            rr.init("lego_robot", recording_id=recording_id)
             uri = rr.serve_grpc()
             rr.serve_web_viewer(connect_to=uri)
         else:
-            rr.init("lego_robot", recording_id="lego_robot_session")
+            rr.init("lego_robot", recording_id=recording_id)
             try:
                 rr.spawn(executable_path=_venv_rerun())
             except RuntimeError as exc:
@@ -81,8 +82,6 @@ def _ensure_init() -> bool:
                 _init_failed = True
                 return False
         _send_blueprint()
-        rr.log("action/image_a", rr.Clear(recursive=False), static=True)
-        rr.log("action/image_b", rr.Clear(recursive=False), static=True)
         _initialized = True
     return True
 
