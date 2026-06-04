@@ -423,12 +423,6 @@ def detect_obstacles(
     else:
         robot_radius_px = 40.0  # fallback when body not visible
 
-    # Build a rotated-rectangle footprint mask that covers the full robot body
-    # (yellow chassis + wheels + gripper arm).  A rectangle oriented along the
-    # heading fits the robot much better than a circle, and extending further
-    # forward ensures the gripper fingers are also marked as obstacle-free.
-    yellow_dilated = _robot_footprint_mask(yellow_raw, robot_radius_px, nav_heading)
-
     ring = _robot_ring(yellow_raw)
 
     # ── 2. Remove robot and target before depth estimation ───────────────
@@ -457,8 +451,17 @@ def detect_obstacles(
             "either depth estimation failed or robot body not visible."
         )
 
-    # ── 4. Free mask: gradient floor + yellow body ────────────────────────
-    free_mask = cv2.bitwise_or(grad_free, yellow_dilated)
+    # ── 4. Free mask: gradient floor + yellow chassis ────────────────────
+    # OR in only the yellow chassis pixels (small dilation) — NOT the full
+    # forward-extended footprint.  The footprint's 4× forward reach covers
+    # vertical obstacles (switch, wall) directly in front of the gripper,
+    # which must stay classified as obstacles.  The depth model already sees
+    # floor under the robot because we inpainted it out; the chassis OR is
+    # only a fallback for any residual depth-model misclassification of the
+    # chassis itself.  A* start-cell navigability is guaranteed separately by
+    # the belt-and-suspenders force at step 7.
+    yellow_chassis = cv2.dilate(yellow_raw, np.ones((35, 35), np.uint8))
+    free_mask = cv2.bitwise_or(grad_free, yellow_chassis)
     free_mask = cv2.morphologyEx(free_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     free_mask = cv2.morphologyEx(free_mask, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
 

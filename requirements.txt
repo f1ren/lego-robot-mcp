@@ -3,6 +3,10 @@ paramiko>=3.4
 google-genai>=1.0
 ollama>=0.3
 Pillow>=10.4
-# Optional visualization — install with: pip install rerun-sdk numpy
+opencv-python>=4.9
+numpy>=1.24
+simple-lama-inpainting>=0.1
+torch>=2.0
+torchvision>=0.15
+# Optional visualization — install with: pip install rerun-sdk
 # rerun-sdk>=0.16
-# numpy>=1.24
