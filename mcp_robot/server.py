@@ -919,6 +919,17 @@ def navigate_to(
                 outcome = "success"
                 break
 
+            if obs_map.robot_in_buffer:
+                msg = (
+                    "NAVIGATION MISTAKE — robot entered the Minkowski-sum buffer zone "
+                    "(yellow inflation around obstacle). Stopping to avoid collision."
+                )
+                parts.append(msg)
+                log.warning("[navigate_to] step %d: %s", step + 1, msg)
+                step_logs.append("\n".join(parts))
+                outcome = "buffer_violation"
+                break
+
             if not plan.reachable:
                 parts.append(f"PATH BLOCKED — {plan.reason}")
                 step_logs.append("\n".join(parts))
@@ -980,6 +991,7 @@ def navigate_to(
         "path_blocked":      "Navigation failed — no obstacle-free path found.",
         "camera_error":      "Navigation aborted — camera error.",
         "error":             "Navigation aborted — unexpected error.",
+        "buffer_violation":  "Navigation mistake — robot entered the Minkowski-sum buffer zone (yellow). Stopped to avoid collision.",
         "max_steps_reached": f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
 
