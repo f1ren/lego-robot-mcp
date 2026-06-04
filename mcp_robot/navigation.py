@@ -712,6 +712,24 @@ def at_target(obs_map: ObstacleMap) -> bool:
     return dist <= obs_map.robot_radius_px + obs_map.target_radius_px
 
 
+def dist_to_path(
+    robot_px: tuple[int, int],
+    path_px: list[tuple[int, int]],
+) -> float:
+    """Minimum pixel distance from robot_px to any waypoint in path_px."""
+    if not path_px:
+        return float("inf")
+    rx, ry = robot_px
+    return min(math.hypot(px[0] - rx, px[1] - ry) for px in path_px)
+
+
+def update_robot_position(obs_map: ObstacleMap, robot_px: tuple[int, int]) -> None:
+    """Update robot position fields in obs_map in-place."""
+    obs_map.robot_px = robot_px
+    obs_map.robot_grid = _px_to_grid(robot_px, obs_map.w, obs_map.h)
+    obs_map.grid[obs_map.robot_grid[0], obs_map.robot_grid[1]] = True
+
+
 def detect_robot_px(bgr: np.ndarray) -> tuple[int, int] | None:
     """Return the robot's yellow-body centroid as (x, y) pixel coords, or None.
 

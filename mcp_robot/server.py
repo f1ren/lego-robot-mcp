@@ -805,6 +805,9 @@ def navigate_to(
     step_logs: list[str] = []
     outcome = "max_steps_reached"
 
+    obs_map: nav_mod.ObstacleMap | None = None
+    plan: nav_mod.NavPlan | None = None
+
     try:
         for step in range(max_steps):
             parts: list[str] = [f"=== Step {step + 1}/{max_steps} ==="]
@@ -827,7 +830,7 @@ def navigate_to(
                 outcome = "camera_error"
                 break
 
-            # ── 2. Detect robot heading (reuses heading.detect_heading) ───
+            # ── 2. Detect robot heading (cheap, every step) ───────────────
             h_result = heading.detect_heading(bgr)
             if h_result is None:
                 parts.append("WARNING: robot yellow body not detected — heading unknown")
@@ -835,47 +838,66 @@ def navigate_to(
                 parts.append(f"Robot at {h_result.body_center}, "
                              f"forward={tuple(round(v, 2) for v in h_result.forward)}")
 
-            # ── 3. Detect target (same path as grasp_readiness + locate_object) ──
-            target_obj = None
-            if target_class_yolo:
-                try:
-                    objects = grasp_mod._yolo_detect(bgr, target_class=target_class_yolo)
-                    if objects:
-                        target_obj = (
-                            grasp_mod._pick_target(objects, h_result)
-                            if h_result is not None
-                            else max(objects, key=lambda o: o.confidence)
-                        )
-                except Exception as exc:
-                    parts.append(f"YOLO error: {exc}")
+            if step == 0:
+                # ── 3. Target detection (YOLO + VLM) — first step only ────
+                target_obj = None
+                if target_class_yolo:
+                    try:
+                        objects = grasp_mod._yolo_detect(bgr, target_class=target_class_yolo)
+                        if objects:
+                            target_obj = (
+                                grasp_mod._pick_target(objects, h_result)
+                                if h_result is not None
+                                else max(objects, key=lambda o: o.confidence)
+                            )
+                    except Exception as exc:
+                        parts.append(f"YOLO error: {exc}")
 
-            if target_obj is None and target_class_free_text:
-                target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                if target_obj is None and target_class_free_text:
+                    target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
 
-            if target_obj is None:
-                parts.append(f"Target not detected "
-                             f"({target_class_yolo or target_class_free_text})")
+                if target_obj is None:
+                    parts.append(f"Target not detected "
+                                 f"({target_class_yolo or target_class_free_text})")
+                else:
+                    parts.append(f"Target '{target_obj.class_name}' "
+                                 f"at {target_obj.center} conf={target_obj.confidence:.0%}")
+
+                # ── 4. Full obstacle detection — first step only ──────────
+                obs_map = nav_mod.detect_obstacles(bgr, h_result, target_obj)
+                free_frac = (obs_map.free_mask > 0).mean()
+                parts.append(f"Obstacle map: {free_frac:.0%} free space")
+
+                # ── 5. Path planning ──────────────────────────────────────
+                plan = nav_mod.plan_path(obs_map)
+                parts.append(f"Path: {plan.reason}")
+
+                # ── 6. Save debug images ──────────────────────────────────
+                if nav_dir:
+                    try:
+                        nav_mod.save_debug_images(bgr, obs_map, plan, nav_dir, step)
+                    except Exception as exc:
+                        log.warning("Failed to save nav debug images: %s", exc)
+
             else:
-                parts.append(f"Target '{target_obj.class_name}' "
-                             f"at {target_obj.center} conf={target_obj.confidence:.0%}")
+                # ── 3–5. Subsequent steps: track position, replan if needed ──
+                robot_px = nav_mod.detect_robot_px(bgr)
+                if robot_px is not None:
+                    deviation = nav_mod.dist_to_path(robot_px, plan.path_px)
+                    nav_mod.update_robot_position(obs_map, robot_px)
+                    if deviation > obs_map.robot_radius_px:
+                        parts.append(
+                            f"Deviation {deviation:.0f}px > {obs_map.robot_radius_px:.0f}px "
+                            f"— replanning on existing C-space"
+                        )
+                        plan = nav_mod.plan_path(obs_map)
+                    else:
+                        parts.append(f"On path (deviation {deviation:.0f}px)")
+                    parts.append(f"Path: {plan.reason}")
+                else:
+                    parts.append("WARNING: robot not detected — keeping previous plan")
 
-            # ── 4. Obstacle detection ─────────────────────────────────────
-            obs_map = nav_mod.detect_obstacles(bgr, h_result, target_obj)
-            free_frac = (obs_map.free_mask > 0).mean()
-            parts.append(f"Obstacle map: {free_frac:.0%} free space")
-
-            # ── 5. Path planning ──────────────────────────────────────────
-            plan = nav_mod.plan_path(obs_map)
-            parts.append(f"Path: {plan.reason}")
-
-            # ── 6. Save debug images (raw frame for testing + overlays) ───
-            if nav_dir:
-                try:
-                    nav_mod.save_debug_images(bgr, obs_map, plan, nav_dir, step)
-                except Exception as exc:
-                    log.warning("Failed to save nav debug images: %s", exc)
-
-            # ── 7. Collect key frame as b64 (nav overlay) ─────────────────
+            # ── 7. Collect key frame (nav overlay + cspace) ───────────────
             overlay_bgr = nav_mod.draw_nav_overlay(bgr, obs_map, plan, step + 1)
             ok_enc, overlay_buf = cv2.imencode(
                 ".jpg", overlay_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82]
@@ -885,7 +907,6 @@ def navigate_to(
                 overlay_b64 = base64.b64encode(overlay_buf.tobytes()).decode()
                 key_frames_b64.append(overlay_b64)
 
-            # C-space (planning grid + path) as image_a.
             cspace_bgr = nav_mod.build_cspace_bgr(bgr, obs_map, plan)
             ok_cs, cs_buf = cv2.imencode(".jpg", cspace_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
             cspace_b64 = base64.b64encode(cs_buf.tobytes()).decode() if ok_cs else None
@@ -904,14 +925,10 @@ def navigate_to(
                 outcome = "path_blocked"
                 break
 
-            # break # TEMPORARILY STOP HERE as a dry run
-
             # ── 9. Execute next step ──────────────────────────────────────
             turn_deg, drive_s = nav_mod.commands_for_step(obs_map, plan, h_result)
             parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_s:.1f}s")
 
-            # CV tracking thread streams robot position on the planned path to
-            # Rerun in real-time — no VQA needed during motor execution.
             _track_stop = threading.Event()
             _track_thread = threading.Thread(
                 target=_nav_track_motor,
