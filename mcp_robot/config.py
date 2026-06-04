@@ -61,6 +61,11 @@ DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
 # Arm motor speed cap — slower to avoid jitter, especially with a load.
 ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 
+# Per-wheel speed used for in-place turns during navigate_to.
+# Each wheel runs at this value (opposing directions), so effective combined
+# effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
+NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
+
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
 CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
@@ -68,7 +73,7 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.176:4747/video")
+DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
 # Target capture rate for DroidCam during action execution and video compilation.
 # Higher = smoother video and better optical flow; limited by DroidCam's native rate (~30 fps).
 DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "15.0"))

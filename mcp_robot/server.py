@@ -941,7 +941,7 @@ def navigate_to(
                     direction = "CW" if turn_deg > 0 else "CCW"
                     log.info("[navigate_to] step %d — turn %+.0f° %s",
                              step + 1, turn_deg, direction)
-                    robot_mod.turn(float(turn_deg), config.SPEED_MIN)
+                    robot_mod.turn(float(turn_deg), config.NAV_TURN_SPEED)
                 log.info("[navigate_to] step %d — drive %.1fs forward",
                          step + 1, drive_s)
                 robot_mod.drive(config.SPEED_MAX, config.SPEED_MAX, float(drive_s))
