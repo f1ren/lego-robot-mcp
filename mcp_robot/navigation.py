@@ -49,7 +49,7 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 
 # Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
-_CSPACE_BUFFER_SCALE = 1.7
+_CSPACE_BUFFER_SCALE = 2.0
 
 # Fixed drive duration per navigation step (seconds).
 _DRIVE_STEP_S = 1.2
@@ -726,8 +726,18 @@ def commands_for_step(
         cross = fw[0] * dy - fw[1] * dx
         dot   = fw[0] * dx + fw[1] * dy
         turn_deg = math.degrees(math.atan2(cross, dot))
+        target_angle_deg = math.degrees(math.atan2(dy, dx))
+        heading_angle_deg = math.degrees(math.atan2(fw[1], fw[0]))
+        log.info(
+            "[commands_for_step] heading=(%.2f, %.2f) heading_deg=%.1f°  "
+            "target_dir=(%.0f, %.0f) target_deg=%.1f°  turn=%.1f°",
+            fw[0], fw[1], heading_angle_deg,
+            dx, dy, target_angle_deg,
+            turn_deg,
+        )
     else:
         turn_deg = 0.0
+        log.info("[commands_for_step] no heading available — turn_deg=0")
 
     drive_s = _DRIVE_STEP_S
     if obs_map.target_px is not None:
