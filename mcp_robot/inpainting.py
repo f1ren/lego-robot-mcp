@@ -2,10 +2,11 @@
 Remove the robot and target object from a DroidCam frame using LaMa inpainting.
 
 The robot is identified by its yellow LEGO body (HSV color mask + rotated-rectangle
-footprint that covers the full chassis including the gripper arm).  The target is
-identified by its YOLO bounding box.  Both regions are combined into a single binary
-mask and handed to the LaMa deep-inpainting model, which fills the holes with
-plausible floor texture.
+footprint that covers the full chassis including the gripper arm).  The arm/gripper
+chain is caught by a separate dark-pixel pass: any dark blob (V<70, S<90) that
+overlaps the dilated footprint zone is included, regardless of the robot's heading.
+The target is identified by its YOLO bounding box.  All regions are combined into a
+single binary mask handed to the LaMa deep-inpainting model.
 
 Public API:
     build_removal_mask(bgr, nav_heading, target) -> np.ndarray (uint8, 255 = remove)
@@ -25,6 +26,13 @@ from mcp_robot.navigation import _robot_footprint_mask
 
 log = logging.getLogger(__name__)
 
+# Dark-pixel thresholds for the arm/gripper chain (same as heading.py internals).
+_ARM_V_MAX = 70
+_ARM_S_MAX = 90
+# Maximum blob area (fraction of frame) to include as arm/gripper.
+# Excludes large dark regions like furniture, cabinet edges, or floor shadows.
+_ARM_MAX_BLOB_FRAC = 0.08
+
 _lama_model = None
 
 
@@ -38,6 +46,47 @@ def _load_lama():
     return _lama_model
 
 
+def _arm_gripper_mask(
+    hsv: np.ndarray,
+    robot_footprint: np.ndarray,
+    proximity_dilation_px: int = 60,
+) -> np.ndarray:
+    """Return a mask of arm/gripper dark pixels connected to the robot body.
+
+    The arm chain can extend in any direction depending on heading and arm height,
+    so this is direction-agnostic: find all dark blobs, keep only those that
+    overlap the footprint zone dilated by proximity_dilation_px, and exclude
+    blobs large enough to be background elements (furniture, shadows).
+    """
+    h, w = hsv.shape[:2]
+
+    dark_raw = cv2.inRange(
+        hsv,
+        np.array([0,   0,   0], dtype=np.uint8),
+        np.array([179, _ARM_S_MAX, _ARM_V_MAX], dtype=np.uint8),
+    )
+    # Close small gaps in the chain links so each arm segment is one blob.
+    dark = cv2.morphologyEx(dark_raw, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8))
+
+    # Proximity zone: footprint grown outward to catch arm segments that sit
+    # just outside the body rectangle regardless of heading.
+    k = 2 * proximity_dilation_px + 1
+    proximity = cv2.dilate(robot_footprint, np.ones((k, k), np.uint8))
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark)
+    result = np.zeros((h, w), dtype=np.uint8)
+    max_blob_px = int(h * w * _ARM_MAX_BLOB_FRAC)
+
+    for lbl in range(1, n_labels):
+        if stats[lbl, cv2.CC_STAT_AREA] > max_blob_px:
+            continue  # too large to be part of the robot arm
+        blob = (labels == lbl).astype(np.uint8) * 255
+        if cv2.bitwise_and(blob, proximity).any():
+            result = cv2.bitwise_or(result, blob)
+
+    return result
+
+
 def build_removal_mask(
     bgr: np.ndarray,
     nav_heading: Heading | None,
@@ -48,8 +97,8 @@ def build_removal_mask(
 ) -> np.ndarray:
     """Return a uint8 mask (same H×W as bgr) where 255 = pixels to remove.
 
-    Robot region: full rotated-rectangle footprint (yellow chassis + gripper arm),
-    dilated by robot_dilation_px pixels for safety.
+    Robot region: rotated-rectangle footprint (yellow chassis) + dark arm/gripper
+    blobs connected to it, all dilated by robot_dilation_px pixels for safety.
 
     Target region: YOLO bounding box padded by target_padding_px on each side.
     """
@@ -62,11 +111,16 @@ def build_removal_mask(
 
     robot_footprint = _robot_footprint_mask(yellow_raw, 0.0, nav_heading)
 
+    # Arm/gripper: dark blobs adjacent to the footprint, direction-agnostic.
+    arm_mask = _arm_gripper_mask(hsv, robot_footprint)
+
+    combined = cv2.bitwise_or(robot_footprint, arm_mask)
+
     if robot_dilation_px > 0:
         k = 2 * robot_dilation_px + 1
-        robot_footprint = cv2.dilate(robot_footprint, np.ones((k, k), np.uint8))
+        combined = cv2.dilate(combined, np.ones((k, k), np.uint8))
 
-    mask = cv2.bitwise_or(mask, robot_footprint)
+    mask = cv2.bitwise_or(mask, combined)
 
     # ── Target mask ───────────────────────────────────────────────────────────
     if target is not None:
