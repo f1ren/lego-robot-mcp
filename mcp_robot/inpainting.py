@@ -56,7 +56,8 @@ def _load_lama():
 def _arm_gripper_mask(
     hsv: np.ndarray,
     robot_footprint: np.ndarray,
-    proximity_dilation_px: int = 60,
+    proximity_dilation_px: int = 150,
+    nav_heading: Heading | None = None,
 ) -> np.ndarray:
     """Return a mask of arm/gripper dark pixels connected to the robot body.
 
@@ -64,6 +65,13 @@ def _arm_gripper_mask(
     so this is direction-agnostic: find all dark blobs, keep only those that
     overlap the footprint zone dilated by proximity_dilation_px, and exclude
     blobs large enough to be background elements (furniture, shadows).
+
+    When nav_heading is provided a forward cap is applied: only dark blobs whose
+    centroid is no more forward than the footprint's front edge are included.
+    This prevents masking vertical obstacles (wall switch, door) that the arm
+    is pressed against — those regions must remain visible so the depth model
+    classifies them as obstacles.  White/grey obstacles are safe regardless
+    (never dark enough to pass the HSV threshold).
     """
     h, w = hsv.shape[:2]
 
@@ -80,6 +88,21 @@ def _arm_gripper_mask(
     k = 2 * proximity_dilation_px + 1
     proximity = cv2.dilate(robot_footprint, np.ones((k, k), np.uint8))
 
+    # Forward cap: exclude pixels more forward than the footprint's front edge.
+    # Derived from the maximum forward projection of any footprint pixel along
+    # the heading vector, so blobs at the obstacle level are never included.
+    if nav_heading is not None:
+        fp_rows, fp_cols = np.where(robot_footprint > 0)
+        if len(fp_rows):
+            cx, cy = nav_heading.body_center
+            fw = nav_heading.forward
+            fwd_fp = fw[0] * (fp_cols - cx) + fw[1] * (fp_rows - cy)
+            max_fwd = float(fwd_fp.max())
+            yy, xx = np.mgrid[0:h, 0:w]
+            fwd_all = fw[0] * (xx - cx) + fw[1] * (yy - cy)
+            fwd_cap = (fwd_all <= max_fwd).astype(np.uint8) * 255
+            proximity = cv2.bitwise_and(proximity, fwd_cap)
+
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark)
     result = np.zeros((h, w), dtype=np.uint8)
     max_blob_px = int(h * w * _ARM_MAX_BLOB_FRAC)
@@ -88,8 +111,12 @@ def _arm_gripper_mask(
         if stats[lbl, cv2.CC_STAT_AREA] > max_blob_px:
             continue  # too large to be part of the robot arm
         blob = (labels == lbl).astype(np.uint8) * 255
-        if cv2.bitwise_and(blob, proximity).any():
-            result = cv2.bitwise_or(result, blob)
+        clipped = cv2.bitwise_and(blob, proximity)
+        if clipped.any():
+            # Add only the portion within the (forward-capped) proximity zone,
+            # not the full blob — prevents a chain blob that straddles the cap
+            # from pulling in pixels at the obstacle level.
+            result = cv2.bitwise_or(result, clipped)
 
     return result
 
@@ -150,7 +177,11 @@ def build_removal_mask(
 
     robot_footprint = _robot_footprint_mask(yellow_raw, 0.0, nav_heading)
 
-    # Arm/gripper: dark blobs adjacent to the footprint, direction-agnostic.
+    # Arm/gripper: dark blobs adjacent to the footprint.  No forward cap here —
+    # when the gripper presses against a switch/wall the arm chain is dark and
+    # should be masked so LaMa fills it from the surrounding obstacle context
+    # (e.g. the white switch behind it).  The switch itself is white/grey and
+    # never caught by the dark-blob threshold.
     arm_mask = _arm_gripper_mask(hsv, robot_footprint)
     # Blue wheel hubs: sit at the chassis sides/rear, excluded from yellow mask.
     wheel_mask = _blue_wheel_mask(hsv, robot_footprint)

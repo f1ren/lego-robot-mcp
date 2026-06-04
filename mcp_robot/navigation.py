@@ -154,13 +154,17 @@ def _robot_footprint_mask(
     robot_radius_px: float,
     nav_heading: Heading | None,
 ) -> np.ndarray:
-    """Rotated-rectangle mask sized to the full physical robot, not just the yellow board.
+    """Rotated-rectangle mask covering the yellow chassis body only.
 
-    The yellow LEGO chassis is the reference rectangle.  Multipliers extend it
-    to cover the rest of the robot:
-      forward  ×2.25 — gripper arm + fingers protrude well in front of the board
-      backward ×1.25 — small rear overhang (wheels, battery cable)
-      sides    ×1.15 — wheels sit slightly outside the board on both sides
+    Multipliers are kept tight so the rectangle does NOT extend into vertical
+    obstacles (switch, wall) that may be directly in front of the gripper.
+    The arm/gripper chain is handled separately by _arm_gripper_mask, which
+    catches dark blobs near this rectangle while being blind to white/grey
+    obstacles.
+
+      forward  ×1.5 — just past the chassis front edge; arm chain caught by proximity
+      backward ×1.35 — small rear overhang (wheels, battery cable)
+      sides    ×1.35 — wheels sit slightly outside the board on both sides
 
     Falls back to a small dilation of the raw yellow pixels when heading is
     unavailable.
@@ -183,7 +187,7 @@ def _robot_footprint_mask(
     fwd_proj  = rel @ fw
     side_proj = rel @ side
 
-    front  = float(fwd_proj.max())                               * 4.00
+    front  = float(fwd_proj.max())                               * 1.50
     back   = float(fwd_proj.min())                               * 1.35
     half_w = float(max(abs(side_proj.max()), abs(side_proj.min()))) * 1.35
 
