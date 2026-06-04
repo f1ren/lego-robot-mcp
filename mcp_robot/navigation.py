@@ -54,8 +54,6 @@ _CSPACE_BUFFER_SCALE = 2.0
 # Fixed drive duration per navigation step (seconds).
 _DRIVE_STEP_S = 1.2
 
-# How far along the planned path to look for the turn-to direction.
-_LOOKAHEAD_CELLS = 5
 
 # Overlay drawing colours (BGR)
 _PATH_COLOR    = (255, 100,   0)  # blue
@@ -711,8 +709,7 @@ def commands_for_step(
     if not plan.reachable or len(plan.path_px) < 2:
         return 0.0, 0.0
 
-    idx = min(_LOOKAHEAD_CELLS, len(plan.path_px) - 1)
-    next_px = plan.path_px[idx]
+    next_px = plan.path_px[1]
     robot_px = obs_map.robot_px
 
     dx = next_px[0] - robot_px[0]
