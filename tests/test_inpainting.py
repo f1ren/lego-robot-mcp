@@ -192,18 +192,27 @@ class TestInpaintingRobotHidingSwitch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import _yolo_detect, _pick_target, _load_model
         from mcp_robot.inpainting import build_removal_mask, remove_robot_and_target
 
         bgr = _load(FIXTURES / "navigation" / "droidcam_robot_hiding_switch.jpg")
         h_result = detect_heading(bgr)
 
+        _load_model()
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else (max(objects, key=lambda o: o.confidence) if objects else None)
+        )
+
         print(f"\n[switch] Heading detected: {h_result is not None}")
         if h_result:
             print(f"[switch] Forward: {h_result.forward}  body_center: {h_result.body_center}")
+        print(f"[switch] Target: {target.class_name + f' conf={target.confidence:.2f}' if target else 'none'}")
 
-        # No target — remove robot only.
-        mask = build_removal_mask(bgr, h_result, target=None)
-        inpainted, _ = remove_robot_and_target(bgr, h_result, target=None)
+        mask = build_removal_mask(bgr, h_result, target)
+        inpainted, _ = remove_robot_and_target(bgr, h_result, target)
 
         saved = _save_outputs(cls.OUT_DIR, bgr, mask, inpainted, run_depth=True)
         print(f"[switch] Outputs: {list(saved.values())}")
@@ -212,6 +221,7 @@ class TestInpaintingRobotHidingSwitch(unittest.TestCase):
         cls._mask      = mask
         cls._inpainted = inpainted
         cls._heading   = h_result
+        cls._target    = target
         cls._saved     = saved
 
     # ── heading ───────────────────────────────────────────────────────────────
@@ -225,9 +235,19 @@ class TestInpaintingRobotHidingSwitch(unittest.TestCase):
         h, w = self._bgr.shape[:2]
         self.assertEqual(self._mask.shape, (h, w))
 
+    def test_cup_detected(self):
+        self.assertIsNotNone(self._target, "YOLO did not detect the cup in this frame")
+
     def test_mask_covers_robot(self):
         frac = (self._mask > 0).mean()
         self.assertGreater(frac, 0.01, f"Mask covers only {frac:.1%} — robot not masked")
+
+    def test_mask_covers_cup_if_detected(self):
+        if self._target is not None:
+            cx = (self._target.x1 + self._target.x2) // 2
+            cy = (self._target.y1 + self._target.y2) // 2
+            self.assertEqual(self._mask[cy, cx], 255,
+                             f"Cup centre ({cx},{cy}) not in mask")
 
     def test_mask_not_entire_frame(self):
         frac = (self._mask > 0).mean()
