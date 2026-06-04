@@ -5,6 +5,8 @@ The robot is identified by its yellow LEGO body (HSV color mask + rotated-rectan
 footprint that covers the full chassis including the gripper arm).  The arm/gripper
 chain is caught by a separate dark-pixel pass: any dark blob (V<70, S<90) that
 overlaps the dilated footprint zone is included, regardless of the robot's heading.
+Blue wheel hubs are caught by a separate blue-pixel proximity pass so they don't
+bleed into LaMa's output at the mask boundary.
 The target is identified by its YOLO bounding box.  All regions are combined into a
 single binary mask handed to the LaMa deep-inpainting model.
 
@@ -32,6 +34,11 @@ _ARM_S_MAX = 90
 # Maximum blob area (fraction of frame) to include as arm/gripper.
 # Excludes large dark regions like furniture, cabinet edges, or floor shadows.
 _ARM_MAX_BLOB_FRAC = 0.08
+
+# HSV range for the robot's blue LEGO wheel hubs.
+_BLUE_WHEEL_HSV_LO = np.array([100, 100,  60], dtype=np.uint8)
+_BLUE_WHEEL_HSV_HI = np.array([130, 255, 220], dtype=np.uint8)
+_BLUE_WHEEL_MAX_BLOB_FRAC = 0.003  # wheel hubs ~200px; cup ~6500px — excludes cup
 
 _lama_model = None
 
@@ -87,6 +94,38 @@ def _arm_gripper_mask(
     return result
 
 
+def _blue_wheel_mask(
+    hsv: np.ndarray,
+    robot_footprint: np.ndarray,
+    proximity_dilation_px: int = 80,
+) -> np.ndarray:
+    """Return a mask of blue wheel-hub pixels adjacent to the robot body.
+
+    Blue wheel hubs sit at the sides and rear of the chassis, just outside or
+    at the edge of the yellow footprint rectangle.  Without explicit masking
+    they bleed into LaMa's output as blue artifacts at the mask boundary.
+    """
+    h, w = hsv.shape[:2]
+    blue_raw = cv2.inRange(hsv, _BLUE_WHEEL_HSV_LO, _BLUE_WHEEL_HSV_HI)
+    blue = cv2.morphologyEx(blue_raw, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+
+    k = 2 * proximity_dilation_px + 1
+    proximity = cv2.dilate(robot_footprint, np.ones((k, k), np.uint8))
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(blue)
+    result = np.zeros((h, w), dtype=np.uint8)
+    max_blob_px = int(h * w * _BLUE_WHEEL_MAX_BLOB_FRAC)
+
+    for lbl in range(1, n_labels):
+        if stats[lbl, cv2.CC_STAT_AREA] > max_blob_px:
+            continue  # too large to be a wheel (e.g. the blue cup target)
+        blob = (labels == lbl).astype(np.uint8) * 255
+        if cv2.bitwise_and(blob, proximity).any():
+            result = cv2.bitwise_or(result, blob)
+
+    return result
+
+
 def build_removal_mask(
     bgr: np.ndarray,
     nav_heading: Heading | None,
@@ -113,8 +152,10 @@ def build_removal_mask(
 
     # Arm/gripper: dark blobs adjacent to the footprint, direction-agnostic.
     arm_mask = _arm_gripper_mask(hsv, robot_footprint)
+    # Blue wheel hubs: sit at the chassis sides/rear, excluded from yellow mask.
+    wheel_mask = _blue_wheel_mask(hsv, robot_footprint)
 
-    combined = cv2.bitwise_or(robot_footprint, arm_mask)
+    combined = cv2.bitwise_or(robot_footprint, cv2.bitwise_or(arm_mask, wheel_mask))
 
     if robot_dilation_px > 0:
         k = 2 * robot_dilation_px + 1

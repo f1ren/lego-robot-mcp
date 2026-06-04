@@ -248,5 +248,93 @@ class TestNavigationWestHeading(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
 
 
+class TestNavigationRobotHidingSwitch(unittest.TestCase):
+    """Navigation pipeline on the robot-hiding-switch DroidCam frame.
+
+    Fixture: tests/fixtures/navigation/droidcam_robot_hiding_switch.jpg
+    Outputs: tests/fixtures/navigation/annotated/robot_hiding_switch/
+      step_00_a_raw.jpg          — unmodified frame
+      step_00_b_cleaned.jpg      — inpainted (robot + cup removed)
+      step_00_c_depth.jpg        — Depth Anything V2 heat-map
+      step_00_d_depth_gradient.jpg — depth-gradient floor classification
+      step_00_e_free_mask.jpg    — navigable floor mask
+      step_00_f_cspace.jpg       — C-space grid (green/yellow/red + path)
+      step_00_g_nav_overlay.jpg  — full overlay with robot R, target T, A* path
+
+    Robot faces North, parked against a wall switch.  Blue cup target is visible
+    in the upper-left.  Inspect the images after the run to verify obstacle map.
+    """
+
+    FIXTURE_IMG = FIXTURES / "navigation" / "droidcam_robot_hiding_switch.jpg"
+    ANNOTATED_DIR = FIXTURES / "navigation" / "annotated" / "robot_hiding_switch"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import _yolo_detect, _pick_target, _load_model
+        from mcp_robot.navigation import detect_obstacles, plan_path, save_debug_images
+
+        _load_model()
+        cls.ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+
+        bgr = _load(cls.FIXTURE_IMG)
+        h_result = detect_heading(bgr)
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else (max(objects, key=lambda o: o.confidence) if objects else None)
+        )
+
+        obs_map = detect_obstacles(bgr, h_result, target)
+        nav_plan = plan_path(obs_map)
+        saved = save_debug_images(bgr, obs_map, nav_plan, str(cls.ANNOTATED_DIR), step=0)
+
+        print(f"\n[robot_hiding_switch] Heading:  {h_result.forward if h_result else 'not detected'}")
+        print(f"[robot_hiding_switch] Objects:  {[f'{o.class_name}@{o.confidence:.2f}' for o in objects]}")
+        print(f"[robot_hiding_switch] Robot px: {obs_map.robot_px},  Target px: {obs_map.target_px}")
+        print(f"[robot_hiding_switch] Plan:     {nav_plan.reason}")
+        print(f"[robot_hiding_switch] Images:   {list(saved.values())}")
+
+        cls._bgr     = bgr
+        cls._heading = h_result
+        cls._objects = objects
+        cls._target  = target
+        cls._obs_map = obs_map
+        cls._plan    = nav_plan
+        cls._saved   = saved
+
+    def test_robot_body_detected(self):
+        """Yellow chassis must be visible — heading detection requires it."""
+        self.assertIsNotNone(self._heading, "Heading not detected — robot body not visible?")
+
+    def test_cup_detected(self):
+        """YOLO should find the blue cup in the upper-left of the frame."""
+        names = [o.class_name for o in self._objects]
+        self.assertIn("cup", names, f"Cup not detected. YOLO found: {names}")
+
+    def test_free_mask_covers_floor(self):
+        """At least 20% of the frame should be navigable floor."""
+        frac = (self._obs_map.free_mask > 0).mean()
+        self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
+
+    def test_robot_grid_cell_navigable(self):
+        r, c = self._obs_map.robot_grid
+        self.assertTrue(self._obs_map.grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not navigable")
+
+    def test_plan_generated(self):
+        from mcp_robot.navigation import NavPlan
+        self.assertIsInstance(self._plan, NavPlan)
+        print(f"\n  plan reachable={self._plan.reachable}  reason={self._plan.reason}")
+
+    def test_debug_images_written(self):
+        for key in ("raw", "obstacle_mask", "depth", "cspace", "nav_overlay"):
+            self.assertIn(key, self._saved, f"Missing key '{key}'")
+            path = pathlib.Path(self._saved[key])
+            self.assertTrue(path.exists(), f"File not written: {path}")
+            self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
+
+
 if __name__ == "__main__":
     unittest.main()
