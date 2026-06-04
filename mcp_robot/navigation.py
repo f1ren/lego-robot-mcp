@@ -484,7 +484,6 @@ def detect_obstacles(
     ry_cells = max(_MIN_ROBOT_RADIUS_CELLS, round(robot_radius_px * _CSPACE_BUFFER_SCALE / cell_h))
     log.debug("Robot disk: %.1f px → (%d col, %d row) cells", robot_radius_px, rx_cells, ry_cells)
 
-    # Compute target position and radius early so they can be pre-marked.
     target_px: tuple[int, int] | None = target.center if target is not None else None
     if target is not None:
         target_radius_px = float(max(target.x2 - target.x1,
@@ -492,31 +491,8 @@ def detect_obstacles(
     else:
         target_radius_px = 0.0
 
-    # Pre-mark both the robot disk and the target disk in base_grid so they
-    # survive C-space erosion.  Neither is an obstacle to itself: the
-    # depth-gradient mask classifies them as non-floor (which is correct), but
-    # that creates obstacle cells that the Minkowski-sum expansion would enlarge,
-    # trapping the robot or burying the target inside its own exclusion zone.
     robot_px: tuple[int, int] = nav_heading.body_center if nav_heading is not None else (w // 2, h // 2)
     robot_grid = _px_to_grid(robot_px, w, h)
-    for _dr in range(-ry_cells, ry_cells + 1):
-        for _dc in range(-rx_cells, rx_cells + 1):
-            if (_dr / max(ry_cells, 1)) ** 2 + (_dc / max(rx_cells, 1)) ** 2 <= 1.0:
-                _gr = max(0, min(_GRID_ROWS - 1, robot_grid[0] + _dr))
-                _gc = max(0, min(_GRID_COLS - 1, robot_grid[1] + _dc))
-                base_grid[_gr, _gc] = 255
-
-    if target_px is not None and target_radius_px > 0:
-        t_grid = _px_to_grid(target_px, w, h)
-        t_rx = max(1, round(target_radius_px / cell_w))
-        t_ry = max(1, round(target_radius_px / cell_h))
-        log.debug("Target disk: %.1f px → (%d col, %d row) cells", target_radius_px, t_rx, t_ry)
-        for _dr in range(-t_ry, t_ry + 1):
-            for _dc in range(-t_rx, t_rx + 1):
-                if (_dr / max(t_ry, 1)) ** 2 + (_dc / max(t_rx, 1)) ** 2 <= 1.0:
-                    _gr = max(0, min(_GRID_ROWS - 1, t_grid[0] + _dr))
-                    _gc = max(0, min(_GRID_COLS - 1, t_grid[1] + _dc))
-                    base_grid[_gr, _gc] = 255
 
     struct = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
