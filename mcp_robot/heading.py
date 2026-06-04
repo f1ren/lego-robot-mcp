@@ -51,8 +51,10 @@ _BLACK_S_MAX = 90
 _MIN_BODY_AREA_FRAC = 0.0025   # 0.25% of frame (handles partially occluded body)
 _MIN_GRIPPER_AREA_FRAC = 0.0005  # 0.05% of frame
 
-# Search for gripper within this fractional expansion of the body bbox.
-_ROI_EXPAND = 0.6
+# Gripper search ROI: expand along the body's long axis (where the arm extends)
+# more aggressively than perpendicular, relative to the larger/smaller body dim.
+_ROI_EXPAND_ALONG = 1.5   # fraction of max(bw, bh) along the forward/backward axis
+_ROI_EXPAND_PERP  = 0.4   # fraction of min(bw, bh) perpendicular to the axis
 
 _ARROW_COLOR_BGR = (0, 220, 0)   # bright green
 _ARROW_THICKNESS_FRAC = 0.006    # of image diagonal
@@ -175,8 +177,14 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     axis = (math.cos(a), math.sin(a))
 
     # ── 3. Find black gripper inside an expanded ROI around the body ──────
-    pad_x = int(bw * _ROI_EXPAND)
-    pad_y = int(bh * _ROI_EXPAND)
+    # Expand more along the body's long axis (where the arm protrudes) than
+    # perpendicular, so the search window captures the full gripper/arm even
+    # when it extends far beyond the body bbox (e.g. chain-link arm at ~90°).
+    ax_abs, ay_abs = abs(axis[0]), abs(axis[1])
+    pad_along = int(max(bw, bh) * _ROI_EXPAND_ALONG)
+    pad_perp  = int(min(bw, bh) * _ROI_EXPAND_PERP)
+    pad_x = int(ay_abs * pad_perp + ax_abs * pad_along)
+    pad_y = int(ax_abs * pad_perp + ay_abs * pad_along)
     x0 = max(0, bx - pad_x)
     y0 = max(0, by - pad_y)
     x1 = min(w, bx + bw + pad_x)
@@ -198,9 +206,10 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     black_mask = cv2.morphologyEx(
         black_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
-    # Close with a larger kernel so multi-finger gripper jaws fuse into one blob.
+    # Close with a larger kernel so multi-finger gripper jaws and chain links
+    # fuse into one blob (chain links can be ~15 px apart).
     black_mask = cv2.morphologyEx(
-        black_mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8)
+        black_mask, cv2.MORPH_CLOSE, np.ones((19, 19), np.uint8)
     )
 
     # Pick the black blob that best represents the gripper. Score by

@@ -106,6 +106,10 @@ class TestHeadingDirection(unittest.TestCase):
         """Gripper points north — robot hiding the switch, new navigation fixture."""
         self._assert_heading("navigation/droidcam_robot_hiding_switch.jpg", "N")
 
+    def test_gripper_north_heading_switch_and_lights_on(self):
+        """Gripper points north — fixture captured 2026-06-04 with switch and lights on."""
+        self._assert_heading("heading/droidcam_heading_switch_and_lights_on.jpg", "N")
+
 
 if __name__ == "__main__":
     unittest.main()
