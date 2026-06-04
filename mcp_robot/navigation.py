@@ -627,22 +627,9 @@ def plan_path(obs_map: ObstacleMap) -> NavPlan:
     path_grid = _astar(g, start, goal)
 
     if path_grid is None:
-        # Obstacle inflation may have sealed thin corridors — retry on the
-        # pre-inflation grid at reduced clearance.
-        g_raw = obs_map.raw_grid.copy()
-        g_raw[start[0], start[1]] = True
-        goal_raw = _nearest_free_cell(g_raw, ideal_goal)
-        if goal_raw is not None:
-            path_grid = _astar(g_raw, start, goal_raw)
-            if path_grid is not None:
-                goal = goal_raw
-                goal_px = _grid_to_px(goal_raw, obs_map.w, obs_map.h)
-                log.info("navigate_to: using raw-grid path (reduced clearance)")
-                path_grid = _simplify_path(path_grid, g_raw)
-        if path_grid is None:
-            log.warning("navigate_to: no path from %s to approach %s", start, goal)
-            return NavPlan([], [], reachable=False,
-                           reason=f"No path from grid{start}→approach{goal}")
+        log.warning("navigate_to: no path from %s to approach %s", start, goal)
+        return NavPlan([], [], reachable=False,
+                       reason=f"No path from grid{start}→approach{goal}")
     else:
         path_grid = _simplify_path(path_grid, g)
 

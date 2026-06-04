@@ -336,5 +336,37 @@ class TestNavigationRobotHidingSwitch(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
 
 
+class TestNavigationNoPath(unittest.TestCase):
+    def test_plan_path_no_path_returns_unreachable_navplan(self):
+        """plan_path should return a NavPlan with reachable=False when no path is found."""
+        import numpy as np
+        from mcp_robot.navigation import ObstacleMap, plan_path
+
+        # Create a grid where start and goal are disconnected
+        grid = np.zeros((60, 80), dtype=bool)
+        grid[0, 0] = True
+        grid[58, 78] = True
+
+        obs_map = ObstacleMap(
+            free_mask=np.zeros((600, 800), dtype=np.uint8),
+            grid=grid,
+            raw_grid=grid.copy(),
+            grid_scale_x=10.0,
+            grid_scale_y=10.0,
+            h=600,
+            w=800,
+            robot_px=(5, 5),          # maps to (0, 0)
+            target_px=(795, 595),     # maps to (59, 79)
+            robot_grid=(0, 0),
+            target_grid=(59, 79),
+            robot_radius_px=5.0,
+            target_radius_px=5.0,
+        )
+
+        plan = plan_path(obs_map)
+        self.assertFalse(plan.reachable)
+        self.assertIn("No path from grid", plan.reason)
+
+
 if __name__ == "__main__":
     unittest.main()
