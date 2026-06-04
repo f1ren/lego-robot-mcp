@@ -24,6 +24,7 @@ IMAGES = sorted({
         "drive_motion/droidcam_005.jpg",
         "gripper_motion/droidcam_008.jpg",
         "move_forward/droidcam_000.jpg",
+        "navigation/droidcam_robot_hiding_switch.jpg",
     )
     for p in FIXTURES.glob(pattern)
     if "annotated" not in p.parts
@@ -100,6 +101,10 @@ class TestHeadingDirection(unittest.TestCase):
 
     def test_gripper_east_static(self):
         self._assert_heading("static_video/droidcam_000.jpg", "E")
+
+    def test_gripper_north_robot_hiding_switch(self):
+        """Gripper points north — robot hiding the switch, new navigation fixture."""
+        self._assert_heading("navigation/droidcam_robot_hiding_switch.jpg", "N")
 
 
 if __name__ == "__main__":
