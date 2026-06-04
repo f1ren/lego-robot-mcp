@@ -402,5 +402,134 @@ class TestInpaintingRobotNearSwitchCorner(unittest.TestCase):
                                f"Too small ({p.stat().st_size} B): {p}")
 
 
+class TestInpaintingNavigateToCupNearSwitch(unittest.TestCase):
+    """Robot navigating toward a blue cup; wall switch visible nearby (droidcam_navigate_to_cup_near_switch.jpg).
+
+    Captured from a navigate_to session on 2026-06-04.  Both the robot and the
+    blue cup target should be detected and masked.  Depth maps are saved.
+    """
+
+    OUT_DIR = INPAINT_BASE / "navigate_to_cup_near_switch"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import _yolo_detect, _pick_target, _load_model
+        from mcp_robot.inpainting import build_removal_mask, remove_robot_and_target
+
+        bgr = _load(FIXTURES / "navigation" / "droidcam_navigate_to_cup_near_switch.jpg")
+        h_result = detect_heading(bgr)
+
+        _load_model()
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else (max(objects, key=lambda o: o.confidence) if objects else None)
+        )
+
+        print(f"\n[navigate_cup_switch] Heading detected: {h_result is not None}")
+        if h_result:
+            print(f"[navigate_cup_switch] Forward: {h_result.forward}  "
+                  f"body_center: {h_result.body_center}")
+        print(f"[navigate_cup_switch] Target: "
+              f"{target.class_name + f' conf={target.confidence:.2f}' if target else 'none'}")
+
+        mask = build_removal_mask(bgr, h_result, target)
+        inpainted, _ = remove_robot_and_target(bgr, h_result, target)
+
+        saved = _save_outputs(cls.OUT_DIR, bgr, mask, inpainted, run_depth=True)
+        print(f"[navigate_cup_switch] Outputs: {list(saved.values())}")
+
+        cls._bgr       = bgr
+        cls._mask      = mask
+        cls._inpainted = inpainted
+        cls._heading   = h_result
+        cls._target    = target
+        cls._saved     = saved
+
+    # ── heading ───────────────────────────────────────────────────────────────
+
+    def test_robot_detected(self):
+        self.assertIsNotNone(self._heading, "Yellow robot body not found in frame")
+
+    def test_cup_detected(self):
+        self.assertIsNotNone(self._target, "YOLO did not detect the cup in this frame")
+
+    # ── mask sanity ───────────────────────────────────────────────────────────
+
+    def test_mask_same_shape_as_input(self):
+        h, w = self._bgr.shape[:2]
+        self.assertEqual(self._mask.shape, (h, w))
+
+    def test_mask_covers_robot(self):
+        frac = (self._mask > 0).mean()
+        self.assertGreater(frac, 0.01, f"Mask covers only {frac:.1%} — robot not masked")
+
+    def test_mask_not_entire_frame(self):
+        frac = (self._mask > 0).mean()
+        self.assertLess(frac, 0.60, f"Mask covers {frac:.1%} — too aggressive")
+
+    def test_mask_covers_robot_center(self):
+        if self._heading is None:
+            self.skipTest("Heading not detected — cannot check robot center")
+        cx, cy = self._heading.body_center
+        h, w = self._mask.shape
+        r = 10
+        patch = self._mask[max(0, cy - r):min(h, cy + r + 1),
+                           max(0, cx - r):min(w, cx + r + 1)]
+        self.assertGreater(patch.max(), 0,
+                           f"No masked pixel within {r}px of robot centre ({cx},{cy})")
+
+    def test_mask_covers_cup_if_detected(self):
+        if self._target is None:
+            self.skipTest("No cup detected")
+        cx = (self._target.x1 + self._target.x2) // 2
+        cy = (self._target.y1 + self._target.y2) // 2
+        self.assertEqual(self._mask[cy, cx], 255,
+                         f"Cup centre ({cx},{cy}) not in mask")
+
+    # ── inpainting output sanity ──────────────────────────────────────────────
+
+    def test_inpainted_same_shape_as_input(self):
+        self.assertEqual(self._inpainted.shape, self._bgr.shape)
+
+    def test_inpainted_is_valid_uint8(self):
+        self.assertEqual(self._inpainted.dtype, np.uint8)
+        self.assertGreaterEqual(int(self._inpainted.min()), 0)
+        self.assertLessEqual(int(self._inpainted.max()), 255)
+
+    def test_masked_region_changed(self):
+        ys, xs = np.where(self._mask > 0)
+        if len(ys) == 0:
+            self.skipTest("No masked pixels")
+        mean_diff = float(np.abs(
+            self._bgr[ys, xs].astype(np.float32) - self._inpainted[ys, xs].astype(np.float32)
+        ).mean())
+        self.assertGreater(mean_diff, 5.0, f"Inpainting had no effect (mean diff={mean_diff:.1f})")
+
+    def test_unmasked_region_preserved(self):
+        ys, xs = np.where(self._mask == 0)
+        if len(ys) == 0:
+            self.skipTest("All pixels masked")
+        mean_diff = float(np.abs(
+            self._bgr[ys, xs].astype(np.float32) - self._inpainted[ys, xs].astype(np.float32)
+        ).mean())
+        self.assertLess(mean_diff, 10.0, f"Background corrupted (mean diff={mean_diff:.1f})")
+
+    # ── output files written (includes depth maps) ────────────────────────────
+
+    def test_output_files_written(self):
+        min_sizes = {
+            "mask": 500, "inpainted": 10_000, "side_by_side": 20_000,
+            "depth_original": 10_000, "depth_inpainted": 10_000,
+        }
+        for key, min_bytes in min_sizes.items():
+            p = self._saved[key]
+            self.assertTrue(p.exists(), f"Not written: {p}")
+            self.assertGreater(p.stat().st_size, min_bytes,
+                               f"Too small ({p.stat().st_size} B): {p}")
+
+
 if __name__ == "__main__":
     unittest.main()
