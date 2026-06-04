@@ -431,7 +431,7 @@ def detect_obstacles(
 
     ring = _robot_ring(yellow_raw)
 
-    # ── 1b. Remove robot and target before depth estimation ──────────────
+    # ── 2. Remove robot and target before depth estimation ───────────────
     # Local import avoids circular dependency (inpainting imports _robot_footprint_mask
     # from this module).  The cleaned frame gives the depth model a clear view of the
     # floor where the robot and target stood, so their presence no longer creates false
@@ -440,7 +440,7 @@ def detect_obstacles(
     bgr_for_depth, _ = _inpaint(bgr, nav_heading, target)
     log.debug("Robot/target inpainting for depth estimation succeeded")
 
-    # ── 2. Depth gradient floor mask ─────────────────────────────────────
+    # ── 3. Depth gradient floor mask ─────────────────────────────────────
     depth_map: np.ndarray | None = None
     grad_free: np.ndarray | None = None
     if use_depth:
@@ -457,12 +457,12 @@ def detect_obstacles(
             "either depth estimation failed or robot body not visible."
         )
 
-    # ── 3. Free mask: gradient floor + yellow body ────────────────────────
+    # ── 4. Free mask: gradient floor + yellow body ────────────────────────
     free_mask = cv2.bitwise_or(grad_free, yellow_dilated)
     free_mask = cv2.morphologyEx(free_mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     free_mask = cv2.morphologyEx(free_mask, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
 
-    # ── 4. Build coarse grid (majority vote per cell) ─────────────────────
+    # ── 5. Build coarse grid (majority vote per cell) ─────────────────────
     cell_h = h / _GRID_ROWS
     cell_w = w / _GRID_COLS
     base_grid = np.zeros((_GRID_ROWS, _GRID_COLS), dtype=np.uint8)
@@ -472,7 +472,7 @@ def detect_obstacles(
             x0, x1 = int(gc * cell_w), max(int(gc * cell_w) + 1, int((gc + 1) * cell_w))
             base_grid[gr, gc] = 255 if free_mask[y0:y1, x0:x1].mean() > 100 else 0
 
-    # ── 5. C-space: inflate obstacles by the robot disk radius ───────────
+    # ── 6. C-space: inflate obstacles by the robot disk radius ───────────
     # Treat the robot as a disk of radius robot_radius_px.  Eroding the
     # navigable grid by that disk is the Minkowski-sum expansion that converts
     # the workspace into configuration space (C-space): A* then operates on
@@ -525,7 +525,7 @@ def detect_obstacles(
     inflated = cv2.erode(base_grid, struct)
     grid = (inflated > 0)
 
-    # ── 6. Finalise grid ─────────────────────────────────────────────────
+    # ── 7. Finalise grid ─────────────────────────────────────────────────
     target_grid = _px_to_grid(target_px, w, h) if target_px is not None else None
 
     # Belt-and-suspenders: force the robot's own cell navigable after erosion.
@@ -818,12 +818,12 @@ def save_debug_images(
     """Write pipeline debug images to outdir, prefixed a–f for alphabetical sort order.
 
     a_raw              — unmodified input frame
-    a2_cleaned         — inpainted frame (robot + target removed) used for depth estimation
-    b_depth            — Depth Anything V2 heat-map (INFERNO colormap)
-    c_depth_gradient   — floor classification from depth gradients alone (no robot body)
-    d_free_mask        — navigable floor after OR-ing in the robot body footprint
-    e_cspace           — C-space grid: green=navigable, yellow=inflation buffer, red=obstacle
-    f_nav_overlay      — final overlay: obstacle tint + A* path + R/T markers
+    b_cleaned          — inpainted frame (robot + target removed) used for depth estimation
+    c_depth            — Depth Anything V2 heat-map (INFERNO colormap)
+    d_depth_gradient   — floor classification from depth gradients alone (no robot body)
+    e_free_mask        — navigable floor after OR-ing in the robot body footprint
+    f_cspace           — C-space grid: green=navigable, yellow=inflation buffer, red=obstacle
+    g_nav_overlay      — final overlay: obstacle tint + A* path + R/T markers
     """
     os.makedirs(outdir, exist_ok=True)
     saved: dict[str, str] = {}
@@ -834,23 +834,23 @@ def save_debug_images(
     cv2.imwrite(raw_path, bgr)
     saved["raw"] = raw_path
 
-    # a2 — inpainted frame used for depth estimation (robot + target removed)
+    # b — inpainted frame used for depth estimation (robot + target removed)
     if obs_map.cleaned_bgr is not None:
-        cleaned_path = p(outdir, f"step_{step:02d}_a2_cleaned.jpg")
+        cleaned_path = p(outdir, f"step_{step:02d}_b_cleaned.jpg")
         cv2.imwrite(cleaned_path, obs_map.cleaned_bgr)
         saved["cleaned"] = cleaned_path
 
     if obs_map.depth_map is not None:
         d = obs_map.depth_map
 
-        # b — depth heat-map
+        # c — depth heat-map
         d_norm = ((d - d.min()) / (d.max() - d.min() + 1e-8) * 255).astype(np.uint8)
         depth_vis = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
-        depth_path = p(outdir, f"step_{step:02d}_b_depth.jpg")
+        depth_path = p(outdir, f"step_{step:02d}_c_depth.jpg")
         cv2.imwrite(depth_path, depth_vis)
         saved["depth"] = depth_path
 
-        # c — depth-gradient floor mask (no robot body carve-out)
+        # d — depth-gradient floor mask (no robot body carve-out)
         hsv_dbg = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         yellow_dbg = cv2.inRange(hsv_dbg, YELLOW_HSV_LO, YELLOW_HSV_HI)
         ring_dbg = _robot_ring(yellow_dbg)
@@ -859,27 +859,27 @@ def save_debug_images(
             grad_vis = np.zeros_like(bgr)
             grad_vis[grad_mask >  0] = (0, 160, 0)
             grad_vis[grad_mask == 0] = (0, 0, 180)
-            grad_path = p(outdir, f"step_{step:02d}_c_depth_gradient.jpg")
+            grad_path = p(outdir, f"step_{step:02d}_d_depth_gradient.jpg")
             cv2.imwrite(grad_path, grad_vis)
             saved["gradient_mask"] = grad_path
 
-    # d — free mask (gradient floor + robot footprint combined)
+    # e — free mask (gradient floor + robot footprint combined)
     mask_vis = np.zeros_like(bgr)
     mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
     mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
-    mask_path = p(outdir, f"step_{step:02d}_d_free_mask.jpg")
+    mask_path = p(outdir, f"step_{step:02d}_e_free_mask.jpg")
     cv2.imwrite(mask_path, mask_vis)
     saved["obstacle_mask"] = mask_path
 
-    # e — C-space planning grid
+    # f — C-space planning grid
     cspace = build_cspace_bgr(bgr, obs_map, plan)
-    cspace_path = p(outdir, f"step_{step:02d}_e_cspace.jpg")
+    cspace_path = p(outdir, f"step_{step:02d}_f_cspace.jpg")
     cv2.imwrite(cspace_path, cspace)
     saved["cspace"] = cspace_path
 
-    # f — nav overlay
+    # g — nav overlay
     overlay_bgr = draw_nav_overlay(bgr, obs_map, plan, step)
-    overlay_path = p(outdir, f"step_{step:02d}_f_nav_overlay.jpg")
+    overlay_path = p(outdir, f"step_{step:02d}_g_nav_overlay.jpg")
     cv2.imwrite(overlay_path, overlay_bgr)
     saved["nav_overlay"] = overlay_path
 
