@@ -186,11 +186,30 @@ def build_removal_mask(
     # Blue wheel hubs: sit at the chassis sides/rear, excluded from yellow mask.
     wheel_mask = _blue_wheel_mask(hsv, robot_footprint)
 
-    combined = cv2.bitwise_or(robot_footprint, cv2.bitwise_or(arm_mask, wheel_mask))
+    # Also OR in raw yellow pixels: _robot_footprint_mask only covers the
+    # largest yellow contour.  When the PCB board splits the chassis into two
+    # separate yellow regions, the smaller one is missed entirely.  Including
+    # yellow_raw here ensures both halves are in the mask; the dilation below
+    # then bridges the non-yellow gap (PCB board) between them.
+    combined = cv2.bitwise_or(
+        robot_footprint,
+        cv2.bitwise_or(arm_mask, cv2.bitwise_or(wheel_mask, yellow_raw)),
+    )
 
     if robot_dilation_px > 0:
         k = 2 * robot_dilation_px + 1
         combined = cv2.dilate(combined, np.ones((k, k), np.uint8))
+
+    # Fill enclosed holes: components like the PCB board (green, not yellow,
+    # not dark) sit inside the robot boundary but are missed by all colour
+    # passes.  Flood-fill from the image border to find all background pixels;
+    # any pixel that remains 0 afterward is fully enclosed by the mask and
+    # should also be inpainted.
+    padded = cv2.copyMakeBorder(combined, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    ff_scratch = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), dtype=np.uint8)
+    cv2.floodFill(padded, ff_scratch, (0, 0), 255)
+    holes = (padded[1:-1, 1:-1] == 0).astype(np.uint8) * 255
+    combined = cv2.bitwise_or(combined, holes)
 
     mask = cv2.bitwise_or(mask, combined)
 
