@@ -115,6 +115,7 @@ class ObstacleMap:
     target_radius_px: float          # half target bounding box (pixels); 0 if no target
     depth_map: np.ndarray | None = field(default=None, repr=False)   # raw depth, for debug
     cleaned_bgr: np.ndarray | None = field(default=None, repr=False)  # inpainted frame used for depth
+    robot_in_buffer: bool = False     # True when robot center is inside the Minkowski-sum inflation zone
 
 
 @dataclass
@@ -514,6 +515,7 @@ def detect_obstacles(
     # Belt-and-suspenders: force the robot's own cell navigable after erosion.
     # The target is NOT forced — its cells survive or not based on surrounding
     # floor, so the approach goal naturally snaps to connected green cells.
+    robot_in_buffer = not grid[robot_grid[0], robot_grid[1]]
     grid[robot_grid[0], robot_grid[1]] = True
 
     return ObstacleMap(
@@ -531,6 +533,7 @@ def detect_obstacles(
         target_radius_px=target_radius_px,
         depth_map=depth_map,
         cleaned_bgr=bgr_for_depth,
+        robot_in_buffer=robot_in_buffer,
     )
 
 
@@ -591,6 +594,38 @@ def plan_path(obs_map: ObstacleMap) -> NavPlan:
         goal_px = _grid_to_px(goal, obs_map.w, obs_map.h)
         log.debug("Approach goal snapped from %s to nearest free cell %s", ideal_goal, goal)
 
+    # ── Buffer-zone exit ──────────────────────────────────────────────────────
+    # When the robot starts inside the Minkowski-sum inflation buffer (yellow
+    # zone) never plan through it to the target.  Instead, find the nearest
+    # green (C-space free) cell and plan a two-phase path: phase 1 exits the
+    # buffer on the raw grid (buffer cells are traversable); phase 2 then runs
+    # A* entirely within the green C-space from the exit cell to the goal.
+    if obs_map.robot_in_buffer:
+        log.info("navigate_to: robot in buffer zone — routing to nearest green cell first")
+        g_no_start = g.copy()
+        g_no_start[start[0], start[1]] = False
+        exit_cell = _nearest_free_cell(g_no_start, start)
+        if exit_cell is not None:
+            g_raw = obs_map.raw_grid.copy()
+            g_raw[start[0], start[1]] = True
+            path1 = _astar(g_raw, start, exit_cell) or [start, exit_cell]
+            path2 = _astar(g, exit_cell, goal)
+            if path2 is not None:
+                path_grid = path1[:-1] + _simplify_path(path2, g)
+            else:
+                path_grid = _simplify_path(path1, g_raw)
+            path_px = [_grid_to_px(rc, obs_map.w, obs_map.h) for rc in path_grid]
+            if path_px:
+                path_px[-1] = goal_px
+            return NavPlan(
+                path_grid=path_grid,
+                path_px=path_px,
+                reachable=path2 is not None,
+                reason=f"Buffer exit → path: {len(path_grid)} cells",
+            )
+        # No green cell found at all — fall through to normal planning
+
+    # ── Normal planning: robot starts in green C-space ────────────────────────
     path_grid = _astar(g, start, goal)
 
     if path_grid is None:
