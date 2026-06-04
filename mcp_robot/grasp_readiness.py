@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 # ── tunables ──────────────────────────────────────────────────────────────────
 
 _YOLO_MODEL_NAME = "yolo11n.pt"
-_YOLO_CONF       = 0.45
+_YOLO_CONF       = 0.35
 _YOLO_IOU        = 0.45
 
 # Arrow is "well over" object when perpendicular distance < this fraction of

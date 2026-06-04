@@ -15,7 +15,7 @@ import cv2
 
 FIXTURES      = pathlib.Path(__file__).parent / "fixtures"
 FAR_BALL      = FIXTURES / "grasp_readiness" / "grasp_not_ready_far.jpg"
-NEARBY_BALL   = FIXTURES / "grasp_readiness" / "static_video" / "droidcam_000.jpg"
+NEARBY_BALL   = FIXTURES / "static_video" / "droidcam_000.jpg"
 CUP_IMG       = FIXTURES / "grasp_readiness" / "droidcam_cup.jpg"
 ANNOTATED_DIR = FIXTURES / "grasp_readiness" / "annotated"
 
@@ -88,7 +88,7 @@ class TestGraspReadinessCup(unittest.TestCase):
         ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
         bgr = _load(CUP_IMG)
         cls._bgr = bgr
-        cls._result, cls._heading, cls._obj = _compute_readiness(bgr, target_class="cup")
+        cls._result, cls._heading, cls._obj = _compute_readiness(bgr, target_class_yolo="cup")
         print(f"\n[cup fixture] {cls._result.to_text()}")
         cls._save_annotated(bgr, cls._result, cls._heading, cls._obj)
 

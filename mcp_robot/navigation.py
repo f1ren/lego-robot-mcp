@@ -113,7 +113,8 @@ class ObstacleMap:
     target_grid: tuple[int, int] | None
     robot_radius_px: float           # half robot body size (pixels); used for clearance
     target_radius_px: float          # half target bounding box (pixels); 0 if no target
-    depth_map: np.ndarray | None = field(default=None, repr=False)  # raw depth, for debug
+    depth_map: np.ndarray | None = field(default=None, repr=False)   # raw depth, for debug
+    cleaned_bgr: np.ndarray | None = field(default=None, repr=False)  # inpainted frame used for depth
 
 
 @dataclass
@@ -430,11 +431,20 @@ def detect_obstacles(
 
     ring = _robot_ring(yellow_raw)
 
+    # ── 1b. Remove robot and target before depth estimation ──────────────
+    # Local import avoids circular dependency (inpainting imports _robot_footprint_mask
+    # from this module).  The cleaned frame gives the depth model a clear view of the
+    # floor where the robot and target stood, so their presence no longer creates false
+    # obstacle regions in the depth gradient mask.
+    from mcp_robot.inpainting import remove_robot_and_target as _inpaint
+    bgr_for_depth, _ = _inpaint(bgr, nav_heading, target)
+    log.debug("Robot/target inpainting for depth estimation succeeded")
+
     # ── 2. Depth gradient floor mask ─────────────────────────────────────
     depth_map: np.ndarray | None = None
     grad_free: np.ndarray | None = None
     if use_depth:
-        depth_map = estimate_depth(bgr)
+        depth_map = estimate_depth(bgr_for_depth)
         if ring is not None:
             grad_free = _depth_gradient_floor_mask(depth_map, ring)
             if grad_free is not None:
@@ -537,6 +547,7 @@ def detect_obstacles(
         robot_radius_px=robot_radius_px,
         target_radius_px=target_radius_px,
         depth_map=depth_map,
+        cleaned_bgr=bgr_for_depth,
     )
 
 
@@ -807,6 +818,7 @@ def save_debug_images(
     """Write pipeline debug images to outdir, prefixed a–f for alphabetical sort order.
 
     a_raw              — unmodified input frame
+    a2_cleaned         — inpainted frame (robot + target removed) used for depth estimation
     b_depth            — Depth Anything V2 heat-map (INFERNO colormap)
     c_depth_gradient   — floor classification from depth gradients alone (no robot body)
     d_free_mask        — navigable floor after OR-ing in the robot body footprint
@@ -821,6 +833,12 @@ def save_debug_images(
     raw_path = p(outdir, f"step_{step:02d}_a_raw.jpg")
     cv2.imwrite(raw_path, bgr)
     saved["raw"] = raw_path
+
+    # a2 — inpainted frame used for depth estimation (robot + target removed)
+    if obs_map.cleaned_bgr is not None:
+        cleaned_path = p(outdir, f"step_{step:02d}_a2_cleaned.jpg")
+        cv2.imwrite(cleaned_path, obs_map.cleaned_bgr)
+        saved["cleaned"] = cleaned_path
 
     if obs_map.depth_map is not None:
         d = obs_map.depth_map
