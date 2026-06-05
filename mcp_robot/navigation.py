@@ -763,7 +763,6 @@ def update_robot_position(obs_map: ObstacleMap, robot_px: tuple[int, int]) -> No
     """Update robot position fields in obs_map in-place."""
     obs_map.robot_px = robot_px
     obs_map.robot_grid = _px_to_grid(robot_px, obs_map.w, obs_map.h)
-    obs_map.robot_in_buffer = not obs_map.grid[obs_map.robot_grid[0], obs_map.robot_grid[1]]
     obs_map.grid[obs_map.robot_grid[0], obs_map.robot_grid[1]] = True
 
 
