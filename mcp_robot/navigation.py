@@ -49,7 +49,7 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 
 # Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
-_CSPACE_BUFFER_SCALE = 2.0
+_CSPACE_BUFFER_SCALE = 2.2
 
 # Fixed drive duration per navigation step (seconds).
 _DRIVE_STEP_S = 1.2
