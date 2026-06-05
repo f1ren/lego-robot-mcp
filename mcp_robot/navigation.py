@@ -40,7 +40,7 @@ _GRID_ROWS = 60
 # Mahalanobis-distance threshold for depth-gradient floor classification.
 # Pixels within this many IQR-derived sigmas of the robot-ring floor gradient
 # are classified as navigable floor.
-_DEPTH_GRAD_N_SIGMA = 2.5
+_DEPTH_GRAD_N_SIGMA = 5
 
 # Minimum obstacle inflation in grid cells — used when the robot body cannot
 # be detected.  Normally the inflation radius is derived from the yellow body
@@ -49,7 +49,7 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 
 # Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
-_CSPACE_BUFFER_SCALE = 2.2
+_CSPACE_BUFFER_SCALE = 2.3
 
 # Fixed drive duration per navigation step (seconds).
 _DRIVE_STEP_S = 1.2
