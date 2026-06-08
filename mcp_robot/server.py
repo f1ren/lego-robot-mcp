@@ -926,8 +926,8 @@ def navigate_to(
                 break
 
             # ── 9. Execute next step ──────────────────────────────────────
-            turn_deg, drive_s = nav_mod.commands_for_step(obs_map, plan, h_result)
-            parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_s:.1f}s")
+            turn_deg, drive_deg = nav_mod.commands_for_step(obs_map, plan, h_result)
+            parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_deg:.0f}° (wheel)")
 
             _track_stop = threading.Event()
             _track_thread = threading.Thread(
@@ -942,9 +942,9 @@ def navigate_to(
                     log.info("[navigate_to] step %d — turn %+.0f° %s",
                              step + 1, turn_deg, direction)
                     robot_mod.turn(float(turn_deg), config.NAV_TURN_SPEED)
-                log.info("[navigate_to] step %d — drive %.1fs forward",
-                         step + 1, drive_s)
-                robot_mod.drive(config.SPEED_MAX, config.SPEED_MAX, float(drive_s))
+                log.info("[navigate_to] step %d — drive %.0f° (encoder) forward",
+                         step + 1, drive_deg)
+                robot_mod.drive_degrees(int(round(drive_deg)), config.SPEED_MAX, config.SPEED_MAX)
             finally:
                 _track_stop.set()
                 _track_thread.join(timeout=3.0)

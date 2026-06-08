@@ -46,6 +46,17 @@ TURN_ENCODER_DEG_PER_BODY_DEG = float(
               str(TRACK_WIDTH_MM / WHEEL_DIAMETER_MM))
 )
 
+# ── Robot chassis footprint (for pixel → mm distance calibration) ────────────
+# Visible yellow top surface, measured with a ruler: 152 x 88 mm
+# (= 19 x 11 LEGO studs at 8mm/stud).  Navigation uses the *area* — rather
+# than a single length — to convert pixel distances to real-world mm, because
+# area is rotation-invariant: an axis-aligned bounding-box measurement (e.g.
+# robot_radius_px) changes with the robot's heading, but the visible yellow
+# pixel count does not.
+ROBOT_BODY_LENGTH_MM = float(os.getenv("ROBOT_BODY_LENGTH_MM", "152.0"))
+ROBOT_BODY_WIDTH_MM  = float(os.getenv("ROBOT_BODY_WIDTH_MM",  "88.0"))
+ROBOT_BODY_AREA_MM2  = ROBOT_BODY_LENGTH_MM * ROBOT_BODY_WIDTH_MM
+
 # ── Speed limits ─────────────────────────────────────────────────────────────
 # Minimum absolute speed for any motor action. Below this threshold motion is
 # too slow for the CV pipeline to reliably detect, making success verification
@@ -73,7 +84,7 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.186:4747/video")
+DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.106:4747/video")
 # Target capture rate for DroidCam during action execution and video compilation.
 # Higher = smoother video and better optical flow; limited by DroidCam's native rate (~30 fps).
 DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "15.0"))

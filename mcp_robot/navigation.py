@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from mcp_robot import config
 from mcp_robot.heading import (
     Heading,
     YELLOW_HSV_LO,
@@ -49,10 +50,38 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 
 # Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
-_CSPACE_BUFFER_SCALE = 2.6
+_CSPACE_BUFFER_SCALE = 3
 
-# Fixed drive duration per navigation step (seconds).
-_DRIVE_STEP_S = 1.2
+# Cap on how far to drive in a single navigation step, expressed in body
+# lengths. Keeps the closed loop responsive — re-checking heading and position
+# often — even when the next waypoint is many step-lengths away. Shorter
+# waypoint hops are driven their exact distance (no capping needed).
+_MAX_STEP_BODY_LENGTHS = 3.0
+_MAX_STEP_MM = _MAX_STEP_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
+
+# Blind-driving distance used only when the yellow body wasn't detected, i.e.
+# no pixel->mm calibration is possible (see _mm_per_px).
+_FALLBACK_STEP_MM = 100.0
+
+_WHEEL_CIRCUMFERENCE_MM = math.pi * config.WHEEL_DIAMETER_MM
+
+
+def _mm_to_wheel_degrees(distance_mm: float) -> float:
+    """Straight-line travel distance (mm) -> wheel-encoder degrees, for
+    passing directly to robot.drive_degrees()."""
+    return (distance_mm / _WHEEL_CIRCUMFERENCE_MM) * 360.0
+
+
+def _mm_per_px(body_area_px: int) -> float | None:
+    """Pixel -> millimetre scale derived from the robot's visible yellow-body
+    area.  Area is rotation-invariant — unlike an axis-aligned bounding-box
+    measurement such as robot_radius_px, which grows and shrinks as the robot
+    turns — so this calibration stays valid no matter which way the robot is
+    currently facing.  Returns None when the body wasn't detected.
+    """
+    if body_area_px <= 0:
+        return None
+    return math.sqrt(config.ROBOT_BODY_AREA_MM2 / body_area_px)
 
 
 # Overlay drawing colours (BGR)
@@ -683,26 +712,66 @@ def draw_nav_overlay(
     return out
 
 
+def _lookahead_waypoint(
+    path_px: list[tuple[int, int]],
+    robot_px: tuple[int, int],
+    lookahead_px: float,
+) -> tuple[int, int]:
+    """Pure-pursuit waypoint: first path point at least `lookahead_px` ahead
+    of the robot's *closest point on the route* (not from the route start).
+
+    Re-scanning from path_px[1] every step breaks down once the robot is
+    roughly mid-route: nearby waypoints near the *start* of the path (which
+    the robot has already passed) can be farther than `lookahead_px` from the
+    robot's current position than waypoints further along, so the scan would
+    latch onto a stale, already-passed point and send the robot looping back
+    on itself. Anchoring the scan at the closest-approach index guarantees it
+    only ever looks forward along the route.
+
+    Falls back to the route's last point — the approach goal nearest the
+    target — once every remaining waypoint is already within reach.
+    """
+    closest_i = min(
+        range(len(path_px)),
+        key=lambda i: math.hypot(path_px[i][0] - robot_px[0], path_px[i][1] - robot_px[1]),
+    )
+    for px in path_px[closest_i + 1:]:
+        if math.hypot(px[0] - robot_px[0], px[1] - robot_px[1]) >= lookahead_px:
+            return px
+    return path_px[-1]
+
+
 def commands_for_step(
     obs_map: ObstacleMap,
     plan: NavPlan,
     nav_heading: Heading | None,
 ) -> tuple[float, float]:
-    """Return (turn_deg, drive_s) for the next navigation micro-step.
+    """Return (turn_deg, drive_deg) for the next navigation micro-step.
 
-    turn_deg: signed body-degrees to rotate (positive = CW viewed from above).
-    drive_s:  seconds to drive straight forward afterward.
+    turn_deg:  signed body-degrees to rotate (positive = CW viewed from above).
+    drive_deg: wheel-encoder degrees to drive straight forward afterward —
+               pass straight to robot.drive_degrees(), which (unlike a
+               duration-based drive) covers a precise, repeatable distance
+               regardless of speed, battery voltage, or load. The pixel
+               distance to the next waypoint is converted to mm using the
+               robot's apparent body size as a ruler (see _mm_per_px), then
+               to wheel-encoder degrees via the wheel circumference — so the
+               robot drives toward the waypoint by roughly the right amount
+               instead of for a fixed, waypoint-distance-agnostic duration
+               (which previously caused it to overshoot close waypoints and
+               then thrash ~180° trying to turn back onto them).
     """
     if not plan.reachable or len(plan.path_px) < 2:
         return 0.0, 0.0
 
-    next_px = plan.path_px[1]
     robot_px = obs_map.robot_px
+    next_px = _lookahead_waypoint(plan.path_px, robot_px, obs_map.robot_radius_px)
 
     dx = next_px[0] - robot_px[0]
     dy = next_px[1] - robot_px[1]
+    dist_px = math.hypot(dx, dy)
 
-    if math.hypot(dx, dy) < 1.0:
+    if dist_px < 1.0:
         return 0.0, 0.0
 
     if nav_heading is not None:
@@ -719,18 +788,36 @@ def commands_for_step(
             dx, dy, target_angle_deg,
             turn_deg,
         )
+        mm_per_px = _mm_per_px(nav_heading.body_area)
     else:
         turn_deg = 0.0
+        mm_per_px = None
         log.info("[commands_for_step] no heading available — turn_deg=0")
 
-    drive_s = _DRIVE_STEP_S
-    if obs_map.target_px is not None:
-        tdist = math.hypot(robot_px[0] - obs_map.target_px[0],
-                           robot_px[1] - obs_map.target_px[1])
-        if tdist < math.hypot(obs_map.w, obs_map.h) * 0.18:
-            drive_s = min(drive_s, 0.8)
+    if mm_per_px is not None:
+        step_px = min(dist_px, _MAX_STEP_MM / mm_per_px)
 
-    return turn_deg, drive_s
+        # Don't drive past grasp distance: stop with the robot and target
+        # rings just touching, not stacked on top of each other.
+        if obs_map.target_px is not None:
+            tdist_px = math.hypot(robot_px[0] - obs_map.target_px[0],
+                                  robot_px[1] - obs_map.target_px[1])
+            remaining_px = tdist_px - (obs_map.robot_radius_px + obs_map.target_radius_px)
+            if remaining_px > 0:
+                step_px = min(step_px, remaining_px)
+
+        drive_deg = _mm_to_wheel_degrees(step_px * mm_per_px)
+        log.info(
+            "[commands_for_step] mm_per_px=%.3f (body_area=%dpx²)  "
+            "step=%.0fpx -> %.0fmm -> %.0f wheel-deg",
+            mm_per_px, nav_heading.body_area, step_px, step_px * mm_per_px, drive_deg,
+        )
+    else:
+        drive_deg = _mm_to_wheel_degrees(min(_FALLBACK_STEP_MM, _MAX_STEP_MM))
+        log.info("[commands_for_step] no body-area calibration — "
+                 "falling back to %.0fmm blind step", _FALLBACK_STEP_MM)
+
+    return turn_deg, drive_deg
 
 
 def at_target(obs_map: ObstacleMap) -> bool:
