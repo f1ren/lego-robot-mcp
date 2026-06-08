@@ -919,6 +919,13 @@ def navigate_to(
                 outcome = "success"
                 break
 
+            if nav_mod.near_target(obs_map):
+                parts.append("NEAR TARGET — within C-space buffer distance, "
+                             "stopping to avoid collision — navigation complete")
+                step_logs.append("\n".join(parts))
+                outcome = "success"
+                break
+
             if not plan.reachable:
                 parts.append(f"PATH BLOCKED — {plan.reason}")
                 step_logs.append("\n".join(parts))

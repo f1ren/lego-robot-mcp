@@ -9,6 +9,7 @@ Public API:
     draw_nav_overlay(bgr, obs_map, plan, step) -> np.ndarray
     commands_for_step(obs_map, plan, heading) -> tuple[float, float]
     at_target(obs_map) -> bool
+    near_target(obs_map) -> bool
     save_debug_images(bgr, obs_map, plan, outdir, step) -> dict[str, str]
 """
 from __future__ import annotations
@@ -833,6 +834,22 @@ def at_target(obs_map: ObstacleMap) -> bool:
         obs_map.robot_px[1] - obs_map.target_px[1],
     )
     return dist <= obs_map.robot_radius_px + obs_map.target_radius_px
+
+
+def near_target(obs_map: ObstacleMap) -> bool:
+    """True when the robot's center is within C-space-buffer distance of the target.
+
+    Threshold = robot_radius * _CSPACE_BUFFER_SCALE — looser than at_target's
+    "touching" distance, so navigation can stop early and report success before
+    the robot gets close enough to collide with the target.
+    """
+    if obs_map.target_px is None:
+        return False
+    dist = math.hypot(
+        obs_map.robot_px[0] - obs_map.target_px[0],
+        obs_map.robot_px[1] - obs_map.target_px[1],
+    )
+    return dist <= obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE
 
 
 def dist_to_path(
