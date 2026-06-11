@@ -764,8 +764,8 @@ def _nav_track_motor(
 
 @mcp.tool()
 def navigate_to(
-    target_class_yolo: str = "cup",
-    target_class_free_text: str = "",
+    target_class_yolo: str,
+    target_class_free_text: str,
     max_steps: int = 6,
 ) -> list[ImageContent | TextContent]:
     """
@@ -791,8 +791,14 @@ def navigate_to(
     Args:
         target_class_yolo:      YOLO class for the target (e.g. "cup", "ball",
                                 "bottle", "any"). Pass "" to skip YOLO.
+                                REQUIRED — pass "" explicitly to skip YOLO.
         target_class_free_text: Free-text description for Gemini Flash fallback
                                 when YOLO finds nothing (e.g. "light switch").
+                                REQUIRED — pass "" explicitly to disable the VLM
+                                fallback. Both target_class_yolo and
+                                target_class_free_text must always be supplied
+                                so the target is unambiguous; do not rely on
+                                defaults.
         max_steps:              Maximum navigation steps (default 6).
     """
     log.info("[TOOL] navigate_to yolo=%r free_text=%r max_steps=%r",
@@ -862,6 +868,8 @@ def navigate_to(
                 else:
                     parts.append(f"Target '{target_obj.class_name}' "
                                  f"at {target_obj.center} conf={target_obj.confidence:.0%}")
+                    if target_obj.note:
+                        parts.append(f"VLM note: {target_obj.note}")
 
                 # ── 4. Full obstacle detection — first step only ──────────
                 obs_map = nav_mod.detect_obstacles(bgr, h_result, target_obj)
@@ -1247,6 +1255,7 @@ def get_robot_state(
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(droid_frame["frame"]))
             angle_deg = droid_frame.get("object_angle_deg")
+            vlm_note = droid_frame.get("vlm_note")
             if angle_deg is not None:
                 rot_dir = "CW" if angle_deg > 0 else "CCW"
                 angle_text = (
@@ -1260,6 +1269,8 @@ def get_robot_state(
             else:
                 log.info("get_robot_state heading result: no object detected (yolo=%r free_text=%r) — angle not computed",
                          target_class_yolo, target_class_free_text)
+            if vlm_note:
+                content.append(TextContent(type="text", text=f"VLM note: {vlm_note}"))
         except Exception as exc:
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         if _state_call_count > 1:

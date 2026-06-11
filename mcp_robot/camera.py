@@ -696,13 +696,13 @@ def capture_droidcam_still(
 
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
-         "object_angle_deg": float | None}
+         "object_angle_deg": float | None, "vlm_note": str}
     """
-    def _maybe_annotate(b64: str) -> tuple[str, float | None]:
+    def _maybe_annotate(b64: str) -> tuple[str, float | None, str]:
         if not annotate:
-            return b64, None
+            return b64, None, ""
         from mcp_robot import grasp_readiness as _gr
-        annotated_b64, angle_deg = _gr.annotate_frame_with_object_b64(
+        annotated_b64, angle_deg, note = _gr.annotate_frame_with_object_b64(
             b64,
             target_class_yolo=target_class_yolo,
             target_class_free_text=target_class_free_text,
@@ -718,13 +718,13 @@ def capture_droidcam_still(
                 "Heading analysis: yolo=%r free_text=%r — no matching object detected; heading arrow only",
                 target_class_yolo, target_class_free_text,
             )
-        return annotated_b64, angle_deg
+        return annotated_b64, angle_deg, note
 
     cached = _droidcam_cache.latest()
     if cached is not None:
-        frame, angle_deg = _maybe_annotate(cached["frame"])
+        frame, angle_deg, note = _maybe_annotate(cached["frame"])
         path = _save_snapshot(frame, "droidcam")
-        return {**cached, "frame": frame, "path": path, "object_angle_deg": angle_deg}
+        return {**cached, "frame": frame, "path": path, "object_angle_deg": angle_deg, "vlm_note": note}
 
     import cv2
 
@@ -736,8 +736,8 @@ def capture_droidcam_still(
         if not ok:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64, angle_deg = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
+        b64, angle_deg, note = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
         path = _save_snapshot(b64, "droidcam")
-        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path, "object_angle_deg": angle_deg}
+        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path, "object_angle_deg": angle_deg, "vlm_note": note}
     finally:
         cap.release()
