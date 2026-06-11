@@ -913,12 +913,6 @@ def navigate_to(
             viz.log_annotated_images(cspace_b64, overlay_b64)
 
             # ── 8. Termination checks ─────────────────────────────────────
-            if nav_mod.at_target(obs_map):
-                parts.append("AT TARGET — navigation complete")
-                step_logs.append("\n".join(parts))
-                outcome = "success"
-                break
-
             if nav_mod.near_target(obs_map):
                 parts.append("NEAR TARGET — within C-space buffer distance, "
                              "stopping to avoid collision — navigation complete")

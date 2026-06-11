@@ -8,7 +8,6 @@ Public API:
     plan_path(obs_map) -> NavPlan
     draw_nav_overlay(bgr, obs_map, plan, step) -> np.ndarray
     commands_for_step(obs_map, plan, heading) -> tuple[float, float]
-    at_target(obs_map) -> bool
     near_target(obs_map) -> bool
     save_debug_images(bgr, obs_map, plan, outdir, step) -> dict[str, str]
 """
@@ -827,27 +826,12 @@ def commands_for_step(
     return turn_deg, drive_deg
 
 
-def at_target(obs_map: ObstacleMap) -> bool:
-    """True when robot is within grasp distance of the target.
-
-    Grasp distance = robot_radius + target_radius, i.e. the two objects are
-    just touching — the robot is ready to close the gripper.
-    """
-    if obs_map.target_px is None:
-        return False
-    dist = math.hypot(
-        obs_map.robot_px[0] - obs_map.target_px[0],
-        obs_map.robot_px[1] - obs_map.target_px[1],
-    )
-    return dist <= obs_map.robot_radius_px + obs_map.target_radius_px
-
-
 def near_target(obs_map: ObstacleMap) -> bool:
     """True when the robot's center is within C-space-buffer distance of the target.
 
-    Threshold = robot_radius * _CSPACE_BUFFER_SCALE — looser than at_target's
-    "touching" distance, so navigation can stop early and report success before
-    the robot gets close enough to collide with the target.
+    Threshold = robot_radius * _CSPACE_BUFFER_SCALE — loose enough that
+    navigation can stop early and report success before the robot gets close
+    enough to collide with the target.
     """
     if obs_map.target_px is None:
         return False
@@ -855,7 +839,15 @@ def near_target(obs_map: ObstacleMap) -> bool:
         obs_map.robot_px[0] - obs_map.target_px[0],
         obs_map.robot_px[1] - obs_map.target_px[1],
     )
-    return dist <= obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE
+    threshold = obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE
+    ratio = dist / obs_map.robot_radius_px if obs_map.robot_radius_px else float("inf")
+    result = dist <= threshold
+    log.info(
+        "[near_target] dist=%.1fpx threshold=%.1fpx (robot_radius=%.1f * %.1f) "
+        "dist/robot_radius=%.2f -> %s",
+        dist, threshold, obs_map.robot_radius_px, _CSPACE_BUFFER_SCALE, ratio, result,
+    )
+    return result
 
 
 def dist_to_path(

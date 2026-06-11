@@ -32,7 +32,7 @@ import numpy as np
 from mcp_robot import config
 from mcp_robot.heading import Heading
 from mcp_robot.navigation import (
-    at_target, commands_for_step, detect_obstacles, dist_to_path, plan_path,
+    commands_for_step, detect_obstacles, dist_to_path, near_target, plan_path,
     update_robot_position,
 )
 
@@ -69,7 +69,7 @@ def _simulate(obs_map, plan, start_heading_deg, body_area_px):
     n_replans = 0
 
     for _ in range(_SIM_MAX_STEPS):
-        if at_target(obs_map) or not plan.reachable or len(plan.path_px) < 2:
+        if near_target(obs_map) or not plan.reachable or len(plan.path_px) < 2:
             break
 
         forward = (math.cos(math.radians(heading_deg)), math.sin(math.radians(heading_deg)))
@@ -198,7 +198,7 @@ class TestNavigationPlanSimulation(unittest.TestCase):
         print(f"\n[plan_simulation] heading={h_result.forward} "
               f"({start_heading_deg:.1f}\N{DEGREE SIGN}),  plan: {plan.reason}")
         print(f"[plan_simulation] {len(steps)} steps, {n_replans} replans, "
-              f"reached_target={at_target(obs_map)}")
+              f"reached_target={near_target(obs_map)}")
         print(f"[plan_simulation] turn/drive sequence (turn_deg, wheel_deg): "
               f"{[(round(t, 1), round(d, 0)) for t, d in steps]}")
         print(f"[plan_simulation] plot saved to {cls._plot_path}")
@@ -230,11 +230,11 @@ class TestNavigationPlanSimulation(unittest.TestCase):
         )
 
     def test_reaches_target(self):
-        """A correct closed-loop replay should reach grasp distance of the
-        target within the step budget — the literal 'does navigation arrive'
-        check that a 'wanders off with drastic turns' bug would fail."""
+        """A correct closed-loop replay should reach the C-space buffer distance
+        of the target within the step budget — the literal 'does navigation
+        arrive' check that a 'wanders off with drastic turns' bug would fail."""
         self.assertTrue(
-            at_target(self._final_obs_map),
+            near_target(self._final_obs_map),
             f"Simulated robot never reached the target after {len(self._steps)} steps "
             f"({self._n_replans} replans); final position {self._trajectory[-1]}, "
             f"target {self._target_px}. Inspect {self._plot_path} for the trajectory."
