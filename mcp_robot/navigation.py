@@ -628,7 +628,13 @@ def plan_path(obs_map: ObstacleMap) -> NavPlan:
     # green (C-space free) cell and plan a two-phase path: phase 1 exits the
     # buffer on the raw grid (buffer cells are traversable); phase 2 then runs
     # A* entirely within the green C-space from the exit cell to the goal.
-    if obs_map.robot_in_buffer:
+    # Only the first plan for a given obstacle map applies this — once the
+    # robot has set off, replans during execution must not re-trigger it
+    # (the flag is stale and would force needless backtracking detours).
+    # clear robot_in_buffer after first read so it fires once
+    robot_started_in_buffer = obs_map.robot_in_buffer
+    obs_map.robot_in_buffer = False
+    if robot_started_in_buffer:
         log.info("navigate_to: robot in buffer zone — routing to nearest green cell first")
         g_no_start = g.copy()
         g_no_start[start[0], start[1]] = False
