@@ -52,6 +52,13 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
 _CSPACE_BUFFER_SCALE = 3
 
+# Grace factor on near_target's distance threshold. The A* approach goal is
+# snapped to the boundary of the C-space inflation buffer (robot_radius *
+# _CSPACE_BUFFER_SCALE from the target), so the path's last waypoint sits
+# right at that boundary — drive/grid imprecision can leave the robot a
+# little outside it even though it effectively arrived. 1.2 = 20% slack.
+_NEAR_TARGET_GRACE = 1.2
+
 # Cap on how far to drive in a single navigation step, expressed in body
 # lengths. Keeps the closed loop responsive — re-checking heading and position
 # often — even when the next waypoint is many step-lengths away. Shorter
@@ -829,9 +836,10 @@ def commands_for_step(
 def near_target(obs_map: ObstacleMap) -> bool:
     """True when the robot's center is within C-space-buffer distance of the target.
 
-    Threshold = robot_radius * _CSPACE_BUFFER_SCALE — loose enough that
-    navigation can stop early and report success before the robot gets close
-    enough to collide with the target.
+    Threshold = robot_radius * _CSPACE_BUFFER_SCALE * _NEAR_TARGET_GRACE — loose
+    enough that navigation can stop early and report success before the robot
+    gets close enough to collide with the target, with a grace margin since the
+    A* path's last waypoint sits right at the (un-graced) buffer boundary.
     """
     if obs_map.target_px is None:
         return False
@@ -839,13 +847,13 @@ def near_target(obs_map: ObstacleMap) -> bool:
         obs_map.robot_px[0] - obs_map.target_px[0],
         obs_map.robot_px[1] - obs_map.target_px[1],
     )
-    threshold = obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE
+    threshold = obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE * _NEAR_TARGET_GRACE
     ratio = dist / obs_map.robot_radius_px if obs_map.robot_radius_px else float("inf")
     result = dist <= threshold
     log.info(
-        "[near_target] dist=%.1fpx threshold=%.1fpx (robot_radius=%.1f * %.1f) "
+        "[near_target] dist=%.1fpx threshold=%.1fpx (robot_radius=%.1f * %.1f * %.1f) "
         "dist/robot_radius=%.2f -> %s",
-        dist, threshold, obs_map.robot_radius_px, _CSPACE_BUFFER_SCALE, ratio, result,
+        dist, threshold, obs_map.robot_radius_px, _CSPACE_BUFFER_SCALE, _NEAR_TARGET_GRACE, ratio, result,
     )
     return result
 
