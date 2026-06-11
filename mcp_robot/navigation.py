@@ -42,7 +42,7 @@ _GRID_ROWS = 60
 # Mahalanobis-distance threshold for depth-gradient floor classification.
 # Pixels within this many IQR-derived sigmas of the robot-ring floor gradient
 # are classified as navigable floor.
-_DEPTH_GRAD_N_SIGMA = 5
+_DEPTH_GRAD_N_SIGMA = 4
 
 # Minimum obstacle inflation in grid cells — used when the robot body cannot
 # be detected.  Normally the inflation radius is derived from the yellow body
