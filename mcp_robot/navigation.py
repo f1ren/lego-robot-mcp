@@ -28,6 +28,7 @@ from mcp_robot.heading import (
     Heading,
     YELLOW_HSV_LO,
     YELLOW_HSV_HI,
+    body_hull,
 )
 from mcp_robot.grasp_readiness import DetectedObject
 
@@ -105,6 +106,99 @@ def _mm_per_px(body_area_px: int) -> float | None:
     return math.sqrt(config.ROBOT_BODY_AREA_MM2 / body_area_px)
 
 
+# ── Floor-plane homography (perspective correction) ───────────────────────────
+# Re-derived every frame from the robot's own 152x88mm yellow top-plate — no
+# external calibration markers needed. The plate's 4 visible corners (from its
+# convex hull) are mapped to their known mm offsets from the body center,
+# giving a full perspective transform that corrects pixel-space angles and
+# distances for the external camera's tilt.
+
+# Robot's visible yellow top-plate, half-extents in mm.
+_PLATE_HALF_LEN_MM = config.ROBOT_BODY_LENGTH_MM / 2.0   # along `forward`
+_PLATE_HALF_WID_MM = config.ROBOT_BODY_WIDTH_MM / 2.0    # perpendicular to `forward`
+
+# approxPolyDP epsilon (fraction of hull perimeter) for reducing the plate's
+# convex hull down to its 4 corners.
+_HOMOGRAPHY_CORNER_EPS_FRAC = 0.02
+
+# Reject a fitted homography if any image-frame corner projects beyond this
+# many mm from the robot. A bad corner correspondence (e.g. one corner
+# misidentified) produces a near-degenerate transform that extrapolates the
+# image edges to absurd distances (tens of metres); a good fit keeps them
+# within a few metres for a tabletop/floor-level view.
+_HOMOGRAPHY_MAX_FLOOR_MM = 4000.0
+
+
+def _project_to_floor_mm(H: np.ndarray, px: float, py: float) -> tuple[float, float]:
+    """Apply floor homography `H` to one pixel coordinate -> (x_mm, y_mm)."""
+    pt = cv2.perspectiveTransform(np.array([[[px, py]]], dtype=np.float32), H)
+    return float(pt[0, 0, 0]), float(pt[0, 0, 1])
+
+
+def _floor_homography(bgr: np.ndarray | None, nav_heading: Heading) -> np.ndarray | None:
+    """Fit a pixel -> floor-plane-mm homography from the robot's own body.
+
+    The robot's 152x88mm yellow top-plate is visible in every frame, so its 4
+    corners double as floor-plane calibration points with a known real-world
+    size — no external markers needed. Corners are extracted from the body's
+    convex hull via approxPolyDP, classified into the plate's 4 quadrants using
+    `nav_heading` (along/perpendicular to `forward`), and paired with their
+    known mm offsets from the body center. `cv2.getPerspectiveTransform` then
+    fits the transform.
+
+    The resulting (x_mm, y_mm) frame has +x along `forward` and +y perpendicular
+    (rotated from forward in the same sense as cross(forward, v)) — i.e. the
+    same orientation as the pixel-space (dot, cross) decomposition used
+    elsewhere, so atan2(y_mm, x_mm) preserves the "positive = CW from above"
+    turn-angle convention while correcting for perspective.
+
+    Returns None if the plate's hull doesn't reduce to a clean quadrilateral
+    spanning all 4 quadrants, or if the fit projects any image corner beyond
+    _HOMOGRAPHY_MAX_FLOOR_MM (a degenerate/extrapolating fit).
+    """
+    if bgr is None:
+        return None
+    body = body_hull(bgr)
+    if body is None:
+        return None
+    peri = cv2.arcLength(body, True)
+    approx = cv2.approxPolyDP(body, _HOMOGRAPHY_CORNER_EPS_FRAC * peri, True).reshape(-1, 2)
+    if len(approx) != 4:
+        return None
+
+    bx, by = nav_heading.body_center
+    fx, fy = nav_heading.forward
+    px_axis, py_axis = -fy, fx  # perpendicular axis (90° from forward, cross-product sense)
+
+    src_pts: list[tuple[float, float]] = []
+    dst_pts: list[tuple[float, float]] = []
+    quadrants = set()
+    for x, y in approx:
+        dx, dy = float(x) - bx, float(y) - by
+        along = dx * fx + dy * fy
+        perp = dx * px_axis + dy * py_axis
+        quadrants.add((along >= 0, perp >= 0))
+        mm_x = _PLATE_HALF_LEN_MM if along >= 0 else -_PLATE_HALF_LEN_MM
+        mm_y = _PLATE_HALF_WID_MM if perp >= 0 else -_PLATE_HALF_WID_MM
+        src_pts.append((float(x), float(y)))
+        dst_pts.append((mm_x, mm_y))
+
+    if len(quadrants) != 4:
+        return None
+
+    src = np.array(src_pts, dtype=np.float32)
+    dst = np.array(dst_pts, dtype=np.float32)
+    H = cv2.getPerspectiveTransform(src, dst)
+
+    h, w = bgr.shape[:2]
+    for cx, cy in ((0, 0), (w, 0), (0, h), (w, h)):
+        fmx, fmy = _project_to_floor_mm(H, cx, cy)
+        if math.hypot(fmx, fmy) > _HOMOGRAPHY_MAX_FLOOR_MM:
+            return None
+
+    return H
+
+
 # Overlay drawing colours (BGR)
 _PATH_COLOR    = (255, 100,   0)  # blue
 _ROBOT_COLOR   = (  0, 220, 220)  # yellow-green
@@ -163,6 +257,7 @@ class ObstacleMap:
     target_radius_px: float          # half target bounding box (pixels); 0 if no target
     depth_map: np.ndarray | None = field(default=None, repr=False)   # raw depth, for debug
     cleaned_bgr: np.ndarray | None = field(default=None, repr=False)  # inpainted frame used for depth
+    bgr: np.ndarray | None = field(default=None, repr=False)  # original frame, for floor homography
     robot_in_buffer: bool = False     # True when robot center is inside the Minkowski-sum inflation zone
 
 
@@ -641,6 +736,7 @@ def detect_obstacles(
         target_radius_px=target_radius_px,
         depth_map=depth_map,
         cleaned_bgr=bgr_for_depth,
+        bgr=bgr,
         robot_in_buffer=robot_in_buffer,
     )
 
@@ -869,7 +965,11 @@ def commands_for_step(
     """Return (turn_deg, drive_deg, reverse) for the next navigation micro-step.
 
     turn_deg:  signed body-degrees to rotate (positive = CW viewed from above).
-               Always 0.0 when reverse is True (see below).
+               Always 0.0 when reverse is True (see below). When a floor
+               homography can be derived from the robot's own body (see
+               _floor_homography), turn_deg is computed from the waypoint's
+               floor-plane position rather than its raw pixel direction —
+               correcting for the external camera's tilt/perspective.
     drive_deg: wheel-encoder degrees to drive afterward — forward when reverse
                is False, straight backward when reverse is True. Pass straight
                to robot.drive_degrees(), which (unlike a duration-based drive)
@@ -881,7 +981,11 @@ def commands_for_step(
                waypoint by roughly the right amount instead of for a fixed,
                waypoint-distance-agnostic duration (which previously caused it
                to overshoot close waypoints and then thrash ~180° trying to
-               turn back onto them).
+               turn back onto them). When a floor homography is available, the
+               final mm conversion uses the homography's local mm-per-pixel
+               scale along this specific direction instead of the global
+               body-area-derived scalar, correcting for perspective
+               foreshortening (far waypoints cover more real mm per pixel).
     reverse:   True when the next waypoint is roughly behind the robot (within
                _REVERSE_TURN_THRESHOLD_DEG of 180°) AND the raw grid is blocked
                directly ahead (_obstacle_ahead). Pivoting in place toward a
@@ -904,6 +1008,7 @@ def commands_for_step(
         return 0.0, 0.0, False
 
     reverse = False
+    mm_per_px_dir: float | None = None
     if nav_heading is not None:
         fw = nav_heading.forward
         cross = fw[0] * dy - fw[1] * dx
@@ -919,6 +1024,26 @@ def commands_for_step(
             turn_deg,
         )
         mm_per_px = _mm_per_px(nav_heading.body_area)
+
+        # Floor-plane correction: re-derive a perspective homography from the
+        # robot's own body each frame and use it to correct both the turn
+        # angle and the distance-per-pixel along this specific direction,
+        # accounting for the external camera's tilt. Falls back to the
+        # pixel-space turn_deg / scalar mm_per_px above when unavailable.
+        H = _floor_homography(obs_map.bgr, nav_heading)
+        if H is not None:
+            rmx, rmy = _project_to_floor_mm(H, robot_px[0], robot_px[1])
+            nmx, nmy = _project_to_floor_mm(H, next_px[0], next_px[1])
+            fmx, fmy = nmx - rmx, nmy - rmy
+            dist_mm = math.hypot(fmx, fmy)
+            floor_turn_deg = math.degrees(math.atan2(fmy, fmx))
+            log.info(
+                "[commands_for_step] floor homography: robot=(%.0f,%.0f)mm "
+                "waypoint=(%.0f,%.0f)mm  dist=%.0fmm  turn=%.1f° (pixel turn=%.1f°)",
+                rmx, rmy, nmx, nmy, dist_mm, floor_turn_deg, turn_deg,
+            )
+            turn_deg = floor_turn_deg
+            mm_per_px_dir = dist_mm / dist_px
 
         if abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG and _obstacle_ahead(obs_map, nav_heading):
             log.info(
@@ -945,11 +1070,14 @@ def commands_for_step(
             if remaining_px > 0:
                 step_px = min(step_px, remaining_px)
 
-        drive_deg = _mm_to_wheel_degrees(step_px * mm_per_px)
+        step_mm_per_px = mm_per_px_dir if mm_per_px_dir is not None else mm_per_px
+        drive_deg = _mm_to_wheel_degrees(step_px * step_mm_per_px)
         log.info(
-            "[commands_for_step] mm_per_px=%.3f (body_area=%dpx²)  "
+            "[commands_for_step] mm_per_px=%.3f%s (body_area=%dpx²)  "
             "step=%.0fpx -> %.0fmm -> %.0f wheel-deg",
-            mm_per_px, nav_heading.body_area, step_px, step_px * mm_per_px, drive_deg,
+            mm_per_px,
+            f" (dir={mm_per_px_dir:.3f})" if mm_per_px_dir is not None else "",
+            nav_heading.body_area, step_px, step_px * step_mm_per_px, drive_deg,
         )
     else:
         drive_deg = _mm_to_wheel_degrees(min(_FALLBACK_STEP_MM, _MAX_STEP_MM))

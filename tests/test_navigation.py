@@ -12,6 +12,7 @@ Each test run saves its debug images to tests/fixtures/navigation/annotated/:
 
 Inspect those images after the test to verify the obstacle map visually.
 """
+import math
 import pathlib
 import unittest
 
@@ -445,6 +446,61 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
 
         plan = plan_path(obs_map, heading)
         self.assertNotIn("Reverse from obstacle ahead", plan.reason)
+
+
+class TestFloorHomography(unittest.TestCase):
+    """_floor_homography: pixel -> floor-plane-mm projection derived each
+    frame from the robot's own 152x88mm yellow top-plate (no external
+    calibration markers).
+
+    Fixtures:
+      - droidcam_robot_near_switch_corner.jpg and static_video/droidcam_000.jpg:
+        the plate's convex hull reduces to a clean quadrilateral spanning all
+        4 quadrants -> a valid homography that maps body_center near (0,0)mm.
+      - droidcam_west_heading.jpg: a misdetected hull corner produces a
+        near-degenerate fit whose image corners extrapolate to nearly 1
+        metre from the robot -> rejected by _HOMOGRAPHY_MAX_FLOOR_MM.
+    """
+
+    SWITCH_CORNER_IMG = FIXTURES / "navigation" / "droidcam_robot_near_switch_corner.jpg"
+    STATIC_VIDEO_IMG  = FIXTURES / "static_video" / "droidcam_000.jpg"
+    WEST_HEADING_IMG  = FIXTURES / "navigation" / "droidcam_west_heading.jpg"
+
+    def _detect(self, path):
+        from mcp_robot.heading import detect_heading
+        bgr = _load(path)
+        h_result = detect_heading(bgr)
+        self.assertIsNotNone(h_result, f"Heading not detected in {path}")
+        return bgr, h_result
+
+    def _assert_valid_homography(self, path):
+        from mcp_robot.navigation import _floor_homography, _project_to_floor_mm
+
+        bgr, h_result = self._detect(path)
+        H = _floor_homography(bgr, h_result)
+        self.assertIsNotNone(H, f"Expected a valid floor homography for {path}")
+
+        bx, by = h_result.body_center
+        fmx, fmy = _project_to_floor_mm(H, bx, by)
+        dist = math.hypot(fmx, fmy)
+        self.assertLess(dist, 200.0,
+                         f"body_center should map near (0,0)mm, got ({fmx:+.1f},{fmy:+.1f})")
+
+    def test_valid_homography_switch_corner(self):
+        self._assert_valid_homography(self.SWITCH_CORNER_IMG)
+
+    def test_valid_homography_static_video(self):
+        self._assert_valid_homography(self.STATIC_VIDEO_IMG)
+
+    def test_rejected_homography_west_heading(self):
+        """A misdetected body-hull corner in this fixture produces a
+        near-degenerate transform — _floor_homography must reject it via
+        the _HOMOGRAPHY_MAX_FLOOR_MM image-corner bound."""
+        from mcp_robot.navigation import _floor_homography
+
+        bgr, h_result = self._detect(self.WEST_HEADING_IMG)
+        H = _floor_homography(bgr, h_result)
+        self.assertIsNone(H, "Expected homography to be rejected for west_heading fixture")
 
 
 if __name__ == "__main__":

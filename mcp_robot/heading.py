@@ -17,6 +17,7 @@ reliable than optical-flow tracking, which suffers from motor jitter.
 
 Public API:
     detect_heading(bgr) -> Heading | None
+    body_hull(bgr) -> np.ndarray | None      # convex hull of the robot's yellow body
     annotate_jpeg_b64(b64) -> str            # returns annotated b64 (or original)
     annotate_jpeg_bytes(buf) -> bytes        # returns annotated bytes (or original)
 """
@@ -85,10 +86,17 @@ def _centroid(contour: np.ndarray) -> tuple[int, int] | None:
     return int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])
 
 
-def detect_heading(bgr: np.ndarray) -> Heading | None:
+def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     """
-    Locate the robot in `bgr` and return its forward heading, or None if
-    detection is unreliable (robot out of frame, gripper occluded, etc).
+    Locate the robot's yellow body in `bgr` and return its convex hull
+    (Nx1x2 int32 contour points), or None if no yellow body is found or
+    it's too small to be the robot.
+
+    Locates the body by clustering nearby yellow contours into one shape so
+    callers get a reliable centroid + ROI. This hull is NOT used by
+    `detect_heading` to compute the heading axis (Hough lines do that) —
+    using minAreaRect on the combined hull is unreliable when oblique camera
+    angles make the visible yellow region L-shaped.
     """
     if bgr is None or bgr.size == 0:
         return None
@@ -101,12 +109,6 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
 
-    # ── 1. Find the yellow body ───────────────────────────────────────────
-    # Locate the body by clustering nearby yellow contours into one shape so we
-    # have a reliable centroid + ROI. Body shape itself is NOT used to compute
-    # the heading axis (Hough lines do that below) — using minAreaRect on the
-    # combined hull is unreliable when oblique camera angles make the visible
-    # yellow region L-shaped.
     contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
@@ -128,6 +130,29 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     body_pts = np.vstack(pts)
     body = cv2.convexHull(body_pts)
     if cv2.contourArea(body) < _MIN_BODY_AREA_FRAC * frame_area:
+        return None
+    return body
+
+
+def detect_heading(bgr: np.ndarray) -> Heading | None:
+    """
+    Locate the robot in `bgr` and return its forward heading, or None if
+    detection is unreliable (robot out of frame, gripper occluded, etc).
+    """
+    if bgr is None or bgr.size == 0:
+        return None
+    h, w = bgr.shape[:2]
+    frame_area = h * w
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    yellow_mask = cv2.morphologyEx(
+        yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+
+    # ── 1. Find the yellow body ───────────────────────────────────────────
+    body = body_hull(bgr)
+    if body is None:
         return None
     body_center = _centroid(body)
     if body_center is None:
