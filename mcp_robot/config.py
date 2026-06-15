@@ -99,8 +99,8 @@ PICAMERA_CAPTURE_FPS = float(os.getenv("PICAMERA_CAPTURE_FPS", "5.0"))
 # ── Motion segment recording ─────────────────────────────────────────────────
 SEGMENT_DIR      = os.getenv("SEGMENT_DIR", str(_OUTPUT_DIR / "segments"))
 SEGMENT_MANIFEST = os.getenv("SEGMENT_MANIFEST", str(Path(SEGMENT_DIR) / "index.jsonl"))
-SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.75"))
-SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "1.5"))
+SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.25"))
+SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "0.25"))
 # Declared playback fps per camera (container metadata for cv2.VideoWriter).
 # DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate).
 SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "15.0"))
