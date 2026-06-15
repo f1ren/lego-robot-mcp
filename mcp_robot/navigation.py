@@ -530,7 +530,15 @@ def _obstacle_ahead(obs_map: ObstacleMap, nav_heading: Heading | None) -> bool:
     ahead_grid = _px_to_grid(ahead_px, obs_map.w, obs_map.h)
     cells = list(_bresenham_cells(obs_map.robot_grid[0], obs_map.robot_grid[1],
                                    ahead_grid[0], ahead_grid[1]))
-    return any(not obs_map.raw_grid[r, c] for r, c in cells[1:])
+    ray_cells = cells[1:]
+    blocked = any(not obs_map.raw_grid[r, c] for r, c in ray_cells)
+    log.info(
+        "[_obstacle_ahead] robot_grid=%s -> ahead_grid=%s (reach=%.0fpx along fw=(%.2f,%.2f))  "
+        "raw_grid along ray=%s -> blocked=%s",
+        obs_map.robot_grid, ahead_grid, reach_px, fw[0], fw[1],
+        [int(obs_map.raw_grid[r, c]) for r, c in ray_cells], blocked,
+    )
+    return blocked
 
 
 def _reverse_exit_cell(
@@ -821,7 +829,8 @@ def plan_path(obs_map: ObstacleMap, nav_heading: Heading | None = None) -> NavPl
         # into it before completing the turn. Back straight away first: walk the
         # raw grid backward from the robot's cell to the farthest C-space-free
         # cell within the buffer radius, and route through that before A*.
-        if _obstacle_ahead(obs_map, nav_heading):
+        obstacle_ahead = _obstacle_ahead(obs_map, nav_heading)
+        if obstacle_ahead:
             reverse_cell = _reverse_exit_cell(obs_map, nav_heading)
             if reverse_cell is not None:
                 log.info("navigate_to: obstacle ahead — reversing to %s before planning",
@@ -843,8 +852,11 @@ def plan_path(obs_map: ObstacleMap, nav_heading: Heading | None = None) -> NavPl
                 )
             # Reversing wouldn't clear the buffer either — fall through to the
             # nearest-free-cell BFS below.
+            log.info("navigate_to: obstacle ahead but no C-space-free cell behind "
+                     "robot — falling back to buffer-exit BFS")
 
-        log.info("navigate_to: robot in buffer zone — routing to nearest green cell first")
+        log.info("navigate_to: robot in buffer zone (obstacle_ahead=%s) — "
+                 "routing to nearest green cell first", obstacle_ahead)
         g_no_start = g.copy()
         g_no_start[start[0], start[1]] = False
         exit_cell = _nearest_free_cell(g_no_start, start)
@@ -1045,14 +1057,21 @@ def commands_for_step(
             turn_deg = floor_turn_deg
             mm_per_px_dir = dist_mm / dist_px
 
-        if abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG and _obstacle_ahead(obs_map, nav_heading):
-            log.info(
-                "[commands_for_step] waypoint behind robot (turn=%.1f°) and "
-                "obstacle ahead — reversing instead of pivoting",
-                turn_deg,
-            )
-            turn_deg = 0.0
-            reverse = True
+        if abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG:
+            if _obstacle_ahead(obs_map, nav_heading):
+                log.info(
+                    "[commands_for_step] waypoint behind robot (turn=%.1f°) and "
+                    "obstacle ahead — reversing instead of pivoting",
+                    turn_deg,
+                )
+                turn_deg = 0.0
+                reverse = True
+            else:
+                log.info(
+                    "[commands_for_step] waypoint behind robot (turn=%.1f°, >= %.0f° "
+                    "reverse threshold) but raw grid clear ahead — pivoting in place",
+                    turn_deg, _REVERSE_TURN_THRESHOLD_DEG,
+                )
     else:
         turn_deg = 0.0
         mm_per_px = None
