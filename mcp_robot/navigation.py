@@ -258,7 +258,6 @@ class ObstacleMap:
     depth_map: np.ndarray | None = field(default=None, repr=False)   # raw depth, for debug
     cleaned_bgr: np.ndarray | None = field(default=None, repr=False)  # inpainted frame used for depth
     bgr: np.ndarray | None = field(default=None, repr=False)  # original frame, for floor homography
-    robot_in_buffer: bool = False     # True when robot center is inside the Minkowski-sum inflation zone
 
 
 @dataclass
@@ -715,11 +714,12 @@ def detect_obstacles(
     # ── 7. Finalise grid ─────────────────────────────────────────────────
     target_grid = _px_to_grid(target_px, w, h) if target_px is not None else None
 
-    # Belt-and-suspenders: force the robot's own cell navigable after erosion.
-    # The target is NOT forced — its cells survive or not based on surrounding
-    # floor, so the approach goal naturally snaps to connected green cells.
-    robot_in_buffer = not grid[robot_grid[0], robot_grid[1]]
-    grid[robot_grid[0], robot_grid[1]] = True
+    # The robot's own cell is left as-is (not forced navigable) so plan_path
+    # can detect whether the robot's current position falls inside the
+    # Minkowski-sum buffer; plan_path makes its own forced-navigable copy for
+    # A*. The target is NOT forced either — its cells survive or not based on
+    # surrounding floor, so the approach goal naturally snaps to connected
+    # green cells.
 
     return ObstacleMap(
         free_mask=free_mask,
@@ -737,7 +737,6 @@ def detect_obstacles(
         depth_map=depth_map,
         cleaned_bgr=bgr_for_depth,
         bgr=bgr,
-        robot_in_buffer=robot_in_buffer,
     )
 
 
@@ -803,18 +802,16 @@ def plan_path(obs_map: ObstacleMap, nav_heading: Heading | None = None) -> NavPl
         log.debug("Approach goal snapped from %s to nearest free cell %s", ideal_goal, goal)
 
     # ── Buffer-zone exit ──────────────────────────────────────────────────────
-    # When the robot starts inside the Minkowski-sum inflation buffer (yellow
-    # zone) never plan through it to the target.  Instead, find the nearest
-    # green (C-space free) cell and plan a two-phase path: phase 1 exits the
-    # buffer on the raw grid (buffer cells are traversable); phase 2 then runs
-    # A* entirely within the green C-space from the exit cell to the goal.
-    # Only the first plan for a given obstacle map applies this — once the
-    # robot has set off, replans during execution must not re-trigger it
-    # (the flag is stale and would force needless backtracking detours).
-    # clear robot_in_buffer after first read so it fires once
-    robot_started_in_buffer = obs_map.robot_in_buffer
-    obs_map.robot_in_buffer = False
-    if robot_started_in_buffer:
+    # If the robot's current cell falls inside the Minkowski-sum inflation
+    # buffer (yellow zone) of this C-space snapshot, never plan through the
+    # buffer to the target. Instead, find the nearest green (C-space free)
+    # cell and plan a two-phase path: phase 1 exits the buffer on the raw grid
+    # (buffer cells are traversable); phase 2 then runs A* entirely within the
+    # green C-space from the exit cell to the goal.
+    # Checked fresh against obs_map.grid on every call (not a cached flag), so
+    # a robot that drifts into the buffer mid-navigation is caught on its next
+    # replan too, not just the initial plan.
+    if not obs_map.grid[start[0], start[1]]:
         # ── Reverse from obstacle ahead ────────────────────────────────────────
         # If the buffer-triggering obstacle is directly ahead of the robot, an
         # in-place turn toward any other waypoint would swing the chassis/gripper
@@ -1127,7 +1124,6 @@ def update_robot_position(obs_map: ObstacleMap, robot_px: tuple[int, int]) -> No
     """Update robot position fields in obs_map in-place."""
     obs_map.robot_px = robot_px
     obs_map.robot_grid = _px_to_grid(robot_px, obs_map.w, obs_map.h)
-    obs_map.grid[obs_map.robot_grid[0], obs_map.robot_grid[1]] = True
 
 
 def detect_robot_px(bgr: np.ndarray) -> tuple[int, int] | None:

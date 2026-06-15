@@ -85,11 +85,13 @@ class TestNavigation(unittest.TestCase):
         self.assertGreater(nav_frac, 0.10,
                            f"Navigable grid fraction too low: {nav_frac:.1%}")
 
-    def test_robot_grid_cell_is_navigable(self):
-        """The robot's grid cell must always be marked navigable."""
+    def test_robot_grid_cell_is_real_floor(self):
+        """The robot's grid cell is real floor (raw_grid). It may still fall
+        inside the Minkowski-sum buffer (grid=False) when close to an
+        obstacle -- plan_path's buffer-exit branch handles that case."""
         r, c = self._obs_map.robot_grid
-        self.assertTrue(self._obs_map.grid[r, c],
-                        f"Robot grid cell ({r},{c}) is not navigable")
+        self.assertTrue(self._obs_map.raw_grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not real floor")
 
     def test_target_detected_if_cup_present(self):
         """If YOLO detected the cup, target_px should be set on the map."""
@@ -232,10 +234,13 @@ class TestNavigationWestHeading(unittest.TestCase):
         frac = (self._obs_map.free_mask > 0).mean()
         self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
 
-    def test_robot_grid_cell_navigable(self):
+    def test_robot_grid_cell_is_real_floor(self):
+        """The robot's grid cell is real floor (raw_grid). It may still fall
+        inside the Minkowski-sum buffer (grid=False) when close to an
+        obstacle -- plan_path's buffer-exit branch handles that case."""
         r, c = self._obs_map.robot_grid
-        self.assertTrue(self._obs_map.grid[r, c],
-                        f"Robot grid cell ({r},{c}) is not navigable")
+        self.assertTrue(self._obs_map.raw_grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not real floor")
 
     def test_plan_generated(self):
         from mcp_robot.navigation import NavPlan
@@ -320,10 +325,13 @@ class TestNavigationRobotHidingSwitch(unittest.TestCase):
         frac = (self._obs_map.free_mask > 0).mean()
         self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
 
-    def test_robot_grid_cell_navigable(self):
+    def test_robot_grid_cell_is_real_floor(self):
+        """The robot's grid cell is real floor (raw_grid). It may still fall
+        inside the Minkowski-sum buffer (grid=False) when close to an
+        obstacle -- plan_path's buffer-exit branch handles that case."""
         r, c = self._obs_map.robot_grid
-        self.assertTrue(self._obs_map.grid[r, c],
-                        f"Robot grid cell ({r},{c}) is not navigable")
+        self.assertTrue(self._obs_map.raw_grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not real floor")
 
     def test_plan_generated(self):
         from mcp_robot.navigation import NavPlan
@@ -406,7 +414,6 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
             target_grid=(30, 70),
             robot_radius_px=30.0,
             target_radius_px=5.0,
-            robot_in_buffer=True,
         )
         heading = Heading(
             body_center=(405, 305),
@@ -446,6 +453,78 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
 
         plan = plan_path(obs_map, heading)
         self.assertNotIn("Reverse from obstacle ahead", plan.reason)
+
+
+class TestNavigationBufferDriftReplan(unittest.TestCase):
+    """plan_path must re-check buffer-zone membership against obs_map.grid on
+    every call, not just the first. A robot that drifts into the
+    Minkowski-sum buffer mid-navigation (tracked via update_robot_position)
+    must recover via the buffer-exit branch on its next replan rather than
+    A* failing with "No path"."""
+
+    @staticmethod
+    def _make_obs_map():
+        import numpy as np
+        from mcp_robot.navigation import ObstacleMap
+        from mcp_robot.heading import Heading
+
+        grid = np.ones((60, 80), dtype=bool)
+        raw_grid = np.ones((60, 80), dtype=bool)
+
+        # Small Minkowski-sum buffer island with no navigable 8-neighbour in
+        # `grid`, even though `raw_grid` (no real obstacle here) is clear all
+        # around -- a robot whose tracked center lands on (30, 40) is
+        # surrounded by buffer on every side.
+        grid[29:32, 39:42] = False
+
+        obs_map = ObstacleMap(
+            free_mask=np.zeros((600, 800), dtype=np.uint8),
+            grid=grid,
+            raw_grid=raw_grid,
+            grid_scale_x=10.0,
+            grid_scale_y=10.0,
+            h=600,
+            w=800,
+            robot_px=(105, 305),       # maps to (30, 10), green C-space
+            target_px=(705, 305),      # maps to (30, 70), green C-space
+            robot_grid=(30, 10),
+            target_grid=(30, 70),
+            robot_radius_px=30.0,
+            target_radius_px=5.0,
+        )
+        heading = Heading(
+            body_center=(105, 305),
+            arrow_anchor=(105, 305),
+            forward=(1.0, 0.0),
+            body_area=900,
+            gripper_area=0,
+        )
+        return obs_map, heading
+
+    def test_replan_after_drift_into_buffer_recovers(self):
+        from mcp_robot.navigation import plan_path, update_robot_position
+
+        obs_map, heading = self._make_obs_map()
+
+        # Initial plan: robot starts in green C-space, well clear of the
+        # buffer island -- normal A* path.
+        plan = plan_path(obs_map, heading)
+        self.assertTrue(plan.reachable, plan.reason)
+        self.assertIn("Path:", plan.reason)
+
+        # Simulate drift: the robot's tracked position moves onto the
+        # isolated buffer cell (30, 40) mid-navigation.
+        update_robot_position(obs_map, (405, 305))
+        self.assertEqual(obs_map.robot_grid, (30, 40))
+        self.assertFalse(obs_map.grid[30, 40],
+                         "drift target must remain a buffer cell in obs_map.grid")
+
+        # Replan from the drifted-into-buffer position must recover via the
+        # buffer-exit branch, not report the target unreachable.
+        plan2 = plan_path(obs_map, heading)
+        self.assertTrue(plan2.reachable,
+                        f"replan after drift into buffer should recover, got: {plan2.reason}")
+        self.assertIn("Buffer exit", plan2.reason)
 
 
 class TestFloorHomography(unittest.TestCase):
