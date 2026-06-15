@@ -84,6 +84,11 @@ def compile_task_video(
 
     segments.sort(key=lambda r: r["start_ts"])
 
+    for rec in segments:
+        log.info("Segment: %s (start=%.3f, dur=%.1fs, frames=%d, tool=%s)",
+                 rec["path"], rec["start_ts"], rec["end_ts"] - rec["start_ts"],
+                 rec.get("frame_count", 0), rec.get("tool"))
+
     out_dir_expanded = os.path.expanduser(out_dir)
     os.makedirs(out_dir_expanded, exist_ok=True)
     out_path = os.path.join(out_dir_expanded, f"task_video_{camera}_{time.strftime('%Y%m%d_%H%M%S')}.mp4")
