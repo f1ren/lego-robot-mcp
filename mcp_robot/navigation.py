@@ -50,7 +50,7 @@ _MIN_ROBOT_RADIUS_CELLS = 3
 
 # Safety margin applied to the robot-disk radius before Minkowski-sum erosion.
 # 1.0 = exact robot radius; 1.2 = 20% extra clearance on all sides.
-_CSPACE_BUFFER_SCALE = 3
+_CSPACE_BUFFER_SCALE = 4
 
 # Grace factor on near_target's distance threshold. The A* approach goal is
 # snapped to the boundary of the C-space inflation buffer (robot_radius *
