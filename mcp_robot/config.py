@@ -96,6 +96,25 @@ PICAMERA_MJPEG_PORT  = int(os.getenv("PICAMERA_MJPEG_PORT",  "8765"))
 # Target capture rate for Pi Camera during action execution.
 PICAMERA_CAPTURE_FPS = float(os.getenv("PICAMERA_CAPTURE_FPS", "5.0"))
 
+# ── Motion segment recording ─────────────────────────────────────────────────
+SEGMENT_DIR      = os.getenv("SEGMENT_DIR", str(_OUTPUT_DIR / "segments"))
+SEGMENT_MANIFEST = os.getenv("SEGMENT_MANIFEST", str(Path(SEGMENT_DIR) / "index.jsonl"))
+SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.75"))
+SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "1.5"))
+# Declared playback fps per camera (container metadata for cv2.VideoWriter).
+# DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate).
+SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "15.0"))
+# Pi camera: NOT PICAMERA_CAPTURE_FPS (5.0) — that low rate is the bottleneck
+# this feature is meant to move past. The recorder only ever sees pi_camera
+# frames when the MJPEG continuous stream is active (15-30fps native), so
+# declare 15 as the floor of that native range.
+SEGMENT_FPS_PI = float(os.getenv("SEGMENT_FPS_PI", "15.0"))
+# avc1/H264 fail to open with this OpenCV/ffmpeg build (no h264 encoder
+# available) — verified empirically. mp4v is the only codec that opens
+# successfully and concatenates cleanly via `ffmpeg -c copy`.
+SEGMENT_FOURCC = os.getenv("SEGMENT_FOURCC", "mp4v")
+SEGMENT_RECENT_RING = int(os.getenv("SEGMENT_RECENT_RING", "8"))
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))
 

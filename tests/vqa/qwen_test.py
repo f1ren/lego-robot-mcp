@@ -28,6 +28,12 @@ Usage examples:
 Environment variables (mirrors mcp_robot/config.py defaults):
   OLLAMA_HOST   http://localhost:11434
   OLLAMA_MODEL  qwen2.5vl
+
+Note: _with_change_analysis no longer writes action_video_* snapshot folders
+automatically (replaced by the continuous SegmentRecorder in
+mcp_robot/recorder.py). The --folder/--latest options below still work against
+any action_video_* folders captured manually or by older runs, but new ones
+are not produced.
 """
 from __future__ import annotations
 

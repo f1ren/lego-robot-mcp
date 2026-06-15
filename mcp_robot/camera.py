@@ -67,6 +67,8 @@ class _PiFrameCache:
             cutoff = ts - self._BUFFER_S
             while self._buf and self._buf[0]["ts"] < cutoff:
                 self._buf.pop(0)
+        from mcp_robot.recorder import get_recorder
+        get_recorder().on_frame("pi_camera", frame_b64, ts, cache=self)
 
     def latest(self) -> dict | None:
         with self._lock:
@@ -123,6 +125,8 @@ class _DroidCamFrameCache:
             cutoff = ts - self._BUFFER_S
             while self._buf and self._buf[0]["ts"] < cutoff:
                 self._buf.pop(0)
+        from mcp_robot.recorder import get_recorder
+        get_recorder().on_frame("droidcam", frame_b64, ts, cache=self)
 
     def latest(self) -> dict | None:
         with self._lock:

@@ -172,18 +172,12 @@ def _thumbnail_image_content(frame_b64: str) -> ImageContent:
 
 
 
-_ACTION_VIDEO_FPS = 5.0  # frames per second collected during action execution
-
-
-def _capture_droidcam_background(
-    frames: list,
-    stop_event: threading.Event,
-    fps: float = _ACTION_VIDEO_FPS,
-) -> None:
-    """Background thread: poll DroidCam and append (ts, b64) pairs to frames.
+def _capture_droidcam_background(stop_event: threading.Event) -> None:
+    """Background thread: poll DroidCam and feed frames into _droidcam_cache.
 
     Frames are stored raw (no heading arrow) so the VLM sees clean before/after
-    comparisons without the arrow creating spurious motion detections.
+    comparisons without the arrow creating spurious motion detections. Feeding
+    _droidcam_cache also lets the SegmentRecorder observe these frames.
     cap.read() blocks until the next frame arrives from DroidCam's MJPEG stream,
     naturally capping at DroidCam's native rate; we add a sleep only when our
     target fps is lower than what the camera delivers.
@@ -203,7 +197,7 @@ def _capture_droidcam_background(
                 if ok:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                     b64 = base64.b64encode(buf.tobytes()).decode()
-                    frames.append((time.time(), b64))
+                    cam_mod._droidcam_cache.put(b64, time.time())
                 slack = interval - (time.time() - t0)
                 if slack > 0:
                     time.sleep(slack)
@@ -264,22 +258,25 @@ def _with_change_analysis(
               their state. Pass True (default) for drive/turn actions where
               heading information is needed for evaluation.
     vqa_cameras: set of camera labels to include in the VQA call (e.g.
-              {"droidcam"}). None (default) means all cameras. Frames from
-              excluded cameras are still saved to disk but not sent to VQA.
+              {"droidcam"}). None (default) means all cameras.
 
     On action error, returns _err(...) and skips vision.
     On vision failure, the action result is returned without change_description.
+
+    Recorded motion segments (mcp_robot.recorder.SegmentRecorder) overlapping
+    [t_start, t_end] are tagged with this action's tool name and
+    change_description.
     """
     t_start = time.time()
 
     # Start background DroidCam capture only when its cache is empty (no existing stream)
-    droid_bg_frames: list[tuple[float, str]] = []
-    stop_event = threading.Event()
+    stop_event: threading.Event | None = None
     bg_thread: threading.Thread | None = None
     if cam_mod._droidcam_cache.latest() is None:
+        stop_event = threading.Event()
         bg_thread = threading.Thread(
             target=_capture_droidcam_background,
-            args=(droid_bg_frames, stop_event),
+            args=(stop_event,),
             daemon=True,
         )
         bg_thread.start()
@@ -287,35 +284,34 @@ def _with_change_analysis(
     try:
         result = action_fn()
     except Exception as exc:
-        stop_event.set()
+        if stop_event:
+            stop_event.set()
         if bg_thread:
             bg_thread.join(timeout=2)
         return _err(str(exc))
 
     time.sleep(config.POST_ACTION_SETTLE)
-    stop_event.set()
+    if stop_event:
+        stop_event.set()
     if bg_thread:
         bg_thread.join(timeout=2)
 
+    t_end = time.time()
+
     # ── collect video frames in chronological order ───────────────────────────
     # raw_video holds unannotated frames (for motion gate only).
-    # annotated_video holds arrow-overlaid frames (for VQA and saved clips).
+    # annotated_video holds arrow-overlaid frames (for VQA).
     raw_video: list[tuple[float, str, str]] = []
     annotated_video: list[tuple[float, str, str]] = []
 
     def _maybe_annotate(b64: str) -> str:
         return heading.annotate_jpeg_b64(b64) if annotate else b64
 
-    if droid_bg_frames:
-        for ts, b64 in droid_bg_frames:
-            raw_video.append((ts, "droidcam", b64))
-            annotated_video.append((ts, "droidcam", _maybe_annotate(b64)))
-    else:
-        droid_clip = cam_mod._droidcam_cache.clip_since(t_start, config.DROIDCAM_CAPTURE_FPS)
-        if droid_clip:
-            for f in droid_clip:
-                raw_video.append((f["ts"], "droidcam", f["frame"]))
-                annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
+    droid_clip = cam_mod._droidcam_cache.clip_since(t_start, config.DROIDCAM_CAPTURE_FPS)
+    if droid_clip:
+        for f in droid_clip:
+            raw_video.append((f["ts"], "droidcam", f["frame"]))
+            annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
 
     pi_clip = cam_mod._pi_cache.clip_since(t_start, config.PICAMERA_CAPTURE_FPS)
     if pi_clip:
@@ -329,32 +325,6 @@ def _with_change_analysis(
     labeled = [(label, b64) for _, label, b64 in annotated_video]
     raw_labeled = [(label, b64) for _, label, b64 in raw_video]
 
-    frame_paths: list[str | None] = [None] * len(annotated_video)
-    if annotated_video and config.SNAPSHOT_DIR:
-        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_start))
-        folder = os.path.join(config.SNAPSHOT_DIR, f"action_video_{ts}")
-        annotated_folder = os.path.join(folder, "annotated")
-        try:
-            os.makedirs(folder, exist_ok=True)
-            os.makedirs(annotated_folder, exist_ok=True)
-            cam_counters: dict[str, int] = {}
-            for i, ((_, label, raw_b64), (_, _, ann_b64)) in enumerate(zip(raw_video, annotated_video)):
-                idx = cam_counters.get(label, 0)
-                cam_counters[label] = idx + 1
-                fname = f"{label}_{idx:03d}.jpg"
-                # raw frame → main folder (read by compile_video)
-                with open(os.path.join(folder, fname), "wb") as fh:
-                    fh.write(base64.b64decode(raw_b64))
-                # annotated frame → subfolder (for VQA path logging only)
-                ann_path = os.path.join(annotated_folder, fname)
-                with open(ann_path, "wb") as fh:
-                    fh.write(base64.b64decode(ann_b64))
-                frame_paths[i] = ann_path
-            log.info("Action video (%d frames) saved to: %s (annotated → %s/annotated/)",
-                     len(annotated_video), folder, folder)
-        except Exception as exc:
-            log.warning("Failed to save action video: %s", exc)
-
     if not labeled:
         raise RuntimeError(
             f"No video frames captured during action {action_desc!r} — "
@@ -366,9 +336,8 @@ def _with_change_analysis(
         vqa_indices = [i for i, (lbl, _) in enumerate(labeled) if lbl in vqa_cameras]
         vqa_labeled = [labeled[i] for i in vqa_indices]
         vqa_raw = [raw_labeled[i] for i in vqa_indices]
-        vqa_paths = [frame_paths[i] for i in vqa_indices]
     else:
-        vqa_labeled, vqa_raw, vqa_paths = labeled, raw_labeled, frame_paths
+        vqa_labeled, vqa_raw = labeled, raw_labeled
 
     # Build per-camera stacks from all annotated frames (not just VQA subset).
     cam_frames: dict[str, list[str]] = {}
@@ -384,11 +353,18 @@ def _with_change_analysis(
     )
 
     description = vision.describe_action_video(
-        action_desc, expected, vqa_labeled, vqa_paths, context=context,
+        action_desc, expected, vqa_labeled, None, context=context,
         raw_labeled_frames=vqa_raw,
     )
     if description:
         out["change_description"] = description
+
+    from mcp_robot.recorder import get_recorder
+    rec = get_recorder()
+    meta = {"tool": action_desc, "change_description": description}
+    for cam in cam_frames:
+        rec.tag_range(cam, t_start, t_end, meta)
+
     return out
 
 
@@ -1291,34 +1267,30 @@ def get_robot_state(
 # ── task video ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def compile_video(since: str, output_fps: float = config.DROIDCAM_CAPTURE_FPS) -> dict:
+def compile_video(since: str, camera: str = "droidcam") -> dict:
     """
-    Compile a task video from all action-video folders captured since a given
-    timestamp. Only frames where motion was detected (pixel diff vs. neighbour
-    above threshold) are included.
+    Compile a video by concatenating recorded motion segments since a given
+    timestamp. Segments are produced continuously by the SegmentRecorder and
+    contain only motion-bounded footage (no stale/static frames).
 
     Call this after a sequence of actions to get a single video of the task.
 
     Args:
-        since:      ISO-style datetime string marking the start of the task,
-                    e.g. "20260507_143022" (same format as folder names), or a
-                    UNIX timestamp as a string (e.g. "1746613200.0").
-        output_fps: Playback frame rate of the output video (default: DROIDCAM_CAPTURE_FPS).
+        since:  UNIX timestamp as a string (e.g. "1746613200.0"), or a legacy
+                "YYYY-MM-DD HH:MM:SS[,ms]" / "YYYYMMDD_HHMMSS" string.
+        camera: "droidcam" (default) or "pi_camera".
 
-    Returns a dict with video_path, total_frames, motion_frames, action_count.
+    Returns a dict with video_path, segment_count, total_duration_s.
     """
-    log.info("[TOOL] compile_video since=%r output_fps=%r", since, output_fps)
+    log.info("[TOOL] compile_video since=%r camera=%r", since, camera)
     from mcp_robot.video_compiler import compile_task_video
-    result = compile_task_video(since, config.SNAPSHOT_DIR, output_fps)
+    result = compile_task_video(since, config.SEGMENT_MANIFEST, camera)
     if not result.ok:
         return _err(result.error)
     if result.video_path is None:
-        return _ok({"message": "No motion detected across all frames — video not written",
-                    "total_frames": result.total_frames, "motion_frames": 0,
-                    "action_count": result.action_count})
-    return _ok({"video_path": result.video_path, "total_frames": result.total_frames,
-                "motion_frames": result.motion_frames, "action_count": result.action_count,
-                "output_fps": output_fps})
+        return _ok({"message": "No segments found since given timestamp", "segment_count": 0})
+    return _ok({"video_path": result.video_path, "segment_count": result.segment_count,
+                "total_duration_s": result.total_duration_s})
 
 
 # ── background streaming ──────────────────────────────────────────────────────
@@ -1395,6 +1367,8 @@ def _start_background_streams() -> None:
 def _shutdown() -> None:
     _stop.set()
     viz.flush()
+    from mcp_robot.recorder import get_recorder
+    get_recorder().close()
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
