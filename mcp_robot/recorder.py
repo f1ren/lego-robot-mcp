@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections import deque
@@ -36,6 +37,7 @@ class _Segment:
     height: int = 0
     frame_count: int = 0
     last_motion_ts: float = 0.0
+    first_written_ts: float | None = None
     last_written_ts: float = 0.0
     end_ts: float | None = None
     closed: bool = False
@@ -60,6 +62,12 @@ def _is_motion(prev_gray: np.ndarray, cur_gray: np.ndarray) -> bool:
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
     return a_start <= b_end and a_end >= b_start
+
+
+# Skip the remux when the measured rate is already this close to the declared
+# rate — avoids a pointless ffmpeg call for segments recorded near their
+# intended fps (e.g. the throttled per-action capture path).
+_FPS_REMUX_TOLERANCE = 0.05
 
 
 class SegmentRecorder:
@@ -104,6 +112,7 @@ class SegmentRecorder:
             log.debug("recorder.on_frame: failed to decode frame for %s: %s", camera, exc)
             return
 
+        closed_seg = None
         with self._lock:
             state = self._cameras.setdefault(camera, _CameraState(recent_closed=deque(maxlen=self.recent_ring)))
 
@@ -122,8 +131,12 @@ class SegmentRecorder:
                     seg.last_motion_ts = ts
                 elif ts - seg.last_motion_ts >= self.cooldown_s:
                     self._close_segment(camera, state)
+                    closed_seg = seg
 
             state.prev_gray = gray
+
+        if closed_seg is not None:
+            self._maybe_remux(closed_seg)
 
     # ── segment lifecycle ───────────────────────────────────────────────────
 
@@ -172,6 +185,8 @@ class SegmentRecorder:
             img = cv2.resize(img, (seg.width, seg.height))
 
         seg.writer.write(img)
+        if seg.frame_count == 0:
+            seg.first_written_ts = ts
         seg.frame_count += 1
         seg.last_written_ts = ts
 
@@ -187,6 +202,48 @@ class SegmentRecorder:
         self._append_manifest(seg)
         state.recent_closed.append(seg)
         state.open_segment = None
+
+    def _maybe_remux(self, seg: _Segment) -> None:
+        """Rewrite seg's container timestamps so playback fps matches the
+        measured arrival rate, if it drifted from the declared fps used when
+        opening the VideoWriter (continuous streams run at the camera's
+        native rate, not the declared SEGMENT_FPS_*). Not called while holding
+        self._lock — runs after the lock is released so it never blocks the
+        other camera's on_frame()."""
+        if seg.frame_count <= 1 or seg.first_written_ts is None:
+            return
+        duration = seg.last_written_ts - seg.first_written_ts
+        if duration <= 0:
+            return
+        actual_fps = (seg.frame_count - 1) / duration
+        declared_fps = self.fps_by_camera.get(seg.camera, 15.0)
+        if declared_fps <= 0 or actual_fps <= 0:
+            return
+        if abs(actual_fps - declared_fps) / declared_fps < _FPS_REMUX_TOLERANCE:
+            return
+
+        itsscale = declared_fps / actual_fps
+        tmp_path = seg.path + ".remux.mp4"
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-itsscale", f"{itsscale:.6f}", "-i", seg.path,
+                 "-c", "copy", "-fflags", "+genpts", tmp_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode == 0:
+                os.replace(tmp_path, seg.path)
+                log.info("recorder: remuxed %s to %.2f fps (declared %.2f, %d frames over %.2fs)",
+                         seg.path, actual_fps, declared_fps, seg.frame_count, duration)
+            else:
+                log.warning("recorder: remux failed for %s: %s", seg.path, proc.stderr[-500:])
+        except Exception as exc:
+            log.warning("recorder: remux error for %s: %s", seg.path, exc)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     # ── manifest I/O (always called while holding self._lock) ──────────────
 
@@ -312,10 +369,15 @@ class SegmentRecorder:
     # ── shutdown ─────────────────────────────────────────────────────────────
 
     def close(self) -> None:
+        closed_segs = []
         with self._lock:
             for camera, state in self._cameras.items():
                 if state.open_segment is not None:
+                    seg = state.open_segment
                     self._close_segment(camera, state)
+                    closed_segs.append(seg)
+        for seg in closed_segs:
+            self._maybe_remux(seg)
 
 
 _recorder: SegmentRecorder | None = None

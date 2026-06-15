@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -346,6 +347,64 @@ class TestSegmentRecorder(unittest.TestCase):
         self.assertTrue(result.ok, result.error)
         self.assertEqual(result.segment_count, 2)
         self.assertEqual(_frame_count(result.video_path), seg1.frame_count + seg2.frame_count)
+
+    # ── 13: closing remuxes the container fps to the measured rate ──────────
+
+    def test_close_remuxes_to_actual_fps(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg not available")
+
+        rec = self._make_recorder()  # declared droidcam fps = 10.0
+        _, seg = self._build_closed_gripper_segment(rec)  # 2 frames, 1.0s apart -> 1.0fps actual
+
+        # cv2's CAP_PROP_FPS reads avg_frame_rate, which ffmpeg's duration
+        # heuristics skew for very short (2-frame) clips; r_frame_rate is the
+        # value _maybe_remux's itsscale directly targets and lands on 1/1.
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate,nb_frames",
+             "-of", "default=noprint_wrappers=1", seg.path],
+            capture_output=True, text=True,
+        )
+        info = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+        num, den = info["r_frame_rate"].split("/")
+        r_fps = float(num) / float(den)
+
+        self.assertEqual(int(info["nb_frames"]), 2)
+        self.assertAlmostEqual(r_fps, 1.0, delta=0.05)
+
+    # ── 14: remux is skipped when the measured rate already matches ─────────
+
+    def test_remux_skipped_when_rate_matches_declared(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg not available")
+
+        # cooldown_s ~= 1/declared_fps -> a 2-frame segment measures within
+        # _FPS_REMUX_TOLERANCE of the declared fps, so _maybe_remux skips it.
+        rec = self._make_recorder(cooldown_s=0.1)
+        static_b64 = [_load_b64(f) for f in sorted((FIXTURES / "static_video").glob("droidcam_*.jpg"))[:2]]
+        gripper_b64 = _load_b64(FIXTURES / "gripper_motion" / "droidcam_008.jpg")
+
+        t = 1000.0
+        rec.on_frame("droidcam", static_b64[0], t)
+        t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", static_b64[1], t)
+        t = round(t + 0.1, 3)
+        trigger_ts = t
+        rec.on_frame("droidcam", gripper_b64, trigger_ts)
+
+        # +0.001 margin so `ts - last_motion_ts >= cooldown_s` holds despite
+        # float rounding; actual_fps ~= 1/0.101 ~= 9.9, within 5% of 10.0.
+        close_ts = round(trigger_ts + rec.cooldown_s + 0.001, 3)
+        rec.on_frame("droidcam", gripper_b64, close_ts)
+
+        seg = rec._cameras["droidcam"].recent_closed[-1]
+        self.assertEqual(seg.frame_count, 2)
+
+        cap = cv2.VideoCapture(seg.path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        self.assertAlmostEqual(fps, 10.0, delta=0.01)
 
 
 if __name__ == "__main__":
