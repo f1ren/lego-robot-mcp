@@ -5,9 +5,9 @@ and per-step command synthesis.
 Public API:
     estimate_depth(bgr) -> np.ndarray          (float32 depth map, larger = farther)
     detect_obstacles(bgr, heading, target) -> ObstacleMap
-    plan_path(obs_map) -> NavPlan
+    plan_path(obs_map, heading=None) -> NavPlan
     draw_nav_overlay(bgr, obs_map, plan, step) -> np.ndarray
-    commands_for_step(obs_map, plan, heading) -> tuple[float, float]
+    commands_for_step(obs_map, plan, heading) -> tuple[float, float, bool]
     near_target(obs_map) -> bool
     save_debug_images(bgr, obs_map, plan, outdir, step) -> dict[str, str]
 """
@@ -58,6 +58,20 @@ _CSPACE_BUFFER_SCALE = 3
 # right at that boundary — drive/grid imprecision can leave the robot a
 # little outside it even though it effectively arrived. 1.2 = 20% slack.
 _NEAR_TARGET_GRACE = 1.2
+
+# How far ahead of the robot (in robot radii) to check the raw grid for an
+# obstacle before deciding an in-place turn is unsafe. The chassis/gripper
+# extends roughly this far forward of the body centroid (see
+# _robot_footprint_mask's forward multiplier), so this is the zone a pivot
+# turn would sweep through first.
+_AHEAD_CLEARANCE_SCALE = 1.5
+
+# Minimum |turn_deg| to the next waypoint for it to count as "behind" the
+# robot. When the waypoint is this close to 180° away AND something blocks
+# the raw grid directly ahead, commands_for_step reverses straight toward it
+# instead of pivoting in place — pivoting would swing the chassis/gripper
+# into the obstacle ahead before completing the turn.
+_REVERSE_TURN_THRESHOLD_DEG = 150.0
 
 # Cap on how far to drive in a single navigation step, expressed in body
 # lengths. Keeps the closed loop responsive — re-checking heading and position
@@ -400,6 +414,66 @@ def _has_line_of_sight(
     return True
 
 
+def _obstacle_ahead(obs_map: ObstacleMap, nav_heading: Heading | None) -> bool:
+    """True if the raw (uninflated) grid is blocked within
+    _AHEAD_CLEARANCE_SCALE robot radii directly ahead of the robot, along its
+    current heading.
+
+    Used to decide whether an in-place turn is safe: if the chassis/gripper
+    is already nose-to-obstacle, pivoting toward any other waypoint would
+    swing the front of the robot into that obstacle before completing the
+    turn — reversing straight back first is safer.
+    """
+    if nav_heading is None:
+        return False
+    fw = nav_heading.forward
+    reach_px = obs_map.robot_radius_px * _AHEAD_CLEARANCE_SCALE
+    ahead_px = (
+        obs_map.robot_px[0] + fw[0] * reach_px,
+        obs_map.robot_px[1] + fw[1] * reach_px,
+    )
+    ahead_grid = _px_to_grid(ahead_px, obs_map.w, obs_map.h)
+    cells = list(_bresenham_cells(obs_map.robot_grid[0], obs_map.robot_grid[1],
+                                   ahead_grid[0], ahead_grid[1]))
+    return any(not obs_map.raw_grid[r, c] for r, c in cells[1:])
+
+
+def _reverse_exit_cell(
+    obs_map: ObstacleMap,
+    nav_heading: Heading | None,
+) -> tuple[int, int] | None:
+    """Farthest cell directly behind the robot (along -forward) that is both
+    raw-navigable (safe for the chassis to back through) and C-space-free (a
+    legitimate place for the robot's center to stop).
+
+    Walks backward up to robot_radius * _CSPACE_BUFFER_SCALE pixels — the
+    same radius used to inflate obstacles into the C-space buffer — so the
+    search never proposes a point the robot's center couldn't actually reach.
+    Stops at the first raw-grid obstacle behind the robot, since the chassis
+    cannot back through it. Returns None if reversing wouldn't clear the
+    buffer (no C-space-free cell found on the way).
+    """
+    if nav_heading is None:
+        return None
+    fw = nav_heading.forward
+    reach_px = obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE
+    back_px = (
+        obs_map.robot_px[0] - fw[0] * reach_px,
+        obs_map.robot_px[1] - fw[1] * reach_px,
+    )
+    back_grid = _px_to_grid(back_px, obs_map.w, obs_map.h)
+    best: tuple[int, int] | None = None
+    for r, c in _bresenham_cells(obs_map.robot_grid[0], obs_map.robot_grid[1],
+                                  back_grid[0], back_grid[1]):
+        if (r, c) == obs_map.robot_grid:
+            continue
+        if not obs_map.raw_grid[r, c]:
+            break  # chassis can't back through an obstacle
+        if obs_map.grid[r, c]:
+            best = (r, c)
+    return best
+
+
 def _simplify_path(
     path: list[tuple[int, int]],
     grid: np.ndarray,
@@ -595,7 +669,7 @@ def _approach_goal(obs_map: ObstacleMap) -> tuple[tuple[int, int], tuple[int, in
     return _px_to_grid((apx, apy), obs_map.w, obs_map.h), (apx, apy)
 
 
-def plan_path(obs_map: ObstacleMap) -> NavPlan:
+def plan_path(obs_map: ObstacleMap, nav_heading: Heading | None = None) -> NavPlan:
     """Run A* from the robot's grid cell to the nearest C-space-free approach point.
 
     The ideal approach goal is the point at (robot_radius + target_radius) from the
@@ -603,6 +677,10 @@ def plan_path(obs_map: ObstacleMap) -> NavPlan:
     inflation buffer (yellow zone).  We snap it to the nearest navigable (green) cell
     so A* always operates entirely within the collision-free C-space, never cutting
     through the inflation buffer.
+
+    nav_heading, if provided, is used only by the buffer-exit branch below to
+    check whether the robot should back straight away from an obstacle ahead
+    before A* takes over (see _obstacle_ahead / _reverse_exit_cell).
     """
     if obs_map.target_grid is None:
         return NavPlan([], [], reachable=False, reason="No target detected")
@@ -641,6 +719,35 @@ def plan_path(obs_map: ObstacleMap) -> NavPlan:
     robot_started_in_buffer = obs_map.robot_in_buffer
     obs_map.robot_in_buffer = False
     if robot_started_in_buffer:
+        # ── Reverse from obstacle ahead ────────────────────────────────────────
+        # If the buffer-triggering obstacle is directly ahead of the robot, an
+        # in-place turn toward any other waypoint would swing the chassis/gripper
+        # into it before completing the turn. Back straight away first: walk the
+        # raw grid backward from the robot's cell to the farthest C-space-free
+        # cell within the buffer radius, and route through that before A*.
+        if _obstacle_ahead(obs_map, nav_heading):
+            reverse_cell = _reverse_exit_cell(obs_map, nav_heading)
+            if reverse_cell is not None:
+                log.info("navigate_to: obstacle ahead — reversing to %s before planning",
+                         reverse_cell)
+                path1 = [start, reverse_cell]
+                path2 = _astar(g, reverse_cell, goal)
+                if path2 is not None:
+                    path_grid = path1[:-1] + _simplify_path(path2, g)
+                else:
+                    path_grid = path1
+                path_px = [_grid_to_px(rc, obs_map.w, obs_map.h) for rc in path_grid]
+                if path_px:
+                    path_px[-1] = goal_px
+                return NavPlan(
+                    path_grid=path_grid,
+                    path_px=path_px,
+                    reachable=path2 is not None,
+                    reason=f"Reverse from obstacle ahead → path: {len(path_grid)} cells",
+                )
+            # Reversing wouldn't clear the buffer either — fall through to the
+            # nearest-free-cell BFS below.
+
         log.info("navigate_to: robot in buffer zone — routing to nearest green cell first")
         g_no_start = g.copy()
         g_no_start[start[0], start[1]] = False
@@ -758,24 +865,33 @@ def commands_for_step(
     obs_map: ObstacleMap,
     plan: NavPlan,
     nav_heading: Heading | None,
-) -> tuple[float, float]:
-    """Return (turn_deg, drive_deg) for the next navigation micro-step.
+) -> tuple[float, float, bool]:
+    """Return (turn_deg, drive_deg, reverse) for the next navigation micro-step.
 
     turn_deg:  signed body-degrees to rotate (positive = CW viewed from above).
-    drive_deg: wheel-encoder degrees to drive straight forward afterward —
-               pass straight to robot.drive_degrees(), which (unlike a
-               duration-based drive) covers a precise, repeatable distance
-               regardless of speed, battery voltage, or load. The pixel
-               distance to the next waypoint is converted to mm using the
-               robot's apparent body size as a ruler (see _mm_per_px), then
-               to wheel-encoder degrees via the wheel circumference — so the
-               robot drives toward the waypoint by roughly the right amount
-               instead of for a fixed, waypoint-distance-agnostic duration
-               (which previously caused it to overshoot close waypoints and
-               then thrash ~180° trying to turn back onto them).
+               Always 0.0 when reverse is True (see below).
+    drive_deg: wheel-encoder degrees to drive afterward — forward when reverse
+               is False, straight backward when reverse is True. Pass straight
+               to robot.drive_degrees(), which (unlike a duration-based drive)
+               covers a precise, repeatable distance regardless of speed,
+               battery voltage, or load. The pixel distance to the next
+               waypoint is converted to mm using the robot's apparent body
+               size as a ruler (see _mm_per_px), then to wheel-encoder degrees
+               via the wheel circumference — so the robot drives toward the
+               waypoint by roughly the right amount instead of for a fixed,
+               waypoint-distance-agnostic duration (which previously caused it
+               to overshoot close waypoints and then thrash ~180° trying to
+               turn back onto them).
+    reverse:   True when the next waypoint is roughly behind the robot (within
+               _REVERSE_TURN_THRESHOLD_DEG of 180°) AND the raw grid is blocked
+               directly ahead (_obstacle_ahead). Pivoting in place toward a
+               waypoint behind the robot would swing the chassis/gripper into
+               that obstacle first, so the robot backs straight toward the
+               waypoint instead — see plan_path's reverse-exit branch, which
+               places such a waypoint at path_px[1] when needed.
     """
     if not plan.reachable or len(plan.path_px) < 2:
-        return 0.0, 0.0
+        return 0.0, 0.0, False
 
     robot_px = obs_map.robot_px
     next_px = _lookahead_waypoint(plan.path_px, robot_px, obs_map.robot_radius_px)
@@ -785,8 +901,9 @@ def commands_for_step(
     dist_px = math.hypot(dx, dy)
 
     if dist_px < 1.0:
-        return 0.0, 0.0
+        return 0.0, 0.0, False
 
+    reverse = False
     if nav_heading is not None:
         fw = nav_heading.forward
         cross = fw[0] * dy - fw[1] * dx
@@ -802,6 +919,15 @@ def commands_for_step(
             turn_deg,
         )
         mm_per_px = _mm_per_px(nav_heading.body_area)
+
+        if abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG and _obstacle_ahead(obs_map, nav_heading):
+            log.info(
+                "[commands_for_step] waypoint behind robot (turn=%.1f°) and "
+                "obstacle ahead — reversing instead of pivoting",
+                turn_deg,
+            )
+            turn_deg = 0.0
+            reverse = True
     else:
         turn_deg = 0.0
         mm_per_px = None
@@ -830,7 +956,7 @@ def commands_for_step(
         log.info("[commands_for_step] no body-area calibration — "
                  "falling back to %.0fmm blind step", _FALLBACK_STEP_MM)
 
-    return turn_deg, drive_deg
+    return turn_deg, drive_deg, reverse
 
 
 def near_target(obs_map: ObstacleMap) -> bool:

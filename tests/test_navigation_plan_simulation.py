@@ -75,15 +75,17 @@ def _simulate(obs_map, plan, start_heading_deg, body_area_px):
         forward = (math.cos(math.radians(heading_deg)), math.sin(math.radians(heading_deg)))
         sim_heading = Heading(obs_map.robot_px, obs_map.robot_px, forward, body_area_px, 0)
 
-        turn_deg, drive_deg = commands_for_step(obs_map, plan, sim_heading)
+        turn_deg, drive_deg, reverse = commands_for_step(obs_map, plan, sim_heading)
         if turn_deg == 0.0 and drive_deg == 0.0:
             break
-        steps.append((turn_deg, drive_deg))
+        steps.append((turn_deg, drive_deg, reverse))
 
         heading_deg += turn_deg
         rad = math.radians(heading_deg)
         travel_mm = (drive_deg / 360.0) * _WHEEL_CIRCUMFERENCE_MM
         travel_px = travel_mm / mm_per_px
+        if reverse:
+            travel_px = -travel_px
         new_px = (
             int(round(obs_map.robot_px[0] + travel_px * math.cos(rad))),
             int(round(obs_map.robot_px[1] + travel_px * math.sin(rad))),
@@ -94,7 +96,7 @@ def _simulate(obs_map, plan, start_heading_deg, body_area_px):
         trajectory.append(new_px)
 
         if deviation > obs_map.robot_radius_px:
-            plan = plan_path(obs_map)
+            plan = plan_path(obs_map, sim_heading)
             n_replans += 1
 
     return steps, trajectory, plan, n_replans
@@ -171,7 +173,7 @@ class TestNavigationPlanSimulation(unittest.TestCase):
         )
 
         obs_map = detect_obstacles(bgr, h_result, target)
-        plan = plan_path(obs_map)
+        plan = plan_path(obs_map, h_result)
         assert plan.reachable, f"robot_hiding_switch fixture plan should be reachable: {plan.reason}"
 
         cls._initial_path_px = list(plan.path_px)
@@ -199,8 +201,8 @@ class TestNavigationPlanSimulation(unittest.TestCase):
               f"({start_heading_deg:.1f}\N{DEGREE SIGN}),  plan: {plan.reason}")
         print(f"[plan_simulation] {len(steps)} steps, {n_replans} replans, "
               f"reached_target={near_target(obs_map)}")
-        print(f"[plan_simulation] turn/drive sequence (turn_deg, wheel_deg): "
-              f"{[(round(t, 1), round(d, 0)) for t, d in steps]}")
+        print(f"[plan_simulation] turn/drive sequence (turn_deg, wheel_deg, reverse): "
+              f"{[(round(t, 1), round(d, 0), r) for t, d, r in steps]}")
         print(f"[plan_simulation] plot saved to {cls._plot_path}")
 
     def test_simulation_produced_steps(self):
@@ -209,11 +211,12 @@ class TestNavigationPlanSimulation(unittest.TestCase):
                            "commands_for_step never produced a move on the planned route")
 
     def test_commands_are_finite(self):
-        """Sanity: every issued (turn_deg, drive_deg) must be a finite, valid command."""
-        for turn_deg, drive_deg in self._steps:
+        """Sanity: every issued (turn_deg, drive_deg, reverse) must be a finite, valid command."""
+        for turn_deg, drive_deg, reverse in self._steps:
             self.assertTrue(math.isfinite(turn_deg), f"non-finite turn_deg: {turn_deg}")
             self.assertTrue(math.isfinite(drive_deg), f"non-finite drive_deg: {drive_deg}")
             self.assertGreaterEqual(drive_deg, 0.0, f"negative drive_deg: {drive_deg}")
+            self.assertIsInstance(reverse, bool, f"reverse not a bool: {reverse}")
 
     def test_trajectory_converges_on_target(self):
         """The dead-reckoned trajectory must end up closer to the target than

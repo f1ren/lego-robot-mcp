@@ -50,7 +50,7 @@ class TestNavigation(unittest.TestCase):
         )
 
         obs_map = detect_obstacles(bgr, h_result, target)
-        nav_plan = plan_path(obs_map)
+        nav_plan = plan_path(obs_map, h_result)
         saved = save_debug_images(bgr, obs_map, nav_plan, str(ANNOTATED), step=0)
 
         print(f"\n[navigation] Robot at: {obs_map.robot_px}, Target at: {obs_map.target_px}")
@@ -136,13 +136,14 @@ class TestNavigation(unittest.TestCase):
     # ── commands_for_step ─────────────────────────────────────────────────────
 
     def test_commands_return_finite_floats(self):
-        """commands_for_step must return finite (turn_deg, drive_s)."""
+        """commands_for_step must return finite (turn_deg, drive_s, reverse)."""
         import math
         from mcp_robot.navigation import commands_for_step
-        td, ds = commands_for_step(self._obs_map, self._plan, self._heading)
+        td, ds, rev = commands_for_step(self._obs_map, self._plan, self._heading)
         self.assertTrue(math.isfinite(td), f"turn_deg not finite: {td}")
         self.assertTrue(math.isfinite(ds), f"drive_s not finite: {ds}")
         self.assertGreaterEqual(ds, 0.0, "drive_s must be non-negative")
+        self.assertIsInstance(rev, bool, f"reverse not a bool: {rev}")
 
     # ── debug images saved ────────────────────────────────────────────────────
 
@@ -195,7 +196,7 @@ class TestNavigationWestHeading(unittest.TestCase):
         )
 
         obs_map = detect_obstacles(bgr, h_result, target)
-        nav_plan = plan_path(obs_map)
+        nav_plan = plan_path(obs_map, h_result)
         saved = save_debug_images(
             bgr, obs_map, nav_plan, str(cls.ANNOTATED_CURRENT), step=0
         )
@@ -287,7 +288,7 @@ class TestNavigationRobotHidingSwitch(unittest.TestCase):
         )
 
         obs_map = detect_obstacles(bgr, h_result, target)
-        nav_plan = plan_path(obs_map)
+        nav_plan = plan_path(obs_map, h_result)
         saved = save_debug_images(bgr, obs_map, nav_plan, str(cls.ANNOTATED_DIR), step=0)
 
         print(f"\n[robot_hiding_switch] Heading:  {h_result.forward if h_result else 'not detected'}")
@@ -366,6 +367,84 @@ class TestNavigationNoPath(unittest.TestCase):
         plan = plan_path(obs_map)
         self.assertFalse(plan.reachable)
         self.assertIn("No path from grid", plan.reason)
+
+
+class TestNavigationReverseFromObstacle(unittest.TestCase):
+    """plan_path/commands_for_step: when the robot starts inside the
+    Minkowski buffer with the triggering obstacle directly ahead, the first
+    move must be a straight reverse rather than an in-place pivot — pivoting
+    would swing the chassis/gripper into that obstacle before completing the
+    turn.
+    """
+
+    @staticmethod
+    def _make_obs_map(forward):
+        import numpy as np
+        from mcp_robot.navigation import ObstacleMap
+        from mcp_robot.heading import Heading
+
+        grid = np.ones((60, 80), dtype=bool)
+        raw_grid = np.ones((60, 80), dtype=bool)
+
+        # Obstacle wall a couple of cells east of the robot, with its
+        # Minkowski-sum buffer eating into the robot's own cell.
+        raw_grid[30, 43:50] = False
+        grid[30, 39:43] = False
+
+        obs_map = ObstacleMap(
+            free_mask=np.zeros((600, 800), dtype=np.uint8),
+            grid=grid,
+            raw_grid=raw_grid,
+            grid_scale_x=10.0,
+            grid_scale_y=10.0,
+            h=600,
+            w=800,
+            robot_px=(405, 305),       # maps to (30, 40)
+            target_px=(705, 305),      # maps to (30, 70), far to the east
+            robot_grid=(30, 40),
+            target_grid=(30, 70),
+            robot_radius_px=30.0,
+            target_radius_px=5.0,
+            robot_in_buffer=True,
+        )
+        heading = Heading(
+            body_center=(405, 305),
+            arrow_anchor=(405, 305),
+            forward=forward,
+            body_area=900,
+            gripper_area=0,
+        )
+        return obs_map, heading
+
+    def test_reverses_when_obstacle_ahead(self):
+        """Robot facing east, straight toward the obstacle/buffer: plan_path
+        must route a straight reverse-west leg first, and commands_for_step
+        must turn that into a no-turn reverse drive."""
+        from mcp_robot.navigation import plan_path, commands_for_step
+
+        obs_map, heading = self._make_obs_map(forward=(1.0, 0.0))
+
+        plan = plan_path(obs_map, heading)
+        self.assertIn("Reverse from obstacle ahead", plan.reason)
+        self.assertGreaterEqual(len(plan.path_px), 2)
+        # The reverse waypoint must be behind the robot (west, smaller x).
+        self.assertLess(plan.path_px[1][0], plan.path_px[0][0])
+
+        turn_deg, drive_deg, reverse = commands_for_step(obs_map, plan, heading)
+        self.assertTrue(reverse, "expected commands_for_step to signal reverse")
+        self.assertEqual(turn_deg, 0.0)
+        self.assertGreater(drive_deg, 0.0)
+
+    def test_no_reverse_when_obstacle_behind(self):
+        """Robot facing west, away from the obstacle/buffer behind it: the
+        obstacle isn't ahead, so plan_path must fall back to the normal
+        buffer-exit (nearest free cell), not the reverse-exit branch."""
+        from mcp_robot.navigation import plan_path
+
+        obs_map, heading = self._make_obs_map(forward=(-1.0, 0.0))
+
+        plan = plan_path(obs_map, heading)
+        self.assertNotIn("Reverse from obstacle ahead", plan.reason)
 
 
 if __name__ == "__main__":

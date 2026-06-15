@@ -867,7 +867,7 @@ def navigate_to(
                 parts.append(f"Obstacle map: {free_frac:.0%} free space")
 
                 # ── 5. Path planning ──────────────────────────────────────
-                plan = nav_mod.plan_path(obs_map)
+                plan = nav_mod.plan_path(obs_map, h_result)
                 parts.append(f"Path: {plan.reason}")
 
                 # ── 6. Save debug images ──────────────────────────────────
@@ -889,7 +889,7 @@ def navigate_to(
                             f"Deviation {deviation:.0f}px > {obs_map.robot_radius_px:.0f}px "
                             f"— replanning on existing C-space"
                         )
-                        plan = nav_mod.plan_path(obs_map)
+                        plan = nav_mod.plan_path(obs_map, h_result)
                     else:
                         parts.append(f"On path (deviation {deviation:.0f}px)")
                     parts.append(f"Path: {plan.reason}")
@@ -926,8 +926,9 @@ def navigate_to(
                 break
 
             # ── 9. Execute next step ──────────────────────────────────────
-            turn_deg, drive_deg = nav_mod.commands_for_step(obs_map, plan, h_result)
-            parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_deg:.0f}° (wheel)")
+            turn_deg, drive_deg, reverse = nav_mod.commands_for_step(obs_map, plan, h_result)
+            direction_label = "reverse" if reverse else "forward"
+            parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_deg:.0f}° (wheel, {direction_label})")
 
             _track_stop = threading.Event()
             _track_thread = threading.Thread(
@@ -942,9 +943,14 @@ def navigate_to(
                     log.info("[navigate_to] step %d — turn %+.0f° %s",
                              step + 1, turn_deg, direction)
                     robot_mod.turn(float(turn_deg), config.NAV_TURN_SPEED)
-                log.info("[navigate_to] step %d — drive %.0f° (encoder) forward",
-                         step + 1, drive_deg)
-                robot_mod.drive_degrees(int(round(drive_deg)), config.SPEED_MAX, config.SPEED_MAX)
+                if reverse:
+                    log.info("[navigate_to] step %d — reversing %.0f° (encoder) "
+                             "— obstacle ahead", step + 1, drive_deg)
+                    robot_mod.drive_degrees(int(round(drive_deg)), -config.SPEED_MAX, -config.SPEED_MAX)
+                else:
+                    log.info("[navigate_to] step %d — drive %.0f° (encoder) forward",
+                             step + 1, drive_deg)
+                    robot_mod.drive_degrees(int(round(drive_deg)), config.SPEED_MAX, config.SPEED_MAX)
             finally:
                 _track_stop.set()
                 _track_thread.join(timeout=3.0)
