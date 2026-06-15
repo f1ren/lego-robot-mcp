@@ -775,6 +775,13 @@ def navigate_to(
                                 target_class_free_text must always be supplied
                                 so the target is unambiguous; do not rely on
                                 defaults.
+                                On the FIRST call for a target, prefer a
+                                non-empty description (color/shape/material)
+                                read from the RAW camera frame — not from a
+                                debug/overlay image, whose obstacle-mask tint
+                                can misrepresent an object's color. Don't pass
+                                "" just to try YOLO alone first; that wastes a
+                                step if YOLO misses.
         max_steps:              Maximum navigation steps (default 6).
     """
     log.info("[TOOL] navigate_to yolo=%r free_text=%r max_steps=%r",
@@ -786,6 +793,7 @@ def navigate_to(
     key_frames_b64: list[str] = []
     step_logs: list[str] = []
     outcome = "max_steps_reached"
+    debug_saved = False
 
     obs_map: nav_mod.ObstacleMap | None = None
     plan: nav_mod.NavPlan | None = None
@@ -841,11 +849,17 @@ def navigate_to(
                 if target_obj is None:
                     parts.append(f"Target not detected "
                                  f"({target_class_yolo or target_class_free_text})")
-                else:
-                    parts.append(f"Target '{target_obj.class_name}' "
-                                 f"at {target_obj.center} conf={target_obj.confidence:.0%}")
-                    if target_obj.note:
-                        parts.append(f"VLM note: {target_obj.note}")
+                    ok_enc, raw_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                    if ok_enc:
+                        key_frames_b64.append(base64.b64encode(raw_buf.tobytes()).decode())
+                    step_logs.append("\n".join(parts))
+                    outcome = "target_not_detected"
+                    break
+
+                parts.append(f"Target '{target_obj.class_name}' "
+                             f"at {target_obj.center} conf={target_obj.confidence:.0%}")
+                if target_obj.note:
+                    parts.append(f"VLM note: {target_obj.note}")
 
                 # ── 4. Full obstacle detection — first step only ──────────
                 obs_map = nav_mod.detect_obstacles(bgr, h_result, target_obj)
@@ -860,6 +874,7 @@ def navigate_to(
                 if nav_dir:
                     try:
                         nav_mod.save_debug_images(bgr, obs_map, plan, nav_dir, step)
+                        debug_saved = True
                     except Exception as exc:
                         log.warning("Failed to save nav debug images: %s", exc)
 
@@ -961,15 +976,16 @@ def navigate_to(
             log.warning("navigate_to: could not stack key frames: %s", exc)
 
     outcome_text = {
-        "success":           "Navigation successful — robot is at the target.",
-        "path_blocked":      "Navigation failed — no obstacle-free path found.",
-        "camera_error":      "Navigation aborted — camera error.",
-        "error":             "Navigation aborted — unexpected error.",
-        "max_steps_reached": f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
+        "success":             "Navigation successful — robot is at the target.",
+        "path_blocked":        "Navigation failed — no obstacle-free path found.",
+        "target_not_detected": "Navigation aborted — target not detected (YOLO/VLM found nothing).",
+        "camera_error":        "Navigation aborted — camera error.",
+        "error":               "Navigation aborted — unexpected error.",
+        "max_steps_reached":   f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
 
     log_text = "\n\n".join(step_logs) if step_logs else "(no steps executed)"
-    if nav_dir:
+    if nav_dir and debug_saved:
         log_text += f"\n\nDebug images: {nav_dir}"
     content.append(
         TextContent(type="text", text=f"Navigate-to outcome: {outcome_text}\n\n{log_text}")
