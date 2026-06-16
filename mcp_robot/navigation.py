@@ -65,7 +65,7 @@ _NEAR_TARGET_GRACE = 1.2
 # extends roughly this far forward of the body centroid (see
 # _robot_footprint_mask's forward multiplier), so this is the zone a pivot
 # turn would sweep through first.
-_AHEAD_CLEARANCE_SCALE = 1.5
+_AHEAD_CLEARANCE_SCALE = 4.0
 
 # Minimum |turn_deg| to the next waypoint for it to count as "behind" the
 # robot. When the waypoint is this close to 180° away AND something blocks
