@@ -823,7 +823,11 @@ def navigate_to(
             # ── 2. Detect robot heading (cheap, every step) ───────────────
             h_result = heading.detect_heading(bgr)
             if h_result is None:
-                parts.append("WARNING: robot yellow body not detected — heading unknown")
+                log.error("[navigate_to] step %d — robot heading not detected; aborting navigation", step + 1)
+                parts.append("ERROR: robot heading not detected — navigation aborted")
+                step_logs.append("\n".join(parts))
+                outcome = "heading_not_detected"
+                break
             else:
                 parts.append(f"Robot at {h_result.body_center}, "
                              f"forward={tuple(round(v, 2) for v in h_result.forward)}")
@@ -993,12 +997,13 @@ def navigate_to(
             log.warning("navigate_to: could not stack key frames: %s", exc)
 
     outcome_text = {
-        "success":             "Navigation successful — robot is at the target.",
-        "path_blocked":        "Navigation failed — no obstacle-free path found.",
-        "target_not_detected": "Navigation aborted — target not detected (YOLO/VLM found nothing).",
-        "camera_error":        "Navigation aborted — camera error.",
-        "error":               "Navigation aborted — unexpected error.",
-        "max_steps_reached":   f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
+        "success":              "Navigation successful — robot is at the target.",
+        "path_blocked":         "Navigation failed — no obstacle-free path found.",
+        "target_not_detected":  "Navigation aborted — target not detected (YOLO/VLM found nothing).",
+        "heading_not_detected": "Navigation aborted — robot heading could not be detected (yellow body not visible).",
+        "camera_error":         "Navigation aborted — camera error.",
+        "error":                "Navigation aborted — unexpected error.",
+        "max_steps_reached":    f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
 
     log_text = "\n\n".join(step_logs) if step_logs else "(no steps executed)"
