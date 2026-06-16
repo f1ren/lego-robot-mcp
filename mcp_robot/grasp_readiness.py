@@ -74,10 +74,16 @@ class DetectedObject:
     x2: int
     y2: int
     note: str = ""
+    contact_px: tuple[int, int] | None = None  # floor-contact point from VLM; None → use center
 
     @property
     def center(self) -> tuple[int, int]:
         return ((self.x1 + self.x2) // 2, (self.y1 + self.y2) // 2)
+
+    @property
+    def nav_point(self) -> tuple[int, int]:
+        """Best pixel to navigate toward: VLM floor-contact if available, else bbox center."""
+        return self.contact_px if self.contact_px is not None else self.center
 
     @property
     def width(self) -> int:
@@ -213,15 +219,16 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
     """
     from mcp_robot import vision as _vision
     try:
-        result = _vision.locate_object_vlm(bgr, description)
+        result = _vision.locate_object_hybrid(bgr, description)
         if result is None:
             return None
-        (x1, y1, x2, y2), confidence, note = result
+        (x1, y1, x2, y2), centroid, confidence, note = result
         return DetectedObject(
             class_name=description,
             confidence=confidence,
             x1=x1, y1=y1, x2=x2, y2=y2,
             note=note,
+            contact_px=centroid,
         )
     except Exception as exc:
         log.warning("VLM detect fallback failed for '%s': %s", description, exc)

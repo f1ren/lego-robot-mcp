@@ -510,21 +510,17 @@ def describe_action_video(
 def locate_object_vlm(
     bgr: np.ndarray,
     description: str,
-) -> tuple[tuple[int, int, int, int], float, str] | None:
+) -> tuple[tuple[int, int, int, int], float, str, np.ndarray, np.ndarray, float] | None:
     """
-    Ask Gemini Flash to locate an object described in free text.
+    Ask Gemini Flash to locate an object and describe its color for CV refinement.
 
-    This is the primary path for objects that YOLO cannot detect (e.g. "light
-    switch", "door handle", "red button") — anything outside the COCO-80 set.
-    Uses the existing Gemini client and GEMINI_API_KEY; no extra credentials needed.
+    Returns (rough_bbox, confidence, note, hsv_lo, hsv_hi, expected_area_frac) where:
+      - rough_bbox: (x1,y1,x2,y2) pixel coords — intentionally coarse, used only to
+        seed the classical CV search region (expanded 3x in cv_refine_location)
+      - hsv_lo / hsv_hi: OpenCV HSV lower/upper bounds (H 0–179, S 0–255, V 0–255)
+      - expected_area_frac: approximate fraction of image pixels the object occupies
 
-    Args:
-        bgr:         BGR image (from the external DroidCam camera).
-        description: Free-text description of what to find.
-
-    Returns:
-        ((x1, y1, x2, y2), confidence, note) with pixel bbox coordinates and a
-        short explanation, or None if the object is not found / API unavailable.
+    Returns None if the object is not found or the API is unavailable.
     """
     import json
     import re
@@ -545,12 +541,19 @@ def locate_object_vlm(
         f"Find '{description}' in this image.\n\n"
         "Return ONLY a JSON object with these fields:\n"
         "  \"found\": true if the object is visible, false otherwise\n"
-        "  \"x1\": left edge as a fraction of image width  (0.0–1.0)\n"
-        "  \"y1\": top edge as a fraction of image height (0.0–1.0)\n"
-        "  \"x2\": right edge as a fraction of image width  (0.0–1.0)\n"
-        "  \"y2\": bottom edge as a fraction of image height (0.0–1.0)\n"
-        "  \"confidence\": how certain you are (0.0–1.0)\n"
+        "  \"x1\": left edge of bounding box as a fraction of image width  (0.0–1.0)\n"
+        "  \"y1\": top edge of bounding box as a fraction of image height (0.0–1.0)\n"
+        "  \"x2\": right edge of bounding box as a fraction of image width  (0.0–1.0)\n"
+        "  \"y2\": bottom edge of bounding box as a fraction of image height (0.0–1.0)\n"
+        "  \"hsv_hue_lo\": lower hue bound in OpenCV range 0–179 (OpenCV halves standard 0–360°)\n"
+        "  \"hsv_hue_hi\": upper hue bound in OpenCV range 0–179\n"
+        "  \"hsv_sat_min\": minimum saturation 0–255 (0=grey, 255=fully saturated)\n"
+        "  \"hsv_val_min\": minimum value/brightness 0–255 (0=black, 255=white)\n"
+        "  \"approx_area_frac\": approximate fraction of the total image area the object occupies (0.0–1.0)\n"
+        "  \"confidence\": how certain you are that you found the object (0.0–1.0)\n"
         "  \"note\": one brief sentence describing what you found and where\n\n"
+        "OpenCV hue reference: red≈0–10 or 170–179, orange≈10–25, yellow≈25–35, "
+        "green≈35–85, cyan≈85–100, blue≈100–130, purple≈130–160.\n\n"
         "Return only the JSON, no markdown, no other text."
     )
 
@@ -577,7 +580,6 @@ def locate_object_vlm(
     log.info("VLM locate '%s' model=%s (%.1fs):\n%s",
              description, config.LOCATE_OBJECT_MODEL, elapsed, text)
 
-    # Strip markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
@@ -603,7 +605,6 @@ def locate_object_vlm(
         log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
         raise RuntimeError(f"locate_object_vlm: missing bbox fields in response: {data}") from exc
 
-    # Clamp to image bounds
     x1 = max(0, min(w - 1, x1))
     y1 = max(0, min(h - 1, y1))
     x2 = max(0, min(w - 1, x2))
@@ -612,10 +613,133 @@ def locate_object_vlm(
         log.error("locate_object_vlm: degenerate bbox [%d,%d,%d,%d] — ignoring", x1, y1, x2, y2)
         raise RuntimeError(f"locate_object_vlm: degenerate bbox [{x1},{y1},{x2},{y2}] from response: {data}")
 
+    hue_lo  = int(np.clip(data.get("hsv_hue_lo",   0), 0, 179))
+    hue_hi  = int(np.clip(data.get("hsv_hue_hi", 179), 0, 179))
+    sat_min = int(np.clip(data.get("hsv_sat_min",  40), 0, 255))
+    val_min = int(np.clip(data.get("hsv_val_min",  40), 0, 255))
+    hsv_lo  = np.array([hue_lo, sat_min, val_min], dtype=np.uint8)
+    hsv_hi  = np.array([hue_hi,     255,     255], dtype=np.uint8)
+    area_frac = float(np.clip(data.get("approx_area_frac", 0.01), 1e-5, 1.0))
+
     confidence = float(data.get("confidence", 0.7))
     note = str(data.get("note", ""))
-    log.info("locate_object_vlm: bbox=[%d,%d,%d,%d] conf=%.2f note=%r", x1, y1, x2, y2, confidence, note)
-    return (x1, y1, x2, y2), confidence, note
+    log.info(
+        "locate_object_vlm: bbox=[%d,%d,%d,%d] hsv=[%d-%d,%d+,%d+] area_frac=%.4f conf=%.2f note=%r",
+        x1, y1, x2, y2, hue_lo, hue_hi, sat_min, val_min, area_frac, confidence, note,
+    )
+    return (x1, y1, x2, y2), confidence, note, hsv_lo, hsv_hi, area_frac
+
+
+# How many times the rough bbox size to expand when searching for the object.
+_CV_SEARCH_EXPANSION = 3.0
+
+
+def cv_refine_location(
+    bgr: np.ndarray,
+    rough_bbox: tuple[int, int, int, int],
+    hsv_lo: np.ndarray,
+    hsv_hi: np.ndarray,
+    expected_area_frac: float,
+) -> tuple[tuple[int, int, int, int], tuple[int, int]] | None:
+    """
+    Refine a VLM rough bounding box using HSV color segmentation.
+
+    Expands the rough bbox by _CV_SEARCH_EXPANSION × bbox_size in every direction,
+    then finds the largest color blob matching hsv_lo..hsv_hi within that region.
+
+    Returns (refined_bbox, centroid) in full-image pixel coords, or None if no
+    matching blob is found.
+    """
+    import cv2 as _cv2
+
+    img_h, img_w = bgr.shape[:2]
+    rx1, ry1, rx2, ry2 = rough_bbox
+
+    pad = int(max(rx2 - rx1, ry2 - ry1) * _CV_SEARCH_EXPANSION)
+    sx1 = max(0, rx1 - pad)
+    sy1 = max(0, ry1 - pad)
+    sx2 = min(img_w, rx2 + pad)
+    sy2 = min(img_h, ry2 + pad)
+
+    roi = bgr[sy1:sy2, sx1:sx2]
+    hsv_roi = _cv2.cvtColor(roi, _cv2.COLOR_BGR2HSV)
+
+    # Handle hue wrap-around (e.g. red spans 170–179 and 0–10)
+    if hsv_lo[0] <= hsv_hi[0]:
+        mask = _cv2.inRange(hsv_roi, hsv_lo, hsv_hi)
+    else:
+        lo_a = hsv_lo.copy(); hi_a = np.array([179, hsv_hi[1], hsv_hi[2]], dtype=np.uint8)
+        lo_b = np.array([0,   hsv_lo[1], hsv_lo[2]], dtype=np.uint8); hi_b = hsv_hi.copy()
+        mask = _cv2.bitwise_or(_cv2.inRange(hsv_roi, lo_a, hi_a),
+                               _cv2.inRange(hsv_roi, lo_b, hi_b))
+
+    kernel = np.ones((7, 7), np.uint8)
+    mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, kernel)
+    mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN,  kernel)
+
+    contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        log.warning("cv_refine_location: no contours found in search region")
+        return None
+
+    # Prefer contours near the expected area; fall back to largest if none qualify
+    total_px = img_h * img_w
+    exp_px   = expected_area_frac * total_px
+    valid = [c for c in contours
+             if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0]
+    if not valid:
+        log.warning("cv_refine_location: no contour in area range (exp=%.0fpx); using largest", exp_px)
+        valid = contours
+
+    best = max(valid, key=_cv2.contourArea)
+
+    M = _cv2.moments(best)
+    if M["m00"] == 0:
+        log.warning("cv_refine_location: zero-area contour moment")
+        return None
+    cx = int(M["m10"] / M["m00"]) + sx1
+    cy = int(M["m01"] / M["m00"]) + sy1
+
+    bx, by, bw, bh = _cv2.boundingRect(best)
+    refined_bbox = (bx + sx1, by + sy1, bx + sx1 + bw, by + sy1 + bh)
+
+    log.info("cv_refine_location: centroid=(%d,%d) refined_bbox=%s area=%.0fpx search=[%d,%d,%d,%d]",
+             cx, cy, refined_bbox, _cv2.contourArea(best), sx1, sy1, sx2, sy2)
+    return refined_bbox, (cx, cy)
+
+
+def locate_object_hybrid(
+    bgr: np.ndarray,
+    description: str,
+) -> tuple[tuple[int, int, int, int], tuple[int, int], float, str] | None:
+    """
+    Locate an object using a VLM→CV hybrid pipeline.
+
+    Step 1 — Gemini: rough bbox + HSV color params.
+    Step 2 — Classical CV: HSV segmentation within a 3× expanded search region
+              around the rough bbox → precise contour centroid.
+
+    Returns (bbox, centroid, confidence, note) with pixel coords, where centroid
+    is the CV-derived center (accurate) and bbox is the refined contour bbox.
+    Falls back to the VLM rough bbox center if CV finds nothing.
+    """
+    result = locate_object_vlm(bgr, description)
+    if result is None:
+        return None
+
+    rough_bbox, confidence, note, hsv_lo, hsv_hi, area_frac = result
+
+    refined = cv_refine_location(bgr, rough_bbox, hsv_lo, hsv_hi, area_frac)
+    if refined is not None:
+        bbox, centroid = refined
+        log.info("locate_object_hybrid: CV succeeded — centroid=%s bbox=%s", centroid, bbox)
+        return bbox, centroid, confidence, note
+
+    # CV found nothing — fall back to VLM rough center
+    rx1, ry1, rx2, ry2 = rough_bbox
+    centroid = ((rx1 + rx2) // 2, (ry1 + ry2) // 2)
+    log.warning("locate_object_hybrid: CV failed — falling back to VLM rough bbox center %s", centroid)
+    return rough_bbox, centroid, confidence, note
 
 
 def stack_frames(frames_b64: Sequence[str], quality: int = 90) -> str:

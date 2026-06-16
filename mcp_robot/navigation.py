@@ -702,7 +702,7 @@ def detect_obstacles(
     ry_cells = max(_MIN_ROBOT_RADIUS_CELLS, round(robot_radius_px * _CSPACE_BUFFER_SCALE / cell_h))
     log.debug("Robot disk: %.1f px → (%d col, %d row) cells", robot_radius_px, rx_cells, ry_cells)
 
-    target_px: tuple[int, int] | None = target.center if target is not None else None
+    target_px: tuple[int, int] | None = target.nav_point if target is not None else None
     if target is not None:
         target_radius_px = float(max(target.x2 - target.x1,
                                      target.y2 - target.y1)) / 2.0

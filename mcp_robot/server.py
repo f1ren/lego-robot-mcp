@@ -1035,10 +1035,9 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
         if bgr is None:
             return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
 
-        # Ask Gemini Flash to locate the object
-        vlm_result = vision.locate_object_vlm(bgr, description)
+        # Locate the object with the VLM→CV hybrid pipeline
+        vlm_result = vision.locate_object_hybrid(bgr, description)
         if vlm_result is None:
-            # Return an unannotated (heading-arrow only) frame + helpful message
             annotated_bgr = heading.annotate_bgr(bgr)
             ok, buf = cv2.imencode(".jpg", annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frame_b64 = base64.b64encode(buf.tobytes()).decode() if ok else frame_result["frame"]
@@ -1053,8 +1052,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
                 ),
             ]
 
-        (x1, y1, x2, y2), confidence, note = vlm_result
-        obj_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        (x1, y1, x2, y2), obj_center, confidence, note = vlm_result
 
         # Compute heading angle to object
         h_result = heading.detect_heading(bgr)

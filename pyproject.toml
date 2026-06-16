@@ -30,3 +30,10 @@ mcp-robot = "mcp_robot.server:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mcp_robot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: calls external APIs (Gemini, camera) — run with -m live",
+]
