@@ -578,11 +578,11 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
 @mcp.tool()
 def control_gripper(
     action: str,
+    target_class_yolo: str,
+    target_class_free_text: str,
     speed: int = 20,
     expected: str = "",
     context: str = "",
-    target_class_yolo: str = "cup",
-    target_class_free_text: str = "",
 ) -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
@@ -590,19 +590,31 @@ def control_gripper(
 
     Args:
         action:                 "open" or "close".
+        target_class_yolo:      YOLO class for the grasp-readiness gate
+                                (e.g. "cup", "ball", "any"). Pass "" to skip
+                                YOLO. REQUIRED — pass "" explicitly to skip.
+        target_class_free_text: Free-text description for Gemini Flash fallback
+                                when YOLO finds nothing (e.g. "red rubber ball").
+                                REQUIRED — must be non-empty for "close"; pass
+                                "" only for "open". Both target_class_yolo and
+                                target_class_free_text must always be supplied
+                                so the target is unambiguous; do not rely on
+                                defaults.
         speed:                  Motor speed, 15–20.
         expected:               Short, precise description of the expected outcome
                                 (e.g. "gripper closes around the ball").
         context:                Why this action is being taken and hints for
                                 evaluation (e.g. "grasping paper ball; previous
                                 close attempt slipped off").
-        target_class_yolo:      YOLO class for the grasp-readiness gate
-                                (e.g. "cup", "ball", "any"). Default: "cup".
-        target_class_free_text: Free-text description for Gemini Flash fallback
-                                when YOLO finds nothing (e.g. "light switch").
     """
     log.info("[TOOL] control_gripper action=%r speed=%r yolo=%r free_text=%r",
              action, speed, target_class_yolo, target_class_free_text)
+    if action == "close" and not target_class_free_text:
+        return _err(
+            "target_class_free_text is required for action='close'. "
+            "Describe the object to grasp (color/shape/material) so the "
+            "grasp-readiness gate can verify it is in position."
+        )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
@@ -668,8 +680,8 @@ def put() -> dict:
 
 @mcp.tool()
 def check_grasp_readiness(
-    target_class_yolo: str = "cup",
-    target_class_free_text: str = "",
+    target_class_yolo: str,
+    target_class_free_text: str,
 ) -> list[TextContent]:
     """
     CV-based grasp readiness check using the external (DroidCam) camera.
@@ -681,14 +693,18 @@ def check_grasp_readiness(
 
     Args:
         target_class_yolo:      YOLO class to look for. Supported values:
-                                  "cup"    — cup / bowl / bottle / vase  (default)
+                                  "cup"    — cup / bowl / bottle / vase
                                   "ball"   — sports ball / orange / apple
                                   "bottle" — bottle / cup / vase
                                   "any"    — most-forward object of any class
                                 Pass "" to skip YOLO entirely.
+                                REQUIRED — pass "" explicitly to skip.
         target_class_free_text: Free-text description sent to Gemini Flash when
                                 YOLO finds nothing (e.g. "light switch").
-                                Leave empty to disable the VLM path.
+                                REQUIRED — pass "" explicitly to disable the
+                                VLM path. Both params must always be supplied
+                                so the target is unambiguous; do not rely on
+                                defaults.
 
     Returns a verdict, a human-readable reason, and — when not ready — an
     actionable next step (drive closer, adjust heading, etc.).
