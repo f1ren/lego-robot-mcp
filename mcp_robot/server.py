@@ -591,15 +591,11 @@ def control_gripper(
     Args:
         action:                 "open" or "close".
         target_class_yolo:      YOLO class for the grasp-readiness gate
-                                (e.g. "cup", "ball", "any"). Pass "" to skip
-                                YOLO. REQUIRED — pass "" explicitly to skip.
-        target_class_free_text: Free-text description for Gemini Flash fallback
-                                when YOLO finds nothing (e.g. "red rubber ball").
-                                REQUIRED — must be non-empty for "close"; pass
-                                "" only for "open". Both target_class_yolo and
-                                target_class_free_text must always be supplied
-                                so the target is unambiguous; do not rely on
-                                defaults.
+                                (e.g. "cup", "ball", "any"). REQUIRED for
+                                "close" — must be non-empty.
+        target_class_free_text: Free-text description for Gemini Flash
+                                (e.g. "red rubber ball"). REQUIRED for
+                                "close" — must be non-empty.
         speed:                  Motor speed, 15–20.
         expected:               Short, precise description of the expected outcome
                                 (e.g. "gripper closes around the ball").
@@ -609,10 +605,10 @@ def control_gripper(
     """
     log.info("[TOOL] control_gripper action=%r speed=%r yolo=%r free_text=%r",
              action, speed, target_class_yolo, target_class_free_text)
-    if action == "close" and not target_class_free_text:
+    if action == "close" and (not target_class_yolo or not target_class_free_text):
         return _err(
-            "target_class_free_text is required for action='close'. "
-            "Describe the object to grasp (color/shape/material) so the "
+            "target_class_yolo and target_class_free_text must both be non-empty for action='close'. "
+            "Describe the object to grasp (YOLO class + color/shape/material) so the "
             "grasp-readiness gate can verify it is in position."
         )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
@@ -697,19 +693,17 @@ def check_grasp_readiness(
                                   "ball"   — sports ball / orange / apple
                                   "bottle" — bottle / cup / vase
                                   "any"    — most-forward object of any class
-                                Pass "" to skip YOLO entirely.
-                                REQUIRED — pass "" explicitly to skip.
+                                REQUIRED — must be non-empty.
         target_class_free_text: Free-text description sent to Gemini Flash when
                                 YOLO finds nothing (e.g. "light switch").
-                                REQUIRED — pass "" explicitly to disable the
-                                VLM path. Both params must always be supplied
-                                so the target is unambiguous; do not rely on
-                                defaults.
+                                REQUIRED — must be non-empty.
 
     Returns a verdict, a human-readable reason, and — when not ready — an
     actionable next step (drive closer, adjust heading, etc.).
     """
     log.info("[TOOL] check_grasp_readiness yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
+    if not target_class_yolo or not target_class_free_text:
+        return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
     try:
         frame_result = cam_mod.capture_droidcam_still(annotate=False)
         raw = base64.b64decode(frame_result["frame"])
@@ -782,26 +776,20 @@ def navigate_to(
 
     Args:
         target_class_yolo:      YOLO class for the target (e.g. "cup", "ball",
-                                "bottle", "any"). Pass "" to skip YOLO.
-                                REQUIRED — pass "" explicitly to skip YOLO.
+                                "bottle", "any"). REQUIRED — must be non-empty.
         target_class_free_text: Free-text description for Gemini Flash fallback
                                 when YOLO finds nothing (e.g. "light switch").
-                                REQUIRED — pass "" explicitly to disable the VLM
-                                fallback. Both target_class_yolo and
-                                target_class_free_text must always be supplied
-                                so the target is unambiguous; do not rely on
-                                defaults.
-                                On the FIRST call for a target, prefer a
-                                non-empty description (color/shape/material)
-                                read from the RAW camera frame — not from a
-                                debug/overlay image, whose obstacle-mask tint
-                                can misrepresent an object's color. Don't pass
-                                "" just to try YOLO alone first; that wastes a
-                                step if YOLO misses.
+                                REQUIRED — must be non-empty. Prefer a
+                                description (color/shape/material) read from
+                                the RAW camera frame — not from a debug/overlay
+                                image, whose obstacle-mask tint can misrepresent
+                                an object's color.
         max_steps:              Maximum navigation steps (default 6).
     """
     log.info("[TOOL] navigate_to yolo=%r free_text=%r max_steps=%r",
              target_class_yolo, target_class_free_text, max_steps)
+    if not target_class_yolo or not target_class_free_text:
+        return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     nav_dir = os.path.join(config.SNAPSHOT_DIR, f"navigate_to_{ts}") if config.SNAPSHOT_DIR else ""
