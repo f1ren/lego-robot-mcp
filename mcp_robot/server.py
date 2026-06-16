@@ -884,12 +884,23 @@ def navigate_to(
                 if robot_px is not None:
                     deviation = nav_mod.dist_to_path(robot_px, plan.path_px)
                     nav_mod.update_robot_position(obs_map, robot_px)
-                    if deviation > obs_map.robot_radius_px:
+                    if deviation > obs_map.buffer_radius_px:
                         parts.append(
-                            f"Deviation {deviation:.0f}px > {obs_map.robot_radius_px:.0f}px "
+                            f"Deviation {deviation:.0f}px > buffer {obs_map.buffer_radius_px:.0f}px "
                             f"— replanning on existing C-space"
                         )
+                        log.info(
+                            "[navigate_to] step %d — replanning: deviation %.0fpx > buffer %.0fpx",
+                            step + 1, deviation, obs_map.buffer_radius_px,
+                        )
                         plan = nav_mod.plan_path(obs_map, h_result)
+                        if nav_dir:
+                            try:
+                                nav_mod.save_debug_images(bgr, obs_map, plan, nav_dir, step,
+                                                          suffix="_replan")
+                                debug_saved = True
+                            except Exception as exc:
+                                log.warning("Failed to save replan debug images: %s", exc)
                     else:
                         parts.append(f"On path (deviation {deviation:.0f}px)")
                     parts.append(f"Path: {plan.reason}")

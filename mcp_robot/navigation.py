@@ -9,7 +9,7 @@ Public API:
     draw_nav_overlay(bgr, obs_map, plan, step) -> np.ndarray
     commands_for_step(obs_map, plan, heading) -> tuple[float, float, bool]
     near_target(obs_map) -> bool
-    save_debug_images(bgr, obs_map, plan, outdir, step) -> dict[str, str]
+    save_debug_images(bgr, obs_map, plan, outdir, step, suffix="") -> dict[str, str]
 """
 from __future__ import annotations
 
@@ -254,6 +254,7 @@ class ObstacleMap:
     robot_grid: tuple[int, int]      # (row, col) in grid
     target_grid: tuple[int, int] | None
     robot_radius_px: float           # half robot body size (pixels); used for clearance
+    buffer_radius_px: float          # Minkowski-sum buffer radius (robot_radius_px * _CSPACE_BUFFER_SCALE)
     target_radius_px: float          # half target bounding box (pixels); 0 if no target
     depth_map: np.ndarray | None = field(default=None, repr=False)   # raw depth, for debug
     cleaned_bgr: np.ndarray | None = field(default=None, repr=False)  # inpainted frame used for depth
@@ -741,6 +742,7 @@ def detect_obstacles(
         robot_grid=robot_grid,
         target_grid=target_grid,
         robot_radius_px=robot_radius_px,
+        buffer_radius_px=robot_radius_px * _CSPACE_BUFFER_SCALE,
         target_radius_px=target_radius_px,
         depth_map=depth_map,
         cleaned_bgr=bgr_for_depth,
@@ -1223,6 +1225,7 @@ def save_debug_images(
     plan: NavPlan,
     outdir: str,
     step: int,
+    suffix: str = "",
 ) -> dict[str, str]:
     """Write pipeline debug images to outdir, prefixed a–f for alphabetical sort order.
 
@@ -1233,19 +1236,23 @@ def save_debug_images(
     e_free_mask        — navigable floor after OR-ing in the robot body footprint
     f_cspace           — C-space grid: green=navigable, yellow=inflation buffer, red=obstacle
     g_nav_overlay      — final overlay: obstacle tint + A* path + R/T markers
+
+    suffix is appended to the step prefix (e.g. "_replan") to distinguish replan snapshots
+    from the normal per-step saves.
     """
     os.makedirs(outdir, exist_ok=True)
     saved: dict[str, str] = {}
     p = os.path.join  # shorthand
+    pfx = f"step_{step:02d}{suffix}"
 
     # a — raw input
-    raw_path = p(outdir, f"step_{step:02d}_a_raw.jpg")
+    raw_path = p(outdir, f"{pfx}_a_raw.jpg")
     cv2.imwrite(raw_path, bgr)
     saved["raw"] = raw_path
 
     # b — inpainted frame used for depth estimation (robot + target removed)
     if obs_map.cleaned_bgr is not None:
-        cleaned_path = p(outdir, f"step_{step:02d}_b_cleaned.jpg")
+        cleaned_path = p(outdir, f"{pfx}_b_cleaned.jpg")
         cv2.imwrite(cleaned_path, obs_map.cleaned_bgr)
         saved["cleaned"] = cleaned_path
 
@@ -1255,7 +1262,7 @@ def save_debug_images(
         # c — depth heat-map
         d_norm = ((d - d.min()) / (d.max() - d.min() + 1e-8) * 255).astype(np.uint8)
         depth_vis = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
-        depth_path = p(outdir, f"step_{step:02d}_c_depth.jpg")
+        depth_path = p(outdir, f"{pfx}_c_depth.jpg")
         cv2.imwrite(depth_path, depth_vis)
         saved["depth"] = depth_path
 
@@ -1268,7 +1275,7 @@ def save_debug_images(
             grad_vis = np.zeros_like(bgr)
             grad_vis[grad_mask >  0] = (0, 160, 0)
             grad_vis[grad_mask == 0] = (0, 0, 180)
-            grad_path = p(outdir, f"step_{step:02d}_d_depth_gradient.jpg")
+            grad_path = p(outdir, f"{pfx}_d_depth_gradient.jpg")
             cv2.imwrite(grad_path, grad_vis)
             saved["gradient_mask"] = grad_path
 
@@ -1276,21 +1283,21 @@ def save_debug_images(
     mask_vis = np.zeros_like(bgr)
     mask_vis[obs_map.free_mask >  0] = (0, 160, 0)
     mask_vis[obs_map.free_mask == 0] = (0, 0, 180)
-    mask_path = p(outdir, f"step_{step:02d}_e_free_mask.jpg")
+    mask_path = p(outdir, f"{pfx}_e_free_mask.jpg")
     cv2.imwrite(mask_path, mask_vis)
     saved["obstacle_mask"] = mask_path
 
     # f — C-space planning grid
     cspace = build_cspace_bgr(bgr, obs_map, plan)
-    cspace_path = p(outdir, f"step_{step:02d}_f_cspace.jpg")
+    cspace_path = p(outdir, f"{pfx}_f_cspace.jpg")
     cv2.imwrite(cspace_path, cspace)
     saved["cspace"] = cspace_path
 
     # g — nav overlay
     overlay_bgr = draw_nav_overlay(bgr, obs_map, plan, step)
-    overlay_path = p(outdir, f"step_{step:02d}_g_nav_overlay.jpg")
+    overlay_path = p(outdir, f"{pfx}_g_nav_overlay.jpg")
     cv2.imwrite(overlay_path, overlay_bgr)
     saved["nav_overlay"] = overlay_path
 
-    log.info("Navigation debug images (step %d) saved to: %s", step, outdir)
+    log.info("Navigation debug images (step %d%s) saved to: %s", step, suffix, outdir)
     return saved
