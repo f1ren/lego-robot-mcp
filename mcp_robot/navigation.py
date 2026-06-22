@@ -349,41 +349,47 @@ def _robot_footprint_mask(
 
 def _depth_gradient_floor_mask(
     depth: np.ndarray,
-    ring: np.ndarray,
+    floor_sample: np.ndarray,
     n_sigma: float = _DEPTH_GRAD_N_SIGMA,
 ) -> np.ndarray | None:
-    """Floor mask from depth-gradient direction similarity to the robot-ring reference.
+    """Floor mask from depth-gradient direction similarity to a floor reference.
 
     The floor is a planar surface with a characteristic depth gradient (surface
     orientation).  Any pixel whose Sobel gradient vector falls within n_sigma
     IQR-derived standard deviations of the floor-gradient sample is classified
     as navigable.
 
+    *floor_sample* is a mask of pixels guaranteed to be floor — typically the
+    robot body footprint on the inpainted depth map (compact, consistent depth)
+    or, as a fallback, the ring just outside the yellow body.
+
     Key advantage over depth-value thresholding: shadow areas have the same
     surface orientation as the lit floor (same physical plane), so they produce
     the same gradient even though their absolute depth values are wrong.  Depth
     models reliably get the gradient right even when absolute depth is off.
 
-    Returns None when there are not enough ring samples.
+    Returns None when there are not enough samples.
     """
-    if ring is None or (ring > 0).sum() < 50:
+    if floor_sample is None or (floor_sample > 0).sum() < 50:
         return None
 
-    # Smooth depth before gradient to reduce sensor noise.
-    depth_smooth = cv2.GaussianBlur(depth, (9, 9), 0)
+    # Smooth depth before gradient to suppress wood-plank texture noise.
+    # k=31 eliminates local texture while preserving the macro surface
+    # orientation that separates floor from vertical surfaces like cabinets.
+    depth_smooth = cv2.GaussianBlur(depth, (31, 31), 0)
     gx = cv2.Sobel(depth_smooth, cv2.CV_32F, 1, 0, ksize=5)
     gy = cv2.Sobel(depth_smooth, cv2.CV_32F, 0, 1, ksize=5)
 
-    # Sample floor gradient from the robot ring (guaranteed floor pixels).
-    ring_gx = gx[ring > 0].astype(np.float64)
-    ring_gy = gy[ring > 0].astype(np.float64)
+    # Sample floor gradient from the reference region (guaranteed floor pixels).
+    ref_gx = gx[floor_sample > 0].astype(np.float64)
+    ref_gy = gy[floor_sample > 0].astype(np.float64)
 
-    floor_gx = float(np.median(ring_gx))
-    floor_gy = float(np.median(ring_gy))
+    floor_gx = float(np.median(ref_gx))
+    floor_gy = float(np.median(ref_gy))
 
     # Robust σ from IQR (÷1.35 converts IQR → σ for a normal distribution).
-    q1x, q3x = np.percentile(ring_gx, [25, 75])
-    q1y, q3y = np.percentile(ring_gy, [25, 75])
+    q1x, q3x = np.percentile(ref_gx, [25, 75])
+    q1y, q3y = np.percentile(ref_gy, [25, 75])
     sigma_gx = max(float((q3x - q1x) / 1.35), 1.0)
     sigma_gy = max(float((q3y - q1y) / 1.35), 1.0)
 
@@ -651,12 +657,20 @@ def detect_obstacles(
     log.debug("Robot/target inpainting for depth estimation succeeded")
 
     # ── 3. Depth gradient floor mask ─────────────────────────────────────
+    # Floor reference: the robot body footprint on the inpainted depth map.
+    # The inpainted region is guaranteed floor with a compact y-range, giving
+    # tight σ values.  Erode to stay away from inpainting edge artifacts.
+    # Fall back to the ring if the yellow body is too small.
+    robot_floor_ref = cv2.erode(yellow_raw, np.ones((15, 15), np.uint8))
+    if (robot_floor_ref > 0).sum() < 50:
+        robot_floor_ref = ring  # fallback
+
     depth_map: np.ndarray | None = None
     grad_free: np.ndarray | None = None
     if use_depth:
         depth_map = estimate_depth(bgr_for_depth)
-        if ring is not None:
-            grad_free = _depth_gradient_floor_mask(depth_map, ring)
+        if robot_floor_ref is not None:
+            grad_free = _depth_gradient_floor_mask(depth_map, robot_floor_ref)
             if grad_free is not None:
                 log.debug("Depth gradient floor mask: %.1f%% navigable",
                           (grad_free > 0).mean() * 100)
@@ -1326,8 +1340,10 @@ def save_debug_images(
         # d — depth-gradient floor mask (no robot body carve-out)
         hsv_dbg = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         yellow_dbg = cv2.inRange(hsv_dbg, YELLOW_HSV_LO, YELLOW_HSV_HI)
-        ring_dbg = _robot_ring(yellow_dbg)
-        grad_mask = _depth_gradient_floor_mask(d, ring_dbg) if ring_dbg is not None else None
+        floor_ref_dbg = cv2.erode(yellow_dbg, np.ones((15, 15), np.uint8))
+        if (floor_ref_dbg > 0).sum() < 50:
+            floor_ref_dbg = _robot_ring(yellow_dbg)
+        grad_mask = _depth_gradient_floor_mask(d, floor_ref_dbg) if floor_ref_dbg is not None else None
         if grad_mask is not None:
             grad_vis = np.zeros_like(bgr)
             grad_vis[grad_mask >  0] = (0, 160, 0)
