@@ -57,8 +57,8 @@ _CSPACE_BUFFER_SCALE = 4
 # snapped to the boundary of the C-space inflation buffer (robot_radius *
 # _CSPACE_BUFFER_SCALE from the target), so the path's last waypoint sits
 # right at that boundary — drive/grid imprecision can leave the robot a
-# little outside it even though it effectively arrived. 1.2 = 20% slack.
-_NEAR_TARGET_GRACE = 1.2
+# little outside it even though it effectively arrived. 1.5 = 50% slack.
+_NEAR_TARGET_GRACE = 1.5
 
 # How far ahead of the robot (in robot radii) to check the raw grid for an
 # obstacle before deciding an in-place turn is unsafe. The chassis/gripper
