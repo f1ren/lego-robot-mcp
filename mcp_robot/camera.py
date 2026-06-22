@@ -718,11 +718,11 @@ def capture_droidcam_still(
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
          "object_angle_deg": float | None, "vlm_note": str}
     """
-    def _maybe_annotate(b64: str) -> tuple[str, float | None, str]:
+    def _maybe_annotate(b64: str) -> tuple[str, float | None, str, float | None, float | None]:
         if not annotate:
-            return b64, None, ""
+            return b64, None, "", None, None
         from mcp_robot import grasp_readiness as _gr
-        annotated_b64, angle_deg, note = _gr.annotate_frame_with_object_b64(
+        annotated_b64, angle_deg, note, dist_px, robot_radius_px = _gr.annotate_frame_with_object_b64(
             b64,
             target_class_yolo=target_class_yolo,
             target_class_free_text=target_class_free_text,
@@ -730,21 +730,27 @@ def capture_droidcam_still(
         if angle_deg is not None:
             rot_dir = "CW" if angle_deg > 0 else "CCW"
             log.info(
-                "Heading analysis: yolo=%r free_text=%r — object at %.1f° %s from forward",
+                "Heading analysis: yolo=%r free_text=%r — object at %.1f° %s from forward, dist=%.1fpx robot_r=%.1fpx",
                 target_class_yolo, target_class_free_text, abs(angle_deg), rot_dir,
+                dist_px or 0, robot_radius_px or 0,
             )
         else:
             log.info(
                 "Heading analysis: yolo=%r free_text=%r — no matching object detected; heading arrow only",
                 target_class_yolo, target_class_free_text,
             )
-        return annotated_b64, angle_deg, note
+        return annotated_b64, angle_deg, note, dist_px, robot_radius_px
+
+    def _build_result(base: dict, b64: str) -> dict:
+        frame, angle_deg, note, dist_px, robot_radius_px = _maybe_annotate(b64)
+        path = _save_snapshot(frame, "droidcam")
+        return {**base, "frame": frame, "path": path,
+                "object_angle_deg": angle_deg, "vlm_note": note,
+                "object_distance_px": dist_px, "robot_radius_px": robot_radius_px}
 
     cached = _droidcam_cache.latest()
     if cached is not None:
-        frame, angle_deg, note = _maybe_annotate(cached["frame"])
-        path = _save_snapshot(frame, "droidcam")
-        return {**cached, "frame": frame, "path": path, "object_angle_deg": angle_deg, "vlm_note": note}
+        return _build_result(cached, cached["frame"])
 
     import cv2
 
@@ -757,8 +763,7 @@ def capture_droidcam_still(
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
         frame = _rotate_droidcam(frame)
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        b64, angle_deg, note = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
-        path = _save_snapshot(b64, "droidcam")
-        return {"frame": b64, "ts": time.time(), "bytes": len(buf), "path": path, "object_angle_deg": angle_deg, "vlm_note": note}
+        b64 = base64.b64encode(buf.tobytes()).decode()
+        return _build_result({"ts": time.time(), "bytes": len(buf)}, b64)
     finally:
         cap.release()

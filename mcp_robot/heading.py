@@ -70,6 +70,7 @@ class Heading:
     forward: tuple[float, float]      # unit vector (dx, dy) along body's long axis, gripper-side
     body_area: int                    # pixel count of yellow mask used
     gripper_area: int                 # pixel count of black mask used
+    body_radius_px: float = 40.0     # half the longer side of the yellow body bounding box
 
 
 def _largest_contour(mask: np.ndarray) -> np.ndarray | None:
@@ -287,6 +288,7 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         forward=axis,
         body_area=int(cv2.contourArea(body)),
         gripper_area=gripper_area,
+        body_radius_px=float(max(bw, bh)) / 2.0,
     )
 
 

@@ -523,7 +523,7 @@ def annotate_frame_with_object(
     bgr: np.ndarray,
     target_class_yolo: str = "cup",
     target_class_free_text: str = "",
-) -> tuple[np.ndarray, float | None, str]:
+) -> tuple[np.ndarray, float | None, str, float | None, float | None]:
     """Detect heading + object, annotate frame with arrow + bbox + angle line.
 
     Detection strategy:
@@ -533,15 +533,15 @@ def annotate_frame_with_object(
          is non-empty, query Gemini Flash with that free-text description.
          Use this for objects outside COCO-80, e.g. "light switch".
 
-    Returns (annotated_bgr, angle_deg, note) where angle_deg is None when
-    heading or object is not detected, and note is the Gemini VLM's
-    description of what it found (empty string for YOLO detections or when
-    no object is detected). Positive angle = object is CW from forward.
+    Returns (annotated_bgr, angle_deg, note, object_distance_px, robot_radius_px).
+    angle_deg / object_distance_px are None when heading or object is not detected.
+    robot_radius_px is None when heading detection fails.
+    Positive angle = object is CW from forward.
     Falls back to heading-only annotation on YOLO/VLM failure.
     """
     heading = detect_heading(bgr)
     if heading is None:
-        return bgr, None, ""
+        return bgr, None, "", None, None
 
     objects = _yolo_detect(bgr, target_class=target_class_yolo) if target_class_yolo else []
     obj = _pick_target(objects, heading) if objects else None
@@ -551,29 +551,33 @@ def annotate_frame_with_object(
         obj = _vlm_detect(bgr, target_class_free_text)
 
     if obj is None:
-        return annotate_bgr(bgr), None, ""
+        return annotate_bgr(bgr), None, "", None, heading.body_radius_px
 
     angle_deg = compute_heading_to_object_angle(heading, obj.center)
+    dist_px = math.hypot(
+        heading.body_center[0] - obj.center[0],
+        heading.body_center[1] - obj.center[1],
+    )
     annotated = annotate_bgr(
         bgr,
         obj_center=obj.center,
         obj_bbox=(obj.x1, obj.y1, obj.x2, obj.y2),
     )
-    return annotated, angle_deg, obj.note
+    return annotated, angle_deg, obj.note, dist_px, heading.body_radius_px
 
 
 def annotate_frame_with_object_b64(
     b64: str,
     target_class_yolo: str = "cup",
     target_class_free_text: str = "",
-) -> tuple[str, float | None, str]:
+) -> tuple[str, float | None, str, float | None, float | None]:
     """Base64 JPEG in/out version of annotate_frame_with_object."""
     raw = base64.b64decode(b64)
     arr = np.frombuffer(raw, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
         raise RuntimeError("Could not decode base64 JPEG for object annotation")
-    annotated, angle, note = annotate_frame_with_object(
+    annotated, angle, note, dist_px, robot_radius_px = annotate_frame_with_object(
         bgr,
         target_class_yolo=target_class_yolo,
         target_class_free_text=target_class_free_text,
@@ -581,4 +585,4 @@ def annotate_frame_with_object_b64(
     ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
     if not ok:
         raise RuntimeError("cv2.imencode failed in annotate_frame_with_object_b64")
-    return base64.b64encode(buf.tobytes()).decode(), angle, note
+    return base64.b64encode(buf.tobytes()).decode(), angle, note, dist_px, robot_radius_px

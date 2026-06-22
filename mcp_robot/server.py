@@ -69,6 +69,14 @@ _stop = threading.Event()
 # AI already has a prior reading to delta-compare against.
 _state_call_count = 0
 
+# ── target distance guard ────────────────────────────────────────────────────
+# Stored by get_robot_state when a target is detected, cleared by navigate_to.
+# drive/turn check this and refuse when the robot is far from the target.
+_last_target_distance_px: float | None = None
+_last_target_robot_radius_px: float | None = None
+_last_target_yolo: str = ""
+_last_target_free_text: str = ""
+
 # ── initialization tracker ────────────────────────────────────────────────────
 
 _INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
@@ -116,6 +124,28 @@ def _ok(data: dict) -> dict:
 
 def _err(msg: str) -> dict:
     return {"ok": False, "error": msg}
+
+
+def _target_too_far() -> str | None:
+    """If a known target is beyond near-target range, return an error message.
+
+    Returns None when no guard applies (no target, or target is close enough).
+    """
+    if _last_target_distance_px is None or _last_target_robot_radius_px is None:
+        return None
+    threshold = (_last_target_robot_radius_px
+                 * nav_mod._CSPACE_BUFFER_SCALE
+                 * nav_mod._NEAR_TARGET_GRACE)
+    if _last_target_distance_px <= threshold:
+        return None
+    yolo = _last_target_yolo
+    free = _last_target_free_text
+    return (
+        f"ERROR: Target is too far for manual drive/turn "
+        f"(distance={_last_target_distance_px:.0f}px, threshold={threshold:.0f}px). "
+        f"Use navigate_to(target_class_yolo={yolo!r}, "
+        f"target_class_free_text={free!r}) instead."
+    )
 
 
 # Image size caps for frames returned to the MCP client (i.e. shown to Claude).
@@ -451,6 +481,9 @@ def drive(
                      (e.g. "approaching the ball; previous attempt turned clockwise instead").
     """
     log.info("[TOOL] drive left_speed=%r right_speed=%r duration_s=%r", left_speed, right_speed, duration_s)
+    guard = _target_too_far()
+    if guard:
+        return _err(guard)
     for name, val in (("left_speed", left_speed), ("right_speed", right_speed)):
         if val != 0 and not (config.SPEED_MIN <= abs(val) <= config.SPEED_MAX):
             return _err(f"{name} must be 0 or between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
@@ -494,6 +527,9 @@ def turn(
         context:      Why this action is being taken and hints for evaluation.
     """
     log.info("[TOOL] turn body_degrees=%r speed=%r", body_degrees, speed)
+    guard = _target_too_far()
+    if guard:
+        return _err(guard)
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
     direction = "CW" if body_degrees >= 0 else "CCW"
@@ -786,10 +822,13 @@ def navigate_to(
                                 an object's color.
         max_steps:              Maximum navigation steps (default 6).
     """
+    global _last_target_distance_px, _last_target_robot_radius_px
     log.info("[TOOL] navigate_to yolo=%r free_text=%r max_steps=%r",
              target_class_yolo, target_class_free_text, max_steps)
     if not target_class_yolo or not target_class_free_text:
         return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
+    _last_target_distance_px = None
+    _last_target_robot_radius_px = None
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     nav_dir = os.path.join(config.SNAPSHOT_DIR, f"navigate_to_{ts}") if config.SNAPSHOT_DIR else ""
@@ -1265,7 +1304,8 @@ def get_robot_state(
                                 The detected object's angle from the robot's heading
                                 is returned so you know how much to turn.
     """
-    global _state_call_count
+    global _state_call_count, _last_target_distance_px, _last_target_robot_radius_px
+    global _last_target_yolo, _last_target_free_text
     log.info("[TOOL] get_robot_state yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
     try:
         _state_call_count += 1
@@ -1280,6 +1320,10 @@ def get_robot_state(
             content.append(_thumbnail_image_content(droid_frame["frame"]))
             angle_deg = droid_frame.get("object_angle_deg")
             vlm_note = droid_frame.get("vlm_note")
+            _last_target_distance_px = droid_frame.get("object_distance_px")
+            _last_target_robot_radius_px = droid_frame.get("robot_radius_px")
+            _last_target_yolo = target_class_yolo
+            _last_target_free_text = target_class_free_text
             if angle_deg is not None:
                 rot_dir = "CW" if angle_deg > 0 else "CCW"
                 angle_text = (
@@ -1296,6 +1340,8 @@ def get_robot_state(
             if vlm_note:
                 content.append(TextContent(type="text", text=f"VLM note: {vlm_note}"))
         except Exception as exc:
+            _last_target_distance_px = None
+            _last_target_robot_radius_px = None
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         if _state_call_count > 1:
             positions = robot_mod.get_all_positions()
