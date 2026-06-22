@@ -933,6 +933,13 @@ def navigate_to(
 
             # ── 8. Termination checks ─────────────────────────────────────
             if nav_mod.near_target(obs_map):
+                face_deg = nav_mod.turn_to_face_target(obs_map, h_result)
+                if face_deg is not None:
+                    direction = "CW" if face_deg > 0 else "CCW"
+                    log.info("[navigate_to] final turn %+.0f° %s to face target",
+                             face_deg, direction)
+                    robot_mod.turn(float(face_deg), config.NAV_TURN_SPEED)
+                    parts.append(f"Final turn {face_deg:+.0f}° {direction} to face target")
                 parts.append("NEAR TARGET — within C-space buffer distance, "
                              "stopping to avoid collision — navigation complete")
                 step_logs.append("\n".join(parts))

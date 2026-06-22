@@ -1081,7 +1081,15 @@ def commands_for_step(
             turn_deg = floor_turn_deg
             mm_per_px_dir = dist_mm / dist_px
 
-        if abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG:
+        min_reliable_dist = obs_map.robot_radius_px * 0.5
+        if dist_px < min_reliable_dist and abs(turn_deg) >= 20.0:
+            log.info(
+                "[commands_for_step] waypoint only %.1fpx away (< %.1f) — "
+                "suppressing %.1f° turn (direction unreliable at this range)",
+                dist_px, min_reliable_dist, turn_deg,
+            )
+            turn_deg = 0.0
+        elif abs(turn_deg) >= _REVERSE_TURN_THRESHOLD_DEG:
             if _obstacle_ahead(obs_map, nav_heading):
                 log.info(
                     "[commands_for_step] waypoint behind robot (turn=%.1f°) and "
@@ -1153,6 +1161,34 @@ def near_target(obs_map: ObstacleMap) -> bool:
         dist, threshold, obs_map.robot_radius_px, _CSPACE_BUFFER_SCALE, _NEAR_TARGET_GRACE, ratio, result,
     )
     return result
+
+
+def turn_to_face_target(obs_map: ObstacleMap, nav_heading: Heading) -> float | None:
+    """Signed body-degrees to rotate so the robot faces the target.
+
+    Returns None when no target is set or the robot is already facing it
+    (within 8°). Positive = CW viewed from above.
+    """
+    if obs_map.target_px is None:
+        return None
+    dx = obs_map.target_px[0] - obs_map.robot_px[0]
+    dy = obs_map.target_px[1] - obs_map.robot_px[1]
+    if math.hypot(dx, dy) < 1.0:
+        return None
+    fw = nav_heading.forward
+    cross = fw[0] * dy - fw[1] * dx
+    dot = fw[0] * dx + fw[1] * dy
+    turn_deg = math.degrees(math.atan2(cross, dot))
+    H = _floor_homography(obs_map.bgr, nav_heading)
+    if H is not None:
+        rmx, rmy = _project_to_floor_mm(H, obs_map.robot_px[0], obs_map.robot_px[1])
+        tmx, tmy = _project_to_floor_mm(H, obs_map.target_px[0], obs_map.target_px[1])
+        turn_deg = math.degrees(math.atan2(tmy - rmy, tmx - rmx))
+    if abs(turn_deg) < 8.0:
+        log.info("[turn_to_face_target] already facing target (%.1f°)", turn_deg)
+        return None
+    log.info("[turn_to_face_target] %.1f° to face target", turn_deg)
+    return turn_deg
 
 
 def dist_to_path(
