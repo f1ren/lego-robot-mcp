@@ -910,6 +910,7 @@ def navigate_to(
                             except Exception as exc:
                                 log.warning("Failed to save replan debug images: %s", exc)
                     else:
+                        nav_mod.refresh_approach_path(obs_map, plan)
                         parts.append(f"On path (deviation {deviation:.0f}px)")
                     parts.append(f"Path: {plan.reason}")
                 else:

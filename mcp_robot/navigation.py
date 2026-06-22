@@ -1158,6 +1158,52 @@ def update_robot_position(obs_map: ObstacleMap, robot_px: tuple[int, int]) -> No
     obs_map.robot_grid = _px_to_grid(robot_px, obs_map.w, obs_map.h)
 
 
+def refresh_approach_path(obs_map: ObstacleMap, plan: NavPlan) -> bool:
+    """Recompute the approach goal from the current robot position and replace
+    the plan's path with a direct line to it.
+
+    Called on subsequent navigation steps so that the final waypoint stays
+    between the robot and the target as the approach angle changes — without
+    this, the approach goal is frozen at the step-0 angle and the robot
+    spirals around the target.
+
+    Only activates when the robot is within twice the near_target threshold
+    of the target (i.e. the final approach phase). Earlier in navigation the
+    A* path's obstacle-avoidance waypoints must be preserved.
+
+    Returns True if the path was updated, False if no update was needed
+    (e.g. too far from target, already at grasp distance, or no target).
+    """
+    if obs_map.target_px is None:
+        return False
+    dist = math.hypot(
+        obs_map.robot_px[0] - obs_map.target_px[0],
+        obs_map.robot_px[1] - obs_map.target_px[1],
+    )
+    final_approach_threshold = obs_map.robot_radius_px * _CSPACE_BUFFER_SCALE * _NEAR_TARGET_GRACE * 2.0
+    if dist > final_approach_threshold:
+        return False
+    goal = _approach_goal(obs_map)
+    if goal is None:
+        return False
+    goal_grid, goal_px = goal
+    snapped = _nearest_free_cell(obs_map.grid, goal_grid)
+    if snapped is None:
+        return False
+    if snapped != goal_grid:
+        goal_px = _grid_to_px(snapped, obs_map.w, obs_map.h)
+        goal_grid = snapped
+    plan.path_grid = [obs_map.robot_grid, goal_grid]
+    plan.path_px = [obs_map.robot_px, goal_px]
+    plan.reachable = True
+    log.info(
+        "[refresh_approach_path] updated approach goal to %s "
+        "(robot=%s, target=%s, dist=%.0fpx, threshold=%.0fpx)",
+        goal_px, obs_map.robot_px, obs_map.target_px, dist, final_approach_threshold,
+    )
+    return True
+
+
 def detect_robot_px(bgr: np.ndarray) -> tuple[int, int] | None:
     """Return the robot's yellow-body centroid as (x, y) pixel coords, or None.
 
