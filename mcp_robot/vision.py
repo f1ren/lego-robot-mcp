@@ -158,6 +158,35 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(k in msg for k in ("resource_exhausted", "quota", "429", "ratelimitexceeded", "requests per day"))
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("503", "unavailable", "service_unavailable", "overloaded"))
+
+
+_TRANSIENT_MAX_RETRIES = 3
+_TRANSIENT_BASE_DELAY = 2.0
+
+
+def _gemini_generate_with_retry(client, model: str, contents, config=None):
+    """Call client.models.generate_content with exponential backoff on transient errors."""
+    kwargs: dict = {"model": model, "contents": contents}
+    if config is not None:
+        kwargs["config"] = config
+    last_exc: Exception | None = None
+    for attempt in range(_TRANSIENT_MAX_RETRIES):
+        try:
+            return client.models.generate_content(**kwargs)
+        except Exception as exc:
+            if not _is_transient_error(exc):
+                raise
+            last_exc = exc
+            delay = _TRANSIENT_BASE_DELAY * (2 ** attempt)
+            log.warning("Gemini transient error (attempt %d/%d), retrying in %.0fs: %s",
+                        attempt + 1, _TRANSIENT_MAX_RETRIES, delay, exc)
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
 def _switch_gemini_to_fallback() -> str:
     global _active_model
     with _model_lock:
@@ -280,9 +309,8 @@ def _gemini_describe_video(
         model, action, len(labeled_frames), prompt, image_log,
     )
     try:
-        resp = client.models.generate_content(
-            model=model,
-            contents=[types.Content(role="user", parts=parts)],
+        resp = _gemini_generate_with_retry(
+            client, model, [types.Content(role="user", parts=parts)],
         )
         text = (resp.text or "").strip()
         log.info("Gemini video response: %s", text)
@@ -290,9 +318,8 @@ def _gemini_describe_video(
     except Exception as exc:
         if _is_quota_error(exc) and model != config.GEMINI_FALLBACK_MODEL:
             fallback = _switch_gemini_to_fallback()
-            resp = client.models.generate_content(
-                model=fallback,
-                contents=[types.Content(role="user", parts=parts)],
+            resp = _gemini_generate_with_retry(
+                client, fallback, [types.Content(role="user", parts=parts)],
             )
             text = (resp.text or "").strip()
             log.info("Gemini video fallback response: %s", text)
@@ -567,9 +594,9 @@ def locate_object_vlm(
     ]
 
     t0 = time.monotonic()
-    resp = client.models.generate_content(
-        model=config.LOCATE_OBJECT_MODEL,
-        contents=[_gtypes.Content(role="user", parts=parts)],
+    resp = _gemini_generate_with_retry(
+        client, config.LOCATE_OBJECT_MODEL,
+        [_gtypes.Content(role="user", parts=parts)],
         config=_gtypes.GenerateContentConfig(
             thinking_config=_gtypes.ThinkingConfig(thinking_budget=0),
         ),
