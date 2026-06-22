@@ -962,9 +962,20 @@ def _lookahead_waypoint(
         range(len(path_px)),
         key=lambda i: math.hypot(path_px[i][0] - robot_px[0], path_px[i][1] - robot_px[1]),
     )
-    for px in path_px[closest_i + 1:]:
+    n_waypoints = len(path_px)
+    for idx, px in enumerate(path_px[closest_i + 1:], start=closest_i + 1):
         if math.hypot(px[0] - robot_px[0], px[1] - robot_px[1]) >= lookahead_px:
+            log.info(
+                "[_lookahead_waypoint] closest=%d, targeting=%d of %d at %s "
+                "(lookahead=%.0fpx)",
+                closest_i, idx, n_waypoints - 1, px, lookahead_px,
+            )
             return px
+    log.info(
+        "[_lookahead_waypoint] closest=%d, fell back to last waypoint %d at %s "
+        "(all remaining within lookahead=%.0fpx)",
+        closest_i, n_waypoints - 1, path_px[-1], lookahead_px,
+    )
     return path_px[-1]
 
 
