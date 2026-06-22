@@ -271,6 +271,7 @@ def _with_change_analysis(
     context: str = "",
     annotate: bool = True,
     vqa_cameras: set[str] | None = None,
+    skip_vqa: bool = False,
 ) -> dict:
     """
     Record a video of the action, then ask the vision model whether the
@@ -382,10 +383,12 @@ def _with_change_analysis(
         cam_stacks[1] if len(cam_stacks) > 1 else None,
     )
 
-    description = vision.describe_action_video(
-        action_desc, expected, vqa_labeled, None, context=context,
-        raw_labeled_frames=vqa_raw,
-    )
+    description = None
+    if not skip_vqa:
+        description = vision.describe_action_video(
+            action_desc, expected, vqa_labeled, None, context=context,
+            raw_labeled_frames=vqa_raw,
+        )
     if description:
         out["change_description"] = description
 
@@ -606,6 +609,7 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
         lambda: robot_mod.lower_arm(speed),
         context=context,
         annotate=False,
+        skip_vqa=not config.LOWER_ARM_VQA,
     )
 
 
