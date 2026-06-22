@@ -18,6 +18,20 @@ from mcp_robot.rpi_client import get_client
 
 log = logging.getLogger(__name__)
 
+_CV2_ROTATE = {
+    90: 0,   # cv2.ROTATE_90_CLOCKWISE
+    180: 1,  # cv2.ROTATE_180
+    270: 2,  # cv2.ROTATE_90_COUNTERCLOCKWISE
+}
+
+def _rotate_droidcam(frame):
+    """Rotate a BGR frame per DROIDCAM_ROTATION config (0/90/180/270 CW)."""
+    code = _CV2_ROTATE.get(config.DROIDCAM_ROTATION)
+    if code is None:
+        return frame
+    import cv2
+    return cv2.rotate(frame, code)
+
 
 def _save_snapshot(frame_b64: str, label: str, index: int | None = None) -> str | None:
     """
@@ -560,6 +574,7 @@ def stream_droidcam(
             ok, frame = cap.read()
             if not ok:
                 break
+            frame = _rotate_droidcam(frame)
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             b64 = base64.b64encode(buf.tobytes()).decode()
             ts = time.time()
@@ -610,6 +625,7 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
             ok, frame = cap.read()
             if not ok:
                 break
+            frame = _rotate_droidcam(frame)
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             raw = base64.b64encode(buf.tobytes()).decode()
             display = _maybe_annotate(raw)
@@ -668,7 +684,7 @@ def stream_droidcam_bgr(
             ok, bgr = cap.read()
             if not ok:
                 break
-            on_frame(bgr, time.time())
+            on_frame(_rotate_droidcam(bgr), time.time())
     finally:
         cap.release()
 
@@ -739,6 +755,7 @@ def capture_droidcam_still(
         ok, frame = cap.read()
         if not ok:
             raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
+        frame = _rotate_droidcam(frame)
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         b64, angle_deg, note = _maybe_annotate(base64.b64encode(buf.tobytes()).decode())
         path = _save_snapshot(b64, "droidcam")
