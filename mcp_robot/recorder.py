@@ -44,6 +44,8 @@ class _Segment:
     flushed: bool = False
     tool: str | None = None
     change_description: str | None = None
+    sub_observation: str | None = None
+    sub_action: str | None = None
 
 
 @dataclass
@@ -256,6 +258,8 @@ class SegmentRecorder:
             "frame_count": seg.frame_count,
             "tool": seg.tool,
             "change_description": seg.change_description,
+            "sub_observation": seg.sub_observation,
+            "sub_action": seg.sub_action,
         }
 
     def _append_manifest(self, seg: _Segment) -> None:
@@ -352,12 +356,16 @@ class SegmentRecorder:
                 if seg is not None and _overlaps(seg.start_ts, time.time(), t_start, t_end):
                     seg.tool = meta.get("tool", seg.tool)
                     seg.change_description = meta.get("change_description", seg.change_description)
+                    seg.sub_observation = meta.get("sub_observation", seg.sub_observation)
+                    seg.sub_action = meta.get("sub_action", seg.sub_action)
                     tagged_any = True
 
                 for seg in state.recent_closed:
                     if seg.end_ts is not None and _overlaps(seg.start_ts, seg.end_ts, t_start, t_end):
                         seg.tool = meta.get("tool", seg.tool)
                         seg.change_description = meta.get("change_description", seg.change_description)
+                        seg.sub_observation = meta.get("sub_observation", seg.sub_observation)
+                        seg.sub_action = meta.get("sub_action", seg.sub_action)
                         self._rewrite_manifest_line(seg)
                         tagged_any = True
 

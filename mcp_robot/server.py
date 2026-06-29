@@ -272,6 +272,8 @@ def _with_change_analysis(
     annotate: bool = True,
     vqa_cameras: set[str] | None = None,
     skip_vqa: bool = False,
+    sub_observation: str = "",
+    sub_action: str = "",
 ) -> dict:
     """
     Record a video of the action, then ask the vision model whether the
@@ -394,7 +396,9 @@ def _with_change_analysis(
 
     from mcp_robot.recorder import get_recorder
     rec = get_recorder()
-    meta = {"tool": action_desc, "change_description": description}
+    meta = {"tool": action_desc, "change_description": description,
+            "sub_observation": sub_observation or None,
+            "sub_action": sub_action or None}
     for cam in cam_frames:
         rec.tag_range(cam, t_start, t_end, meta)
 
@@ -414,7 +418,8 @@ def get_motor_positions() -> dict:
 
 
 @mcp.tool()
-def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", context: str = "") -> dict:
+def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", context: str = "",
+               sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Move a single motor port by the given number of degrees.
 
@@ -430,6 +435,10 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
                   (e.g. "arm rotates down 45°"). Defaults to a technical summary.
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "lowering arm to ball height; last attempt overshot by 20°").
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup detected nearby").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Lowering arm down").
     """
     log.info("[TOOL] move_motor port=%r degrees=%r speed=%r", port, degrees, speed)
     if port.upper() not in ("A", "B", "C", "D"):
@@ -456,6 +465,8 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
         context=context,
         annotate=is_wheel,
         vqa_cameras={"droidcam"} if is_wheel else None,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
@@ -468,6 +479,8 @@ def drive(
     duration_s: float = 1.0,
     expected: str = "",
     context: str = "",
+    sub_observation: str = "",
+    sub_action: str = "",
 ) -> dict:
     """
     Drive the robot wheels directly. Captures before/after images and returns a
@@ -482,6 +495,10 @@ def drive(
                      (e.g. "robot moves forward ~20 cm").
         context:     Why this action is being taken and hints for evaluation
                      (e.g. "approaching the ball; previous attempt turned clockwise instead").
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup is ahead").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Driving forward").
     """
     log.info("[TOOL] drive left_speed=%r right_speed=%r duration_s=%r", left_speed, right_speed, duration_s)
     guard = _target_too_far()
@@ -500,6 +517,8 @@ def drive(
         desc, expected_str, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
         context=context,
         vqa_cameras={"droidcam"},
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
@@ -509,6 +528,8 @@ def turn(
     speed: int = 20,
     expected: str = "",
     context: str = "",
+    sub_observation: str = "",
+    sub_action: str = "",
 ) -> dict:
     """
     Rotate the robot body in place by an exact number of degrees.
@@ -528,6 +549,10 @@ def turn(
         expected:     Short description of the expected outcome
                       (e.g. "robot rotates ~45° CW to face the cup").
         context:      Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup is to the left").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Turning to face cup").
     """
     log.info("[TOOL] turn body_degrees=%r speed=%r", body_degrees, speed)
     guard = _target_too_far()
@@ -546,13 +571,16 @@ def turn(
         lambda: robot_mod.turn(body_degrees, speed),
         context=context,
         vqa_cameras={"droidcam"},
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "") -> dict:
+def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "",
+             sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Move the robot arm by the given number of degrees. Captures before/after
     images and returns a Gemini-generated `change_description`.
@@ -565,6 +593,10 @@ def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "
                   (e.g. "arm moves down ~45°, tip reaches ball height").
         context:  Why this action is being taken and hints for evaluation
                   (e.g. "positioning arm to grasp ball; last attempt stopped too high").
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Arm too high").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Lowering arm down").
     """
     log.info("[TOOL] move_arm degrees=%r speed=%r", degrees, speed)
     if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
@@ -580,12 +612,15 @@ def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "
         expected_str,
         lambda: robot_mod.move_arm(degrees, speed),
         context=context,
-        annotate=False,  # arrow masks arm position — suppress for arm actions
+        annotate=False,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
 @mcp.tool()
-def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
+def lower_arm(speed: int = 15, expected: str = "", context: str = "",
+              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Lower the robot arm fully to ground level, then raise it 17° to keep the
     gripper clear of the floor and maximise wheel normal force. Captures
@@ -595,6 +630,10 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
         speed:    Motor speed, 15 (max 15 to prevent arm jitter).
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Preparing to grab").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Lowering arm down").
     """
     log.info("[TOOL] lower_arm speed=%r", speed)
     if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
@@ -610,6 +649,8 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "") -> dict:
         context=context,
         annotate=False,
         skip_vqa=not config.LOWER_ARM_VQA,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
@@ -623,6 +664,8 @@ def control_gripper(
     speed: int = 20,
     expected: str = "",
     context: str = "",
+    sub_observation: str = "",
+    sub_action: str = "",
 ) -> dict:
     """
     Open or close the gripper. Captures before/after images and returns a
@@ -642,6 +685,10 @@ def control_gripper(
         context:                Why this action is being taken and hints for
                                 evaluation (e.g. "grasping paper ball; previous
                                 close attempt slipped off").
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup in position").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Closing gripper").
     """
     log.info("[TOOL] control_gripper action=%r speed=%r yolo=%r free_text=%r",
              action, speed, target_class_yolo, target_class_free_text)
@@ -687,7 +734,9 @@ def control_gripper(
         expected_str,
         lambda: robot_mod.control_gripper(action, speed),
         context=context,
-        annotate=False,  # arrow masks gripper state — suppress for gripper actions
+        annotate=False,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
     )
 
 
@@ -793,9 +842,17 @@ def navigate_to(
     target_class_yolo: str,
     target_class_free_text: str,
     max_steps: int = 6,
+    sub_observation: str = "",
+    sub_action: str = "",
 ) -> list[ImageContent | TextContent]:
     """
     Navigate the robot toward a target object using CV-based obstacle avoidance.
+
+    Args (subtitle):
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "User said get cup").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Navigating to cup").
 
     At every step the tool:
       1. Captures an external (DroidCam) frame and detects robot + target.
@@ -836,6 +893,7 @@ def navigate_to(
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     nav_dir = os.path.join(config.SNAPSHOT_DIR, f"navigate_to_{ts}") if config.SNAPSHOT_DIR else ""
+    nav_t_start = time.time()
 
     key_frames_b64: list[str] = []
     step_logs: list[str] = []
@@ -1067,6 +1125,16 @@ def navigate_to(
     content.append(
         TextContent(type="text", text=f"Navigate-to outcome: {outcome_text}\n\n{log_text}")
     )
+
+    if sub_observation or sub_action:
+        from mcp_robot.recorder import get_recorder
+        rec = get_recorder()
+        nav_meta = {"tool": f"navigate_to {target_class_yolo}",
+                    "sub_observation": sub_observation or None,
+                    "sub_action": sub_action or None}
+        for cam in ("droidcam", "pi_camera"):
+            rec.tag_range(cam, nav_t_start, time.time(), nav_meta)
+
     return content
 
 

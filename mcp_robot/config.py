@@ -84,7 +84,7 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.182:4747/video")
+DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.178:4747/video")
 DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
 # Target capture rate for DroidCam during action execution and video compilation.
 # Higher = smoother video and better optical flow; limited by DroidCam's native rate (~30 fps).
