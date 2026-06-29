@@ -100,13 +100,12 @@ print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightm
 """
 
 _CLICK_BUTTON = """
-import json, time
+import json
 from buildhat import MotorPair
 
 # Both press and release run in a single RPi script — no host round-trip
 # between them — so the button is guaranteed released within
-# press_duration + hold_duration + release_duration seconds, well before
-# any VLM validation begins.
+# press_duration + release_duration seconds, well before any VLM validation begins.
 #
 # WARNING: never `del pair` — BuildHAT triggers firmware jitter on destruction.
 pair = MotorPair({left_port!r}, {right_port!r})
@@ -114,10 +113,7 @@ pair = MotorPair({left_port!r}, {right_port!r})
 # Press forward into the button
 pair.run_for_seconds({press_duration}, {left_press_speed}, {right_press_speed})
 
-# Hold the button pressed (motors already stopped by run_for_seconds)
-time.sleep({hold_duration})
-
-# Release by driving backward
+# Immediately release by driving backward
 pair.run_for_seconds({release_duration}, {left_release_speed}, {right_release_speed})
 
 print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
@@ -275,21 +271,18 @@ def turn(body_degrees: float, speed: int) -> dict:
 def click_button(
     speed: int = 20,
     press_duration_s: float = 1.0,
-    hold_duration_s: float = 0.3,
     release_duration_s: float = 1.0,
 ) -> dict:
     """
-    Press and release a button in one atomic RPi script.
+    Press and immediately release a button in one atomic RPi script.
 
     Both press and release execute inside a single run_python call so no
     host round-trip (and no VLM pause) separates them.  The button is
-    physically released within press_duration_s + hold_duration_s +
-    release_duration_s seconds — regardless of VLM latency.
+    physically released within press_duration_s + release_duration_s seconds.
 
     Args:
         speed:              Wheel speed (positive = forward into button).
         press_duration_s:   Time driving forward to depress the button.
-        hold_duration_s:    Time to hold the button down (motors stopped).
         release_duration_s: Time driving backward to un-press the button.
     """
     # Motor A (left wheel) is physically inverted — negate so positive=forward.
@@ -297,7 +290,7 @@ def click_button(
     right_press  =  speed
     left_release =  speed   # backward
     right_release = -speed
-    total_timeout = int(press_duration_s + hold_duration_s + release_duration_s + 10)
+    total_timeout = int(press_duration_s + release_duration_s + 10)
     result = get_client().run_python(
         _CLICK_BUTTON.format(
             left_port=config.PORT_LEFT_WHEEL,
@@ -305,7 +298,6 @@ def click_button(
             press_duration=press_duration_s,
             left_press_speed=left_press,
             right_press_speed=right_press,
-            hold_duration=hold_duration_s,
             release_duration=release_duration_s,
             left_release_speed=left_release,
             right_release_speed=right_release,
