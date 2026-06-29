@@ -788,6 +788,76 @@ def _nav_track_motor(
     cam_mod.stream_droidcam_bgr(_on_frame, stop_event)
 
 
+def _scan_for_target(
+    target_class_yolo: str,
+    target_class_free_text: str,
+) -> tuple[bool, list[str], list[str]]:
+    """Lower the arm and rotate up to SCAN_TOTAL_DEG, capturing front-camera
+    frames at each step and running YOLO detection (no VLM — too expensive
+    for a full sweep).
+
+    Returns (found, frame_b64_list, log_lines).
+    If found, the robot is left facing the direction where the target was seen.
+    """
+    step_deg = config.SCAN_STEP_DEG
+    total_deg = config.SCAN_TOTAL_DEG
+    n_steps = total_deg // step_deg
+
+    logs: list[str] = ["--- Front-camera scan ---"]
+    frames_b64: list[str] = []
+
+    robot_mod.lower_arm()
+    logs.append("Arm lowered for front-camera scan")
+
+    rotated_so_far = 0
+    for i in range(n_steps):
+        if i > 0:
+            robot_mod.turn(float(step_deg), config.SCAN_SPEED)
+            rotated_so_far += step_deg
+            logs.append(f"Scan step {i + 1}/{n_steps}: rotated +{step_deg}° CW "
+                        f"(total {rotated_so_far}°)")
+
+        try:
+            still = cam_mod.capture_still()
+            raw_bytes = base64.b64decode(still["frame"])
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            logs.append(f"Front camera capture failed at step {i + 1}: {exc}")
+            continue
+
+        if bgr is None:
+            logs.append(f"Could not decode front camera frame at step {i + 1}")
+            continue
+
+        frames_b64.append(still["frame"])
+
+        detected = None
+        if target_class_yolo:
+            try:
+                objects = grasp_mod._yolo_detect(bgr, target_class=target_class_yolo)
+                if objects:
+                    detected = max(objects, key=lambda o: o.confidence)
+            except Exception as exc:
+                logs.append(f"YOLO error at scan step {i + 1}: {exc}")
+
+        if detected is not None:
+            logs.append(
+                f"TARGET FOUND at scan step {i + 1} "
+                f"(rotated {rotated_so_far}° CW): "
+                f"'{detected.class_name}' conf={detected.confidence:.0%}"
+            )
+            log.info("[scan] target found after %d° CW rotation: %s conf=%.0f%%",
+                     rotated_so_far, detected.class_name, detected.confidence * 100)
+            return True, frames_b64, logs
+
+        logs.append(f"Scan step {i + 1}/{n_steps}: target not visible")
+
+    logs.append(f"Target not found after {total_deg}° scan")
+    log.info("[scan] target not found after %d° sweep", total_deg)
+    return False, frames_b64, logs
+
+
 @mcp.tool()
 def navigate_to(
     target_class_yolo: str,
@@ -799,6 +869,12 @@ def navigate_to(
 
     At every step the tool:
       1. Captures an external (DroidCam) frame and detects robot + target.
+         If the target is not visible on the external camera, the robot
+         lowers its arm and rotates up to 180° CW in 30° steps, capturing
+         front-camera frames at each position and running YOLO + VLM
+         detection. If the front camera spots the target, the robot
+         re-checks the external camera from its new heading and continues
+         navigation if the target is now visible there.
       2. Builds a pixel-resolution obstacle map (floor segmentation + yellow-body
          exclusion) and a coarse navigable grid.
       3. Runs A* from the robot's grid cell to the target's grid cell.
@@ -898,14 +974,66 @@ def navigate_to(
                     target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
 
                 if target_obj is None:
-                    parts.append(f"Target not detected "
-                                 f"({target_class_yolo or target_class_free_text})")
-                    ok_enc, raw_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
-                    if ok_enc:
-                        key_frames_b64.append(base64.b64encode(raw_buf.tobytes()).decode())
+                    parts.append(f"Target not detected on external camera "
+                                 f"({target_class_yolo or target_class_free_text}) "
+                                 f"— starting front-camera scan")
                     step_logs.append("\n".join(parts))
-                    outcome = "target_not_detected"
-                    break
+
+                    found, scan_frames, scan_logs = _scan_for_target(
+                        target_class_yolo, target_class_free_text,
+                    )
+                    step_logs.extend(scan_logs)
+                    key_frames_b64.extend(scan_frames)
+
+                    if not found:
+                        outcome = "target_not_detected"
+                        break
+
+                    # Re-capture external camera after scan rotation and
+                    # re-detect the target — it may now be in frame from the
+                    # new heading.
+                    try:
+                        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+                        raw_bytes = base64.b64decode(frame_result["frame"])
+                        arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+                        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    except Exception:
+                        pass
+
+                    if bgr is not None:
+                        h_result = heading.detect_heading(bgr)
+
+                    if bgr is not None and target_class_yolo:
+                        try:
+                            objects = grasp_mod._yolo_detect(bgr, target_class=target_class_yolo)
+                            if objects:
+                                target_obj = (
+                                    grasp_mod._pick_target(objects, h_result)
+                                    if h_result is not None
+                                    else max(objects, key=lambda o: o.confidence)
+                                )
+                        except Exception:
+                            pass
+                    if target_obj is None and bgr is not None and target_class_free_text:
+                        target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+
+                    if target_obj is None:
+                        step_logs.append(
+                            "Front-camera scan found the target, but it is "
+                            "still not visible on external camera after rotation "
+                            "— cannot plan a path."
+                        )
+                        ok_enc, raw_buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                        if ok_enc:
+                            key_frames_b64.append(base64.b64encode(raw_buf.tobytes()).decode())
+                        outcome = "target_not_detected"
+                        break
+
+                    step_logs.append(
+                        f"Post-scan: target '{target_obj.class_name}' "
+                        f"now visible on external camera "
+                        f"at {target_obj.center} conf={target_obj.confidence:.0%}"
+                    )
 
                 parts.append(f"Target '{target_obj.class_name}' "
                              f"at {target_obj.center} conf={target_obj.confidence:.0%}")
