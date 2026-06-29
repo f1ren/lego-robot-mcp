@@ -1500,7 +1500,7 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Raises an error if pyperplan is not installed or the domain file is missing.
     """
-    log.info("[TOOL] plan_pddl problem_len=%d", len(problem_pddl))
+    log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
     from mcp_robot import planner
     try:
         actions = planner.solve(problem_pddl)
