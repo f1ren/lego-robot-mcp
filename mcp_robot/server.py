@@ -576,6 +576,54 @@ def turn(
     )
 
 
+@mcp.tool()
+def click_button(
+    speed: int = 20,
+    press_duration_s: float = 1.0,
+    release_duration_s: float = 1.0,
+    expected: str = "",
+    context: str = "",
+) -> dict:
+    """
+    Press and immediately release a button in one atomic motion, guaranteeing
+    the button is released within press_duration_s + release_duration_s seconds
+    — regardless of VLM validation latency.
+
+    Both the press and release run inside a **single RPi Python script**,
+    so there is no host round-trip and no VLM pause between them.  VLM
+    validation happens only once, after the button is already released.
+
+    Use this instead of two separate `drive` calls whenever the button
+    must be released within a fixed time window (e.g. < 10 s).
+
+    Args:
+        speed:              Wheel speed 15–20. Positive = forward (into button).
+        press_duration_s:   Seconds driving forward to depress the button.
+        release_duration_s: Seconds driving backward to un-press the button.
+        expected:           What should visually happen (auto-generated if blank).
+        context:            Why this action is being taken and evaluation hints.
+    """
+    log.info(
+        "[TOOL] click_button speed=%r press=%.2fs release=%.2fs",
+        speed, press_duration_s, release_duration_s,
+    )
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+    desc = (
+        f"click_button speed={speed} press={press_duration_s}s release={release_duration_s}s"
+    )
+    expected_str = expected if expected else (
+        f"robot drives forward ~{press_duration_s}s (pressing button), "
+        f"then immediately reverses ~{release_duration_s}s (releasing)"
+    )
+    return _with_change_analysis(
+        desc, expected_str,
+        lambda: robot_mod.click_button(speed, press_duration_s, release_duration_s),
+        context=context,
+        vqa_cameras={"droidcam"},
+    )
+
+
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
