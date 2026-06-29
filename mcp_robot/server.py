@@ -1642,16 +1642,22 @@ def plan_pddl(problem_pddl: str) -> dict:
     """
     Run the PDDL task planner and return a grounded action sequence.
 
-    The robot domain is fixed (pddl/robot_domain.pddl) and defines three
-    high-level actions:
-      - navigate  ?from ?to          → call navigate_to
-      - pick-up   ?object ?location  → lower arm + open gripper + close gripper
-      - place     ?object ?location  → call put (open gripper + raise arm)
+    The robot domain is fixed (pddl/robot_domain.pddl) and defines five actions:
+      - navigate     ?from ?to         → navigate_to
+      - open-gripper                   → control_gripper(open)
+      - lower-arm                      → lower_arm
+      - pick-up      ?object ?location → control_gripper(close)  [gripper+arm must be ready]
+      - place        ?object ?location → put  (opens gripper + raises arm)
 
     You supply only the *problem* as a PDDL string.  It must declare:
-      - (:objects ...) — all location and object instances
+      - (:objects ...) — all location and object instances (untyped)
       - (:init ...)    — robot-at, object-at, gripper-empty, adjacent pairs
       - (:goal ...)    — desired end state
+
+    Convention — NEVER assert (arm-lowered) or (gripper-open) in (:init), even
+    if the robot's physical state has them true.  Omitting them forces the planner
+    to always emit open-gripper and lower-arm before every pick-up, which matches
+    the CLAUDE.md safety rules ("always open/lower regardless of observed state").
 
     Example problem (move a cup from the table to the sink):
 
@@ -1670,7 +1676,15 @@ def plan_pddl(problem_pddl: str) -> dict:
           (:goal (object-at cup loc-sink))
         )
 
-    Returns {"plan": ["(navigate loc-start loc-table)", "(pick-up cup loc-table)", ...]}
+    Expected plan for the example above:
+        (navigate loc-start loc-table)
+        (open-gripper)
+        (lower-arm)
+        (pick-up cup loc-table)
+        (navigate loc-table loc-sink)
+        (place cup loc-sink)
+
+    Returns {"plan": ["(navigate loc-start loc-table)", "(open-gripper)", ...]}
     or {"plan": []} when no solution exists (check initial state / goal consistency).
     After receiving the plan, execute each step with the corresponding MCP tool.
 
