@@ -1591,7 +1591,7 @@ def get_robot_state(
 ) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
-    cameras (Pi Camera = front view; DroidCam = wider third-person view).
+    cameras (DroidCam = wider third-person view; Pi Camera = front/robot-eye view).
     Call this before planning any sequence of actions.
 
     Args:
@@ -1654,6 +1654,10 @@ def get_robot_state(
             _last_target_distance_px = None
             _last_target_robot_radius_px = None
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
+        pi_frame = cam_mod.capture_still()
+        viz.log_annotated_images(pi_frame["frame"])
+        content.append(TextContent(type="text", text="Front view (Pi Camera):"))
+        content.append(_thumbnail_image_content(pi_frame["frame"]))
         if _state_call_count > 1:
             positions = robot_mod.get_all_positions()
             summary = (
