@@ -122,6 +122,15 @@ SEGMENT_FPS_PI = float(os.getenv("SEGMENT_FPS_PI", "15.0"))
 # successfully and concatenates cleanly via `ffmpeg -c copy`.
 SEGMENT_FOURCC = os.getenv("SEGMENT_FOURCC", "mp4v")
 SEGMENT_RECENT_RING = int(os.getenv("SEGMENT_RECENT_RING", "8"))
+# Per-camera noise-floor calibration: sample the first N stable frames to set
+# a per-camera motion threshold (mean_diff + SIGMA * std_diff above noise).
+# Set SEGMENT_CALIB_ENABLED=0 to use the fixed global threshold instead.
+SEGMENT_CALIB_ENABLED = bool(int(os.getenv("SEGMENT_CALIB_ENABLED", "1")))
+SEGMENT_CALIB_FRAMES  = int(os.getenv("SEGMENT_CALIB_FRAMES", "40"))
+SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
+# Cross-camera sync: a motion event on any camera triggers recording on all
+# cameras within this time window (seconds).
+SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "1.0"))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))

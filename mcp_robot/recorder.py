@@ -7,6 +7,22 @@ motion-bounded mp4 segments to disk in real time. A manifest (JSONL) records
 each closed segment's time range and path; `tag_range` lets callers attach
 action metadata (tool name, change description) to whichever segment(s)
 overlap a given time window.
+
+Per-camera noise calibration
+────────────────────────────
+The first SEGMENT_CALIB_FRAMES stable frames received by each camera are used
+to measure that camera's natural frame-to-frame pixel noise.  The motion
+threshold is then set to mean_diff + SIGMA * std_diff above that noise floor.
+This prevents the noisier Pi Camera from triggering false-positive segments
+while the quieter DroidCam keeps its baseline sensitivity.  Set
+SEGMENT_CALIB_ENABLED=0 to skip calibration and use the fixed global
+threshold for all cameras.
+
+Cross-camera sync
+─────────────────
+When any camera detects its own motion, every other registered camera is
+cross-triggered within SEGMENT_CROSS_TRIGGER_WINDOW seconds.  This keeps both
+streams recording together so VQA always has a matched pair of clips.
 """
 from __future__ import annotations
 
@@ -53,13 +69,26 @@ class _CameraState:
     prev_gray: "np.ndarray | None" = None
     open_segment: "_Segment | None" = None
     recent_closed: "deque[_Segment]" = field(default_factory=deque)
+    # Per-camera noise calibration
+    calib_diffs: list = field(default_factory=list)
+    calib_pixel_counts: list = field(default_factory=list)
+    calib_done: bool = False
+    motion_threshold: float = _CAPTURE_MOTION_THRESHOLD
+    motion_pixel_count: int = _MOTION_PIXEL_COUNT
+    # Cross-camera sync: epoch when another camera last detected its own motion
+    cross_trigger_ts: float = 0.0
 
 
-def _is_motion(prev_gray: np.ndarray, cur_gray: np.ndarray) -> bool:
+def _is_motion(
+    prev_gray: np.ndarray,
+    cur_gray: np.ndarray,
+    mean_threshold: float = _CAPTURE_MOTION_THRESHOLD,
+    pixel_count: int = _MOTION_PIXEL_COUNT,
+) -> bool:
     diff = np.abs(prev_gray.astype(np.float32) - cur_gray.astype(np.float32))
-    if float(diff.mean()) > _CAPTURE_MOTION_THRESHOLD:
+    if float(diff.mean()) > mean_threshold:
         return True
-    return int(np.sum(diff > _MOTION_PIXEL_THRESH)) > _MOTION_PIXEL_COUNT
+    return int(np.sum(diff > _MOTION_PIXEL_THRESH)) > pixel_count
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -83,6 +112,10 @@ class SegmentRecorder:
         cooldown_s: float = config.SEGMENT_COOLDOWN_S,
         fps_by_camera: dict | None = None,
         recent_ring: int = config.SEGMENT_RECENT_RING,
+        calib_enabled: bool = config.SEGMENT_CALIB_ENABLED,
+        calib_frames: int = config.SEGMENT_CALIB_FRAMES,
+        calib_sigma: float = config.SEGMENT_CALIB_SIGMA,
+        cross_trigger_window: float = config.SEGMENT_CROSS_TRIGGER_WINDOW,
     ) -> None:
         self.segment_dir = segment_dir
         self.manifest_path = manifest_path
@@ -93,9 +126,43 @@ class SegmentRecorder:
             "pi_camera": config.SEGMENT_FPS_PI,
         }
         self.recent_ring = recent_ring
+        self.calib_enabled = calib_enabled
+        self.calib_frames = calib_frames
+        self.calib_sigma = calib_sigma
+        self.cross_trigger_window = cross_trigger_window
         self._cameras: dict[str, _CameraState] = {}
         self._lock = threading.Lock()
         os.makedirs(self.segment_dir, exist_ok=True)
+
+    # ── calibration ─────────────────────────────────────────────────────────
+
+    def _accumulate_calib(self, camera: str, state: _CameraState, gray: np.ndarray) -> None:
+        """Accumulate one inter-frame diff sample; finalise when enough collected."""
+        diff = np.abs(gray.astype(np.float32) - state.prev_gray.astype(np.float32))
+        state.calib_diffs.append(float(diff.mean()))
+        state.calib_pixel_counts.append(int(np.sum(diff > _MOTION_PIXEL_THRESH)))
+
+        if len(state.calib_diffs) < self.calib_frames:
+            return
+
+        mean_d = float(np.mean(state.calib_diffs))
+        std_d  = float(np.std(state.calib_diffs))
+        mean_p = float(np.mean(state.calib_pixel_counts))
+        std_p  = float(np.std(state.calib_pixel_counts))
+
+        # Raise the threshold above the noise floor; never drop below the global default.
+        state.motion_threshold  = max(mean_d + self.calib_sigma * std_d,  _CAPTURE_MOTION_THRESHOLD)
+        state.motion_pixel_count = max(int(mean_p + self.calib_sigma * std_p), _MOTION_PIXEL_COUNT)
+        state.calib_done = True
+        state.calib_diffs.clear()
+        state.calib_pixel_counts.clear()
+
+        log.info(
+            "recorder: %s calibrated — noise mean_diff=%.3f σ=%.3f → threshold=%.2f; "
+            "mean_px=%.0f σ=%.0f → pixel_count=%d",
+            camera, mean_d, std_d, state.motion_threshold,
+            mean_p, std_p, state.motion_pixel_count,
+        )
 
     # ── frame ingestion ─────────────────────────────────────────────────────
 
@@ -118,8 +185,31 @@ class SegmentRecorder:
         with self._lock:
             state = self._cameras.setdefault(camera, _CameraState(recent_closed=deque(maxlen=self.recent_ring)))
 
-            motion = False if state.prev_gray is None else _is_motion(state.prev_gray, gray)
+            # ── calibration phase ───────────────────────────────────────────
+            if self.calib_enabled and not state.calib_done:
+                if state.prev_gray is not None:
+                    self._accumulate_calib(camera, state, gray)
+                state.prev_gray = gray
+                return  # hold off recording until the noise floor is measured
 
+            # ── motion detection ────────────────────────────────────────────
+            own_motion = (
+                False if state.prev_gray is None
+                else _is_motion(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count)
+            )
+
+            # Cross-trigger: another camera fired its own motion recently.
+            cross_motion = ts - state.cross_trigger_ts < self.cross_trigger_window
+
+            motion = own_motion or cross_motion
+
+            # Propagate own motion to all other registered cameras.
+            if own_motion:
+                for other_cam, other_state in self._cameras.items():
+                    if other_cam != camera:
+                        other_state.cross_trigger_ts = ts
+
+            # ── segment logic ───────────────────────────────────────────────
             if state.open_segment is None:
                 if motion:
                     seg = self._open_segment(camera, state, ts, cache)

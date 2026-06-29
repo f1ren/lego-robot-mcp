@@ -61,6 +61,7 @@ class TestSegmentRecorder(unittest.TestCase):
             preroll_s=0.5,
             cooldown_s=1.0,
             fps_by_camera={"droidcam": 10.0},
+            calib_enabled=False,  # skip noise calibration in unit tests
         )
         kwargs.update(overrides)
         return self.SegmentRecorder(**kwargs)
@@ -405,6 +406,74 @@ class TestSegmentRecorder(unittest.TestCase):
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
         self.assertAlmostEqual(fps, 10.0, delta=0.01)
+
+
+    # ── 15: noise calibration raises threshold and blocks early segments ──────
+
+    def test_calibration_raises_threshold_and_delays_recording(self):
+        """Calibration phase should consume calib_frames before recording starts,
+        and the measured threshold must be >= the global default."""
+        import numpy as np
+        import cv2
+
+        rec = self._make_recorder(calib_enabled=True, calib_frames=4, calib_sigma=3.0)
+
+        # Build synthetic frames with tiny pixel noise (mean diff ~1, well below 2.5).
+        rng = np.random.default_rng(42)
+        base = np.full((100, 100, 3), 128, dtype=np.uint8)
+
+        def _noisy_b64():
+            noise = rng.integers(-2, 3, base.shape, dtype=np.int16)
+            frame = np.clip(base.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+            _, buf = cv2.imencode(".jpg", frame)
+            return base64.b64encode(buf.tobytes()).decode()
+
+        t = 1000.0
+        # calib_frames=4 diffs require calib_frames+1 total frames (first just seeds prev_gray).
+        for _ in range(5):
+            rec.on_frame("droidcam", _noisy_b64(), t)
+            t = round(t + 0.1, 3)
+
+        state = rec._cameras["droidcam"]
+        self.assertTrue(state.calib_done, "calibration should be done after calib_frames+1 frames")
+        self.assertIsNone(state.open_segment, "no segment should open during calibration")
+        # Threshold must be at or above the global default.
+        from mcp_robot.vision import _CAPTURE_MOTION_THRESHOLD
+        self.assertGreaterEqual(state.motion_threshold, _CAPTURE_MOTION_THRESHOLD)
+
+    # ── 16: cross-trigger opens a segment on the second camera ───────────────
+
+    def test_cross_trigger_opens_segment_on_second_camera(self):
+        """Motion on droidcam should open a segment on pi_camera within the
+        cross-trigger window even if pi_camera has no own motion."""
+        rec = self._make_recorder(
+            fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0},
+            cross_trigger_window=1.0,
+        )
+
+        static_b64 = [_load_b64(f) for f in sorted((FIXTURES / "static_video").glob("droidcam_*.jpg"))[:2]]
+        gripper_b64 = _load_b64(FIXTURES / "gripper_motion" / "droidcam_008.jpg")
+
+        t = 1000.0
+        # Seed pi_camera with one static frame (no motion, no segment).
+        rec.on_frame("pi_camera", static_b64[0], t)
+        t = round(t + 0.05, 3)
+
+        # droidcam: two static + one motion frame → segment opens.
+        rec.on_frame("droidcam", static_b64[0], t); t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", static_b64[1], t); t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", gripper_b64,   t)  # triggers motion
+
+        # pi_camera: feed one static frame shortly after — cross-trigger should fire.
+        t = round(t + 0.05, 3)
+        rec.on_frame("pi_camera", static_b64[1], t)
+
+        pi_state = rec._cameras.get("pi_camera")
+        self.assertIsNotNone(pi_state, "pi_camera state should exist")
+        self.assertIsNotNone(
+            pi_state.open_segment,
+            "pi_camera should have an open segment due to cross-trigger from droidcam motion",
+        )
 
 
 if __name__ == "__main__":
