@@ -978,6 +978,9 @@ def scan_for_target(
     """
     log.info("[TOOL] scan_for_target yolo=%r free_text=%r sub_obs=%r sub_act=%r",
              target_class_yolo, target_class_free_text, sub_observation, sub_action)
+    if not config.SCAN_ENABLED:
+        log.info("[TOOL] scan_for_target skipped (SCAN_ENABLED not set)")
+        return [TextContent(type="text", text="Scan skipped (SCAN_ENABLED not set).")]
     try:
         found, frames_b64, scan_logs = _scan_for_target(target_class_yolo, target_class_free_text)
         content: list[ImageContent | TextContent] = []
@@ -1125,6 +1128,13 @@ def navigate_to(
                     target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
 
                 if target_obj is None:
+                    if not config.SCAN_ENABLED:
+                        parts.append(f"Target not detected on external camera "
+                                     f"({target_class_yolo or target_class_free_text}) "
+                                     f"— scan skipped (SCAN_ENABLED not set)")
+                        step_logs.append("\n".join(parts))
+                        outcome = "target_not_detected"
+                        break
                     parts.append(f"Target not detected on external camera "
                                  f"({target_class_yolo or target_class_free_text}) "
                                  f"— starting front-camera scan")

@@ -81,6 +81,8 @@ NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
 SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "360"))   # total arc to sweep
 SCAN_SPEED     = int(os.getenv("SCAN_SPEED",     "15"))    # wheel speed during scan turns
+# Set SCAN_ENABLED=1 to enable the 360° sweep; disabled by default.
+SCAN_ENABLED   = bool(os.getenv("SCAN_ENABLED", ""))
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
