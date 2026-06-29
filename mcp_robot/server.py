@@ -1459,6 +1459,59 @@ def compile_video(since: str, camera: str = "droidcam") -> dict:
                 "total_duration_s": result.total_duration_s})
 
 
+# ── PDDL task planning ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def plan_pddl(problem_pddl: str) -> dict:
+    """
+    Run the PDDL task planner and return a grounded action sequence.
+
+    The robot domain is fixed (pddl/robot_domain.pddl) and defines three
+    high-level actions:
+      - navigate  ?from ?to          → call navigate_to
+      - pick-up   ?object ?location  → lower arm + open gripper + close gripper
+      - place     ?object ?location  → call put (open gripper + raise arm)
+
+    You supply only the *problem* as a PDDL string.  It must declare:
+      - (:objects ...) — all location and object instances
+      - (:init ...)    — robot-at, object-at, gripper-empty, adjacent pairs
+      - (:goal ...)    — desired end state
+
+    Example problem (move a cup from the table to the sink):
+
+        (define (problem move-cup)
+          (:domain lego-robot)
+          (:objects loc-start loc-table loc-sink cup)
+          (:init
+            (robot-at loc-start)
+            (object-at cup loc-table)
+            (gripper-empty)
+            (adjacent loc-start loc-table)
+            (adjacent loc-table loc-start)
+            (adjacent loc-table loc-sink)
+            (adjacent loc-sink loc-table)
+          )
+          (:goal (object-at cup loc-sink))
+        )
+
+    Returns {"plan": ["(navigate loc-start loc-table)", "(pick-up cup loc-table)", ...]}
+    or {"plan": []} when no solution exists (check initial state / goal consistency).
+    After receiving the plan, execute each step with the corresponding MCP tool.
+
+    Raises an error if pyperplan is not installed or the domain file is missing.
+    """
+    log.info("[TOOL] plan_pddl problem_len=%d", len(problem_pddl))
+    from mcp_robot import planner
+    try:
+        actions = planner.solve(problem_pddl)
+    except ImportError:
+        return _err("pyperplan is not installed — run: pip install pyperplan")
+    except RuntimeError as exc:
+        return _err(str(exc))
+    log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
+    return _ok({"plan": actions})
+
+
 # ── background streaming ──────────────────────────────────────────────────────
 
 def _run_pi_camera() -> None:
