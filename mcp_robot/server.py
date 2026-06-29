@@ -956,6 +956,51 @@ def _scan_for_target(
 
 
 @mcp.tool()
+def scan_for_target(
+    target_class_yolo: str,
+    target_class_free_text: str,
+    sub_observation: str = "",
+    sub_action: str = "",
+) -> list[ImageContent | TextContent]:
+    """
+    Rotate up to 180° CW in 30° steps searching for the target using the
+    front camera and YOLO. Call this when get_robot_state does not find
+    the target — before plan_pddl or navigate_to.
+
+    The arm is lowered before sweeping so it does not block the camera.
+    On success the robot is left facing the target, ready for navigate_to.
+
+    Args:
+        target_class_yolo:      YOLO class to detect (e.g. "cup", "ball").
+        target_class_free_text: Free-text description used only for logs.
+        sub_observation:        ~4-word subtitle: what was just observed.
+        sub_action:             ~4-word subtitle: what the robot is doing.
+    """
+    log.info("[TOOL] scan_for_target yolo=%r free_text=%r sub_obs=%r sub_act=%r",
+             target_class_yolo, target_class_free_text, sub_observation, sub_action)
+    try:
+        found, frames_b64, scan_logs = _scan_for_target(target_class_yolo, target_class_free_text)
+        content: list[ImageContent | TextContent] = []
+        content.append(TextContent(type="text", text="\n".join(scan_logs)))
+        for b64 in frames_b64:
+            content.append(_thumbnail_image_content(b64))
+        if found:
+            content.append(TextContent(type="text", text=(
+                "Target found — robot is now facing it. "
+                "Call navigate_to to approach."
+            )))
+        else:
+            content.append(TextContent(type="text", text=(
+                "Target not found after full sweep. "
+                "Consider repositioning the robot or verifying the target class."
+            )))
+        return content
+    except Exception as exc:
+        log.warning("[TOOL] scan_for_target error: %s", exc, exc_info=True)
+        return [TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+@mcp.tool()
 def navigate_to(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1585,6 +1630,14 @@ def get_robot_state(
             else:
                 log.info("get_robot_state heading result: no object detected (yolo=%r free_text=%r) — angle not computed",
                          target_class_yolo, target_class_free_text)
+                if target_class_yolo or target_class_free_text:
+                    content.append(TextContent(type="text", text=(
+                        f"Target not found in current view "
+                        f"({target_class_yolo or target_class_free_text}). "
+                        f"Call scan_for_target(target_class_yolo={target_class_yolo!r}, "
+                        f"target_class_free_text={target_class_free_text!r}) "
+                        f"to rotate and search before navigate_to."
+                    )))
             if vlm_note:
                 content.append(TextContent(type="text", text=f"VLM note: {vlm_note}"))
         except Exception as exc:
