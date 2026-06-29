@@ -963,7 +963,7 @@ def scan_for_target(
     sub_action: str = "",
 ) -> list[ImageContent | TextContent]:
     """
-    Rotate up to 180° CW in 30° steps searching for the target using the
+    Rotate up to 360° CW in 30° steps searching for the target using the
     front camera and YOLO. Call this when get_robot_state does not find
     the target — before plan_pddl or navigate_to.
 
@@ -1020,7 +1020,7 @@ def navigate_to(
     At every step the tool:
       1. Captures an external (DroidCam) frame and detects robot + target.
          If the target is not visible on the external camera, the robot
-         lowers its arm and rotates up to 180° CW in 30° steps, capturing
+         lowers its arm and rotates up to 360° CW in 30° steps, capturing
          front-camera frames at each position and running YOLO + VLM
          detection. If the front camera spots the target, the robot
          re-checks the external camera from its new heading and continues
