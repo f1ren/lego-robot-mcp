@@ -654,6 +654,10 @@ def locate_object_vlm(
         "locate_object_vlm: bbox=[%d,%d,%d,%d] hsv=[%d-%d,%d+,%d+] area_frac=%.4f conf=%.2f note=%r",
         x1, y1, x2, y2, hue_lo, hue_hi, sat_min, val_min, area_frac, confidence, note,
     )
+    if confidence <= 0.95:
+        log.info("locate_object_vlm: '%s' confidence %.2f below threshold 0.95 — treating as not found",
+                 description, confidence)
+        return None
     return (x1, y1, x2, y2), confidence, note, hsv_lo, hsv_hi, area_frac
 
 
