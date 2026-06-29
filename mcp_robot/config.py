@@ -77,6 +77,11 @@ ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 # effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
 NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 
+# ── Target scan (front-camera sweep when external camera can't see target) ───
+SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
+SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "180"))   # total arc to sweep
+SCAN_SPEED     = int(os.getenv("SCAN_SPEED",     "15"))    # wheel speed during scan turns
+
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
 CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
