@@ -981,7 +981,13 @@ def scan_for_target(
              target_class_yolo, target_class_free_text, sub_observation, sub_action)
     if not config.SCAN_ENABLED:
         log.info("[TOOL] scan_for_target skipped (SCAN_ENABLED not set)")
-        return [TextContent(type="text", text="The user did not allow scan by rotation.")]
+        return [TextContent(type="text", text=(
+            "Scan by rotation is disabled (SCAN_ENABLED is not set). "
+            "This is a deliberate user decision — do NOT attempt to replicate "
+            "the scan manually by chaining turn + camera calls. "
+            "That is the same action and equally prohibited. "
+            "If the target is not visible in the current frame, this step has failed."
+        ))]
     try:
         found, frames_b64, scan_logs = _scan_for_target(target_class_yolo, target_class_free_text)
         content: list[ImageContent | TextContent] = []
