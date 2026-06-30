@@ -534,6 +534,90 @@ def describe_action_video(
         return f"(vision analysis failed: {exc})"
 
 
+def ask_with_images(
+    prompt: str,
+    labeled_images: Sequence[tuple[str, str]],
+) -> str:
+    """
+    Send a free-form prompt and still images to the configured VQA backend.
+
+    Args:
+        prompt:         Full text prompt.
+        labeled_images: List of (camera_label, base64_jpeg) pairs.
+
+    Returns the raw text response from the VQA model.
+    """
+    if not labeled_images:
+        raise ValueError("ask_with_images: no images provided")
+
+    backend = config.VISION_BACKEND
+    if backend == "gemini":
+        return _gemini_ask_with_images(prompt, labeled_images)
+    if backend == "ollama":
+        return _ollama_ask_with_images(prompt, labeled_images)
+
+    # "auto": Gemini first, Ollama fallback
+    if config.GEMINI_API_KEY:
+        return _gemini_ask_with_images(prompt, labeled_images)
+    return _ollama_ask_with_images(prompt, labeled_images)
+
+
+def _gemini_ask_with_images(
+    prompt: str,
+    labeled_images: Sequence[tuple[str, str]],
+) -> str:
+    from google.genai import types
+
+    client = _get_gemini_client()
+    if client is None:
+        raise RuntimeError("Gemini not configured (no GEMINI_API_KEY)")
+
+    parts: list = [types.Part.from_text(text=prompt)]
+    for label, b64 in labeled_images:
+        desc = _CAMERA_LABELS.get(label, label)
+        parts.append(types.Part.from_text(text=f"\n=== {desc} ==="))
+        parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
+
+    model = _get_active_model()
+    log.info(
+        "Gemini ask_with_images model=%s images=%d\n--- PROMPT ---\n%s\n--- END PROMPT ---",
+        model, len(labeled_images), prompt,
+    )
+    resp = _gemini_generate_with_retry(
+        client, model, [types.Content(role="user", parts=parts)],
+    )
+    text = (resp.text or "").strip()
+    log.info("Gemini ask_with_images response:\n%s", text)
+    return text
+
+
+def _ollama_ask_with_images(
+    prompt: str,
+    labeled_images: Sequence[tuple[str, str]],
+) -> str:
+    import ollama
+
+    full_prompt = prompt
+    for label, _ in labeled_images:
+        desc = _CAMERA_LABELS.get(label, label)
+        full_prompt += f"\n\n=== {desc} ==="
+
+    images = [base64.b64decode(b64) for _, b64 in labeled_images]
+    log.info("Ollama ask_with_images model=%s host=%s images=%d",
+             config.OLLAMA_MODEL, config.OLLAMA_HOST, len(images))
+
+    client = ollama.Client(host=config.OLLAMA_HOST)
+    t0 = time.monotonic()
+    resp = client.chat(
+        model=config.OLLAMA_MODEL,
+        messages=[{"role": "user", "content": full_prompt, "images": images}],
+    )
+    elapsed = time.monotonic() - t0
+    text = resp["message"]["content"].strip()
+    log.info("Ollama ask_with_images response (%.1fs):\n%s", elapsed, text)
+    return text
+
+
 def locate_object_vlm(
     bgr: np.ndarray,
     description: str,

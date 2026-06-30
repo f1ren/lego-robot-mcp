@@ -33,6 +33,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   Vision / localization
   ─────────────────────
   locate_object               VLM-based localization of arbitrary objects (Gemini Flash)
+  consult_vqa_for_pddl_domain VQA consultation on PDDL domain gaps; saves new domain if suggested
 
 Run with:
     python3 -m mcp_robot.server
@@ -1767,6 +1768,95 @@ def plan_pddl(problem_pddl: str) -> dict:
         return _err(str(exc))
     log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
     return _ok({"plan": actions})
+
+
+def _extract_pddl_domain(text: str) -> str | None:
+    """Extract the first balanced (define (domain ...)) block from free-form text."""
+    import re
+    m = re.search(r'\(define\s+\(domain\b', text, re.IGNORECASE)
+    if not m:
+        return None
+    start = m.start()
+    depth = 0
+    for i, ch in enumerate(text[start:], start=start):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+@mcp.tool()
+def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
+    """
+    Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
+
+    Captures the current robot view and external camera, reads pddl/robot_domain.pddl,
+    then asks:
+        "What seems to be the problem? Is there anything missing from the domain
+         formalization? If so, suggest a fixed domain."
+
+    If the VQA response contains a new PDDL domain, it is saved over
+    pddl/robot_domain.pddl (original backed up to robot_domain.pddl.bak).
+    The next call to plan_pddl will use the updated domain.
+
+    NOTE: The updated domain is intentionally NOT committed to git so the
+    experiment can be repeated from the original domain (git restore pddl/robot_domain.pddl).
+
+    Args:
+        failure_context: 1-3 sentences on what was tried and why it failed.
+
+    Returns:
+        vqa_response   — raw VQA model text
+        domain_updated — True if a new domain was extracted and saved
+        new_domain     — new domain text if domain_updated, else null
+    """
+    import shutil
+    from mcp_robot import planner as planner_mod
+
+    log.info("[TOOL] consult_vqa_for_pddl_domain context=%r", failure_context)
+
+    # Read the current domain
+    domain_path = planner_mod.DOMAIN_PATH
+    with open(domain_path) as f:
+        domain_text = f.read()
+
+    # Capture both cameras
+    front = cam_mod.capture_still()
+    ext = cam_mod.capture_droidcam_still()
+    labeled_images: list[tuple[str, str]] = [
+        ("pi_camera", front["frame"]),
+        ("droidcam", ext["frame"]),
+    ]
+
+    prompt = (
+        "QUESTION: What seems to be the problem? Is there anything missing from "
+        "the domain formalization? If so, suggest a fixed domain.\n\n"
+        f"CONTEXT: {failure_context}\n"
+        "Attached are the images from the robot's view and the external camera. "
+        "Both were considered, alongside the following PDDL domain:\n\n"
+        f"{domain_text}"
+    )
+
+    vqa_response = vision.ask_with_images(prompt, labeled_images)
+
+    # Extract a new domain from the response if present
+    new_domain = _extract_pddl_domain(vqa_response)
+    domain_updated = False
+    if new_domain:
+        backup_path = domain_path + ".bak"
+        shutil.copy2(domain_path, backup_path)
+        with open(domain_path, "w") as f:
+            f.write(new_domain)
+        domain_updated = True
+        log.info(
+            "consult_vqa_for_pddl_domain: new domain saved to %s (backup → %s)",
+            domain_path, backup_path,
+        )
+
+    return _ok({"vqa_response": vqa_response, "domain_updated": domain_updated, "new_domain": new_domain})
 
 
 # ── background streaming ──────────────────────────────────────────────────────
