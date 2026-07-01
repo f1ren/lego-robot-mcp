@@ -30,9 +30,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 
 **Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. Pass a 1–3 sentence `failure_context` describing what was tried and why it failed. The tool captures both cameras, attaches the current domain, and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"*
 
-- If the VQA response includes a new PDDL domain, the tool saves it over `pddl/robot_domain.pddl` (backing up the original to `robot_domain.pddl.bak`) and returns `domain_updated: true`.
-- When `domain_updated` is true, immediately re-call `plan_pddl` with the same problem PDDL — the planner will use the updated domain.
-- The updated domain is **not** git-committed; use `git restore pddl/robot_domain.pddl` to return to the original for repeat experiments.
+- If the response has `domain_updated: true`, immediately re-call `plan_pddl` with the same problem PDDL — the fix is applied automatically, without touching the original domain file.
 
 # Tool use and Code synthesis
 1. The agentic coder should prefer using the MCP server to control the robot, as it should be more reliable and consistent.
