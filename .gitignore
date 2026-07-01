@@ -14,3 +14,6 @@ output/
 
 # Test files
 tests/fixtures/*/annotated/
+
+
+pddl/robot_domain.pddl

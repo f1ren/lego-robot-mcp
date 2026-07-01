@@ -4,7 +4,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 
 # Act
 1. **After calling `plan_pddl` and before executing any action, describe what each camera shows:** gripper open or closed, arm high or low, object location relative to the robot, any clearance issues. Do not skip this step — motor position numbers alone are not sufficient.
-   - **If a goal or action cannot be completed — including no detection after a full scan — do not immediately conclude the target is absent or the task impossible.** Look at the full camera frame and describe everything visible in the scene, not just the target's presence or absence: objects, surfaces, lighting, any element that reflects the state of the environment. Ask: what would need to be true for this action to succeed, and is anything visible in the scene an unmet prerequisite? If so, and no domain action addresses it, that is a domain gap — reflect on it and consider whether `pddl/robot_domain.pddl` needs a new action, before asking the user to intervene.
+   - **If a goal or action cannot be completed — including no detection after a full scan — do not immediately conclude the target is absent or the task impossible.** Look at the full camera frame and describe everything visible in the scene, not just the target's presence or absence: objects, surfaces, lighting, any element that reflects the state of the environment. If you still have no clear path forward, see the **Troubleshoot** section.
    - **Gripper "open" means wide-open**: the angle between the two fingers must be approximately **180 degrees** (fingers pointing in opposite directions). A partially-open gripper is NOT "open" — treat it as closed/partial, because it may not clear the object on approach and may fail to grab it once the jaws close. If the gripper is not at ~180°, plan to open it fully before attempting a grasp.
    - **Always open the gripper as the first step of any grasp action**, even if it visually appears already open. Visual assessment of gripper state is unreliable — the jaws can look open while actually being partially closed. Issuing an explicit open command before approach guarantees the jaws are wide enough to clear and grab the object. This overrides the "skip unnecessary steps" rule for grasps.
    - **Always include a "lower arm" step when planning to grab a ground-level object**, even if the arm visually appears already lowered. VQA models reliably miss subtle arm height differences — issuing an explicit lower command before approach guarantees the arm is at the correct height. This overrides the "skip unnecessary steps" rule for ground-level grasps.
@@ -26,24 +26,26 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
    - **Do NOT manually replicate `scan_for_target` when it is disabled.** If `scan_for_target` returns "The user did not allow scan by rotation", do not work around this by chaining repeated `turn` calls + camera checks. That is the same action and equally prohibited. The server enforces this: cumulative rotation from `turn` calls exceeding `SCAN_TOTAL_DEG / 2` without a forward `drive` or `navigate_to` will hard-fail with an error. If you cannot locate the target without scanning, report it and stop.
    - **Always supply a non-empty `target_class_free_text` on the very first `navigate_to` call**, even when `target_class_yolo` is also set. Don't pass `""` and wait for a YOLO-only attempt to fail before adding a free-text fallback — that wastes a step and risks deriving the description later from a stale/annotated frame. Describe the target's color/shape/material as seen in the **raw camera frame**, never from a debug/overlay image (e.g. `step_NN_g_nav_overlay.jpg`'s obstacle-mask tint can make objects look the wrong color).
 
-8. **Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` before consulting the user.** This is the default response to any dead end — do not attempt to diagnose the root cause first, you can't reliably tell. Never ask the user for help without trying this first. Pass a 1–3 sentence `failure_context` describing what was tried and why it failed. The tool captures both cameras, attaches the current domain, and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"*
-   - If the VQA response includes a new PDDL domain, the tool saves it over `pddl/robot_domain.pddl` (backing up the original to `robot_domain.pddl.bak`) and returns `domain_updated: true`.
-   - When `domain_updated` is true, immediately re-call `plan_pddl` with the same problem PDDL — the planner will use the updated domain.
-   - The updated domain is **not** git-committed; use `git restore pddl/robot_domain.pddl` to return to the original for repeat experiments.
+# Troubleshoot
 
-## Tool use and Code synthesis
+**Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. Pass a 1–3 sentence `failure_context` describing what was tried and why it failed. The tool captures both cameras, attaches the current domain, and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"*
+
+- If the VQA response includes a new PDDL domain, the tool saves it over `pddl/robot_domain.pddl` (backing up the original to `robot_domain.pddl.bak`) and returns `domain_updated: true`.
+- When `domain_updated` is true, immediately re-call `plan_pddl` with the same problem PDDL — the planner will use the updated domain.
+- The updated domain is **not** git-committed; use `git restore pddl/robot_domain.pddl` to return to the original for repeat experiments.
+
+# Tool use and Code synthesis
 1. The agentic coder should prefer using the MCP server to control the robot, as it should be more reliable and consistent.
 2. **When a tool returns "The user did not allow…", treat it as a deliberate user decision.** Do not attempt to enable the feature by modifying config, setting environment variables, or changing code. Accept the limitation and adapt the plan to work without it.
 3. If no appropriate function or tool is missing, the agentic coder should modify the MCP server code itself while testing. For instance, if you want the robot to grasp something, and the function does not exist, you should add the function to the MCP server code and test it. Same goes for moving forward, turning and etc.
 3. Inspect the logs of the MCP server for debugging. The logs are available at `mcp_robot/logs/mcp_server.log`.
-4. If the action verdict is NO or PARTIAL, or a step produces an unexpected null result (e.g. a scan detects nothing despite the target being expected in the scene), stop and answer: Could there be a problem in the code? Is there an unmet environmental condition visible in the camera frames? Should you fix either before moving on?
-   - If the failure or null result looks like a missing precondition, action, or effect rather than a code bug, edit `pddl/robot_domain.pddl` and re-run `plan_pddl` with the corrected domain before continuing.
+4. If the action verdict is NO or PARTIAL, or a step produces an unexpected null result (e.g. a scan detects nothing despite the target being expected in the scene), stop and check: is this a code bug, or a missing precondition/action in the domain? See the **Troubleshoot** section for next steps.
 5. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
 6. **Prefer slower, longer motions over fast, short ones.** High speeds cause the robot to jitter and overshoot, making outcomes harder to control and verify. Slower and larger moves also produce clearer visual changes, making them easier for the Visual Temporal Reasoning model to assess correctly.
 7. **Minimum motor speed is 15.** Never pass a speed below 15 to any motor tool. Below this threshold motion is too slow to be reliably detected by the CV pipeline, making it impossible to verify whether the action succeeded.
 8. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
 
-## Experience Memory Workflow
+# Experience Memory Workflow
 
 This project uses `mcp-memory-service` (`experience-memory` MCP server) to accumulate robot learnings across sessions. The DB lives at `memory/experiences.db`.
 
@@ -68,7 +70,7 @@ This project uses `mcp-memory-service` (`experience-memory` MCP server) to accum
 **Skill extraction:** when you have enough consolidated learnings, use `memory_list` to pull recent memories and synthesize the patterns. Prefer encoding the lesson as **code** (more precise, cheaper to run). Only create a **skill** when code can't solve it — i.e. when the lesson is a playbook: a class of situations requiring judgment, reflection, or a sequence of code changes rather than a single repeatable action.
 
 
-## Local VQA (Ollama / Qwen) — Human Review Pause
+# Local VQA (Ollama / Qwen) — Human Review Pause
 
 When `VISION_BACKEND=ollama` is set, the local Qwen model is used for VQA instead of Gemini. After every motor-action tool call (`drive`, `drive_degrees`, `move_arm`, `control_gripper`, `put`, `move_motor`):
 
@@ -78,7 +80,7 @@ When `VISION_BACKEND=ollama` is set, the local Qwen model is used for VQA instea
 
 Skip the pause when using Gemini (`VISION_BACKEND=gemini` or `VISION_BACKEND=auto` with Gemini succeeding).
 
-## Technical Details
+# Technical Details
 
 1. The MCP runs in virtual environment.
 2. The MCP server hot-reloads on code changes.
