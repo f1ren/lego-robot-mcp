@@ -1716,7 +1716,9 @@ def plan_pddl(problem_pddl: str) -> dict:
     """
     Run the PDDL task planner and return a grounded action sequence.
 
-    The robot domain is fixed (pddl/robot_domain.pddl) and defines five actions:
+    The robot domain (pddl/robot_domain.pddl, or pddl/robot_domain_fixed.pddl
+    when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
+    defines five actions:
       - navigate     ?from ?to         → navigate_to
       - open-gripper                   → control_gripper(open)
       - lower-arm                      → lower_arm
@@ -1799,17 +1801,20 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     """
     Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
 
-    Captures the current robot view and external camera, reads pddl/robot_domain.pddl,
-    then asks:
+    Captures the current robot view and external camera, reads the active domain
+    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl), then
+    asks:
         "What seems to be the problem? Is there anything missing from the domain
          formalization? If so, suggest a fixed domain."
 
-    If the VQA response contains a new PDDL domain, it is saved over
-    pddl/robot_domain.pddl (original backed up to robot_domain.pddl.bak).
-    The next call to plan_pddl will use the updated domain.
+    If the VQA response contains a new PDDL domain, it is saved to
+    pddl/robot_domain_fixed.pddl. pddl/robot_domain.pddl (the git-tracked
+    original) is never modified. The next call to plan_pddl will use the
+    updated domain.
 
-    NOTE: The updated domain is intentionally NOT committed to git so the
-    experiment can be repeated from the original domain (git restore pddl/robot_domain.pddl).
+    NOTE: pddl/robot_domain_fixed.pddl is gitignored and never committed.
+    Delete it (rm pddl/robot_domain_fixed.pddl) to return to the original
+    domain for a repeat experiment.
 
     Args:
         failure_context: 1-3 sentences on what was tried and why it failed.
@@ -1819,13 +1824,16 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
         domain_updated — True if a new domain was extracted and saved
         new_domain     — new domain text if domain_updated, else null
     """
-    import shutil
     from mcp_robot import planner as planner_mod
 
     log.info("[TOOL] consult_vqa_for_pddl_domain context=%r", failure_context)
 
-    # Read the current domain
-    domain_path = planner_mod.DOMAIN_PATH
+    # Read the currently active domain (fixed override takes precedence)
+    domain_path = (
+        planner_mod.DOMAIN_FIXED_PATH
+        if os.path.exists(planner_mod.DOMAIN_FIXED_PATH)
+        else planner_mod.DOMAIN_PATH
+    )
     with open(domain_path) as f:
         domain_text = f.read()
 
@@ -1852,14 +1860,12 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     new_domain = _extract_pddl_domain(vqa_response)
     domain_updated = False
     if new_domain:
-        backup_path = domain_path + ".bak"
-        shutil.copy2(domain_path, backup_path)
-        with open(domain_path, "w") as f:
+        with open(planner_mod.DOMAIN_FIXED_PATH, "w") as f:
             f.write(new_domain)
         domain_updated = True
         log.info(
-            "consult_vqa_for_pddl_domain: new domain saved to %s (backup → %s)",
-            domain_path, backup_path,
+            "consult_vqa_for_pddl_domain: new domain saved to %s (original %s untouched)",
+            planner_mod.DOMAIN_FIXED_PATH, planner_mod.DOMAIN_PATH,
         )
 
     return _ok({"vqa_response": vqa_response, "domain_updated": domain_updated, "new_domain": new_domain})

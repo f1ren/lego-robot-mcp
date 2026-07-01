@@ -9,15 +9,23 @@ from __future__ import annotations
 import os
 import tempfile
 
-DOMAIN_PATH = os.path.join(
+_PDDL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "pddl", "robot_domain.pddl",
+    "pddl",
 )
+DOMAIN_PATH = os.path.join(_PDDL_DIR, "robot_domain.pddl")
+
+# Experimental override written by consult_vqa_for_pddl_domain. When present,
+# solve() uses this instead of DOMAIN_PATH so the original, git-tracked domain
+# is never mutated. Gitignored; delete the file to fall back to DOMAIN_PATH.
+DOMAIN_FIXED_PATH = os.path.join(_PDDL_DIR, "robot_domain_fixed.pddl")
 
 
 def solve(problem_pddl: str) -> list[str]:
     """
-    Plan from the fixed robot domain + a caller-supplied problem string.
+    Plan from the robot domain + a caller-supplied problem string.
+
+    Uses DOMAIN_FIXED_PATH in place of DOMAIN_PATH when it exists.
 
     Returns a list of grounded action strings, e.g.
         ["(pick-up cup loc-table)", "(navigate loc-table loc-sink)", ...]
@@ -26,10 +34,11 @@ def solve(problem_pddl: str) -> list[str]:
     Raises ImportError if pyperplan is not installed.
     Raises RuntimeError if the domain file is missing.
     """
-    if not os.path.exists(DOMAIN_PATH):
-        raise RuntimeError(f"PDDL domain file not found: {DOMAIN_PATH}")
+    domain_path = DOMAIN_FIXED_PATH if os.path.exists(DOMAIN_FIXED_PATH) else DOMAIN_PATH
+    if not os.path.exists(domain_path):
+        raise RuntimeError(f"PDDL domain file not found: {domain_path}")
 
-    with open(DOMAIN_PATH) as f:
+    with open(domain_path) as f:
         domain_pddl = f.read()
 
     return _solve_pddl(domain_pddl, problem_pddl)
