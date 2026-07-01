@@ -1803,9 +1803,9 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
 
     Captures the current robot view and external camera, reads the active domain
     (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl), then
-    asks:
-        "What seems to be the problem? Is there anything missing from the domain
-         formalization? If so, suggest a fixed domain."
+    asks the question in vision.CONSULT_DOMAIN_QUESTION (shared with
+    tests/vqa/pddl_consult_test.py, which replays this same prompt against
+    saved images so wording changes can be tried without a connected robot).
 
     If the VQA response contains a new PDDL domain, it is saved to
     pddl/robot_domain_fixed.pddl. pddl/robot_domain.pddl (the git-tracked
@@ -1846,8 +1846,7 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     ]
 
     prompt = (
-        "QUESTION: What seems to be the problem? Is there anything missing from "
-        "the domain formalization? If so, suggest a fixed domain.\n\n"
+        f"{vision.CONSULT_DOMAIN_QUESTION}\n\n"
         f"CONTEXT: {failure_context}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"

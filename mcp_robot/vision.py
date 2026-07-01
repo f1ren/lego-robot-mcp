@@ -27,6 +27,27 @@ _CAMERA_LABELS = {
     "droidcam":  "external cam — third-person view (overhead or side angle showing the whole robot)",
 }
 
+# Question half of the consult_vqa_for_pddl_domain prompt (server.py). Kept
+# free of scenario-specific vocabulary — do not hardcode words that hint at
+# any particular fix — so the same wording generalizes across unrelated
+# failures instead of only working on the case it was tuned against. Iterate
+# on this against saved images with tests/vqa/pddl_consult_test.py (imports
+# this same constant) before changing it here — both consumers share this
+# one string so they can't drift apart.
+CONSULT_DOMAIN_QUESTION = (
+    "QUESTION: First, describe everything visible in both images in full — "
+    "every object, surface, marking, and condition — without pre-filtering for "
+    "what seems relevant to the task. The CONTEXT below is the operator's "
+    "working theory of what went wrong; it may be incomplete, so verify it "
+    "against what you actually see rather than assuming it is complete or "
+    "correct. Then, grounded strictly in your description, explain what seems "
+    "to be the problem. Do not invent an action that merely restates a verb "
+    "from the task (e.g. do not add a step just because the goal says 'lift') "
+    "— any domain gap you propose must be traceable to something specific you "
+    "pointed out. Is there anything missing from the domain formalization? If "
+    "so, suggest a fixed domain."
+)
+
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper). The gripper defines the robot's front.\n"
