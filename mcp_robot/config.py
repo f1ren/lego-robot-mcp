@@ -132,6 +132,26 @@ SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # cameras within this time window (seconds).
 SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "1.0"))
 
+# ── Merged (tiled) task video ─────────────────────────────────────────────────
+# compile_video.py --camera merged (or compile_video(camera="merged")) tiles
+# the two cameras plus a subtitle card into one video:
+#   left-top = subtitle (observation, then action) on black
+#   left-bottom = front (Pi) camera
+#   right = external (DroidCam) camera, full column height
+# MERGE_CELL_HEIGHT is the height of each left-column pane; cell width is
+# derived from the Pi camera's native aspect ratio. The right pane is scaled
+# to double that height (to fill the column) at the DroidCam's native aspect.
+MERGE_CELL_HEIGHT = int(os.getenv("MERGE_CELL_HEIGHT", "360"))
+MERGE_FPS = float(os.getenv("MERGE_FPS", "15.0"))
+# Segments from either camera within this many seconds of each other are
+# treated as one "scene" (tiled together into one clip) rather than being
+# sequential scenes. Derived from the recorder's own pre-roll/cooldown/
+# cross-trigger knobs so both cameras' segments for the same action reunite.
+MERGE_SCENE_GAP_S = float(os.getenv(
+    "MERGE_SCENE_GAP_S",
+    str(SEGMENT_CROSS_TRIGGER_WINDOW + SEGMENT_PREROLL_S + SEGMENT_COOLDOWN_S),
+))
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))
 

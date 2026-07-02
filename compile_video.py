@@ -8,12 +8,13 @@ Usage:
     ./compile_video.py 20260507_121641
     ./compile_video.py 1746613200.0
     ./compile_video.py 1746613200.0 --camera pi_camera
+    ./compile_video.py 1746613200.0 --camera merged
 """
 import argparse
 import logging
 
 from mcp_robot import config
-from mcp_robot.video_compiler import compile_task_video
+from mcp_robot.video_compiler import compile_merged_video, compile_task_video
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -21,11 +22,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser(description="Compile a task video from recorded motion segments.")
     parser.add_argument("since", help="Start timestamp (log format, folder format, or UNIX float)")
-    parser.add_argument("--camera", choices=["droidcam", "pi_camera"], default="droidcam",
-                        help="Camera whose segments to compile (default: droidcam)")
+    parser.add_argument("--camera", choices=["droidcam", "pi_camera", "merged"], default="droidcam",
+                        help="Camera whose segments to compile, or 'merged' to tile both cameras "
+                             "plus subtitles into one video (default: droidcam)")
     args = parser.parse_args()
 
-    result = compile_task_video(args.since, config.SEGMENT_MANIFEST, args.camera)
+    if args.camera == "merged":
+        result = compile_merged_video(args.since, config.SEGMENT_MANIFEST)
+    else:
+        result = compile_task_video(args.since, config.SEGMENT_MANIFEST, args.camera)
     if not result.ok:
         logging.error(result.error)
         return 1
