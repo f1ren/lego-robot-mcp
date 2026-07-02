@@ -9,11 +9,12 @@ tool uses — so edit it there and re-run this script until the model actually
 spots the missing domain element; the fix then applies to both at once
 (the MCP server hot-reloads on code changes).
 
-The default images and --context reproduce a real failed call (2026-06-30
-16:09:56): robot wedged against a cabinet, blue cup not in view, scanning
-disabled. Gemini's reply invented a "raise-arm" action instead of flagging
-the real gap (no way to search/reposition when scanning is off) — use this
-script to iterate on the prompt until it does.
+The default images and --context reproduce a real failed call (2026-07-02
+10:59:25): robot facing a wall-mounted light switch at close range, blue cup
+still not in view after a full 360° scan_for_target sweep found nothing.
+Gemini's reply invented a "toggle-lights" action instead of flagging the
+real gap (no action to reposition/search elsewhere once a full scan comes up
+empty) — use this script to iterate on the prompt until it does.
 
 Usage:
   GEMINI_API_KEY=<key> python3 tests/vqa/pddl_consult_test.py
@@ -67,10 +68,10 @@ DEFAULT_DOMAIN   = REPO_ROOT / "pddl" / "robot_domain.pddl"
 DEFAULT_FRONT    = FIXTURES / "pi_camera.jpg"
 DEFAULT_EXTERNAL = FIXTURES / "droidcam.jpg"
 DEFAULT_CONTEXT  = (
-    "The robot needs to lift a blue cup but cannot see it in the current camera "
-    "frame. Scanning by rotation is disabled. Neither the external camera nor "
-    "the front camera shows the blue cup — the robot is near a wall and the cup "
-    "is somewhere in the room but not in view."
+    "Task: lift the blue cup. get_robot_state found no cup in front camera view, "
+    "and a full 360° scan_for_target sweep (YOLO class 'cup') also found nothing. "
+    "External camera shows a wooden-floor room corner with no cup visible; front "
+    "camera shows a wall-mounted light switch at close range."
 )
 
 
