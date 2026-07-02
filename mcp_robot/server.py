@@ -330,6 +330,7 @@ def _with_change_analysis(
     try:
         result = action_fn()
     except Exception as exc:
+        log.error("[TOOL] %s error: %s", action_desc, exc, exc_info=True)
         if stop_event:
             stop_event.set()
         if bg_thread:
@@ -869,7 +870,7 @@ def check_grasp_readiness(
         )
         return [TextContent(type="text", text=result.to_text())]
     except Exception as exc:
-        log.warning("[TOOL] check_grasp_readiness error: %s", exc)
+        log.error("[TOOL] check_grasp_readiness error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -1015,7 +1016,7 @@ def scan_for_target(
             )))
         return content
     except Exception as exc:
-        log.warning("[TOOL] scan_for_target error: %s", exc, exc_info=True)
+        log.error("[TOOL] scan_for_target error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -1349,7 +1350,7 @@ def navigate_to(
             )
 
     except Exception as exc:
-        log.warning("[TOOL] navigate_to error: %s", exc, exc_info=True)
+        log.error("[TOOL] navigate_to error: %s", exc, exc_info=True)
         step_logs.append(f"ERROR: {exc}")
         outcome = "error"
 
@@ -1514,7 +1515,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
         return content
 
     except Exception as exc:
-        log.warning("[TOOL] locate_object error: %s", exc, exc_info=True)
+        log.error("[TOOL] locate_object error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
