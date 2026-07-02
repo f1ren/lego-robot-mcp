@@ -640,6 +640,31 @@ def _ollama_ask_with_images(
     return text
 
 
+# Minimum VLM confidence required before a locate_object_vlm detection is
+# considered actionable. Below this, the caller must not act on the
+# detection — but the achieved certainty is still reported (see
+# LowConfidenceDetection) rather than being collapsed into a flat "not found".
+_LOCATE_CONFIDENCE_THRESHOLD = 0.95
+
+
+class LowConfidenceDetection(Exception):
+    """A candidate object was found by locate_object_vlm, but its confidence
+    was at or below _LOCATE_CONFIDENCE_THRESHOLD.
+
+    Distinct from a plain "not found" (None) so callers can tell the MCP
+    caller the actual certainty achieved instead of claiming nothing was seen.
+    """
+
+    def __init__(self, description: str, confidence: float, threshold: float = _LOCATE_CONFIDENCE_THRESHOLD):
+        self.description = description
+        self.confidence = confidence
+        self.threshold = threshold
+        super().__init__(
+            f"Only {confidence:.0%} certainty was achieved for '{description}' — "
+            f"need at least {threshold:.0%} certainty to act."
+        )
+
+
 def locate_object_vlm(
     bgr: np.ndarray,
     description: str,
@@ -653,7 +678,9 @@ def locate_object_vlm(
       - hsv_lo / hsv_hi: OpenCV HSV lower/upper bounds (H 0–179, S 0–255, V 0–255)
       - expected_area_frac: approximate fraction of image pixels the object occupies
 
-    Returns None if the object is not found or the API is unavailable.
+    Returns None if the object is not found at all. Raises LowConfidenceDetection
+    if a candidate was found but confidence is at or below
+    _LOCATE_CONFIDENCE_THRESHOLD. Raises RuntimeError on API/parsing failures.
     """
     import json
     import re
@@ -760,10 +787,10 @@ def locate_object_vlm(
         "locate_object_vlm: bbox=[%d,%d,%d,%d] hsv=[%d-%d,%d+,%d+] area_frac=%.4f conf=%.2f note=%r",
         x1, y1, x2, y2, hue_lo, hue_hi, sat_min, val_min, area_frac, confidence, note,
     )
-    if confidence <= 0.95:
-        log.info("locate_object_vlm: '%s' confidence %.2f below threshold 0.95 — treating as not found",
-                 description, confidence)
-        return None
+    if confidence <= _LOCATE_CONFIDENCE_THRESHOLD:
+        log.info("locate_object_vlm: '%s' confidence %.2f at/below threshold %.2f — not acting",
+                 description, confidence, _LOCATE_CONFIDENCE_THRESHOLD)
+        raise LowConfidenceDetection(description, confidence)
     return (x1, y1, x2, y2), confidence, note, hsv_lo, hsv_hi, area_frac
 
 
@@ -859,6 +886,9 @@ def locate_object_hybrid(
     Returns (bbox, centroid, confidence, note) with pixel coords, where centroid
     is the CV-derived center (accurate) and bbox is the refined contour bbox.
     Falls back to the VLM rough bbox center if CV finds nothing.
+
+    Raises LowConfidenceDetection (propagated from locate_object_vlm) if a
+    candidate was found but below the confidence threshold required to act.
     """
     result = locate_object_vlm(bgr, description)
     if result is None:
