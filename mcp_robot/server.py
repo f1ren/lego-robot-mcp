@@ -85,6 +85,10 @@ _last_target_free_text: str = ""
 # plan the robot was actually following. None means plan_pddl has not been
 # called yet this session, distinct from [] meaning it ran and found no plan.
 _last_plan: list[str] | None = None
+# The problem_pddl string that produced _last_plan. consult_vqa_for_pddl_domain
+# needs the original problem text (not just the grounded plan) to show the VQA
+# and to auto-replan once a fix is applied — None until plan_pddl is first called.
+_last_problem_pddl: str | None = None
 
 # ── initialization tracker ────────────────────────────────────────────────────
 
@@ -1797,8 +1801,12 @@ def plan_pddl(problem_pddl: str) -> dict:
     After receiving the plan, execute each step with the corresponding MCP tool.
 
     Raises an error if pyperplan is not installed or the domain file is missing.
+
+    The problem_pddl passed here is retained (as long as this call succeeds)
+    for consult_vqa_for_pddl_domain, which uses it to show the VQA the problem
+    alongside the domain and to auto-replan once a fix is applied.
     """
-    global _last_plan
+    global _last_plan, _last_problem_pddl
     log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
     from mcp_robot import planner
     try:
@@ -1809,6 +1817,7 @@ def plan_pddl(problem_pddl: str) -> dict:
         return _err(str(exc))
     log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
     _last_plan = actions
+    _last_problem_pddl = problem_pddl
     return _ok({"plan": actions})
 
 
@@ -1824,10 +1833,23 @@ def _format_plan(plan: list[str] | None) -> str:
     return ", ".join(plan)
 
 
-def _extract_pddl_domain(text: str) -> str | None:
-    """Extract the first balanced (define (domain ...)) block from free-form text."""
+def _format_problem(problem_pddl: str | None) -> str:
+    """Render the last plan_pddl problem for the consult_vqa_for_pddl_domain prompt.
+
+    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
+    """
+    if problem_pddl is None:
+        return "plan_pddl has not been called yet this session — no problem PDDL to show."
+    return problem_pddl
+
+
+def _extract_pddl_block(text: str, keyword: str) -> str | None:
+    """Extract the first balanced (define (<keyword> ...)) block from free-form text.
+
+    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
+    """
     import re
-    m = re.search(r'\(define\s+\(domain\b', text, re.IGNORECASE)
+    m = re.search(rf'\(define\s+\({keyword}\b', text, re.IGNORECASE)
     if not m:
         return None
     start = m.start()
@@ -1842,6 +1864,52 @@ def _extract_pddl_domain(text: str) -> str | None:
     return None
 
 
+def _extract_pddl_domain(text: str) -> str | None:
+    return _extract_pddl_block(text, "domain")
+
+
+def _extract_pddl_problem(text: str) -> str | None:
+    return _extract_pddl_block(text, "problem")
+
+
+def _consult_directive(updated_plan: list[str] | None, plan_error: str | None, no_problem_available: bool) -> str:
+    """Build the top-line instruction for consult_vqa_for_pddl_domain's return.
+
+    This is the field the caller is most likely to act on, so it states the
+    required next step in plain imperative language instead of leaving the
+    caller to notice domain_updated/new_domain/updated_plan on its own and
+    infer what to do — that's what silently failed to happen in practice
+    (session 6b41008b: domain_updated came back true, but nothing in the
+    response said so, and it was competing for attention against thousands of
+    characters of vqa_response prose containing its own, more actionable-looking
+    suggestion — the caller acted on the prose and never replanned).
+    """
+    if no_problem_available:
+        return (
+            "No problem PDDL is on record (plan_pddl has not been called yet "
+            "this session) — nothing was auto-replanned. Call plan_pddl "
+            "yourself once you have a problem_pddl, folding in any fix below."
+        )
+    if plan_error is not None:
+        return f"Auto-replan failed: {plan_error}. Resolve this before proceeding."
+    if not updated_plan:
+        return (
+            "Replanned automatically against the fix below — still no solution "
+            "(empty plan). The gap may not be fully resolved; investigate "
+            "further or consult again with more context."
+        )
+    return (
+        "EXECUTE updated_plan below — it was replanned automatically against "
+        "the fix below and supersedes any plan from an earlier plan_pddl call. "
+        "Do not reuse an older plan or hand-construct steps. If updated_plan "
+        "contains an action with no corresponding MCP tool, decide whether an "
+        "existing tool already produces the same physical effect (e.g. a "
+        "lighting action may map to click_button) or a new tool needs to be "
+        "written per CLAUDE.md's Tool Use rules — this tool does not attempt "
+        "that mapping itself."
+    )
+
+
 @mcp.tool()
 def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     """
@@ -1849,15 +1917,24 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
 
     Captures the current robot view and external camera, reads the active domain
     (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
-    the plan from the most recent plan_pddl call, then asks the question in
-    vision.CONSULT_DOMAIN_QUESTION (shared with tests/vqa/pddl_consult_test.py,
-    which replays this same prompt against saved images so wording changes can
-    be tried without a connected robot).
+    both the problem PDDL and grounded plan from the most recent plan_pddl call,
+    then asks the question in vision.CONSULT_DOMAIN_QUESTION (shared with
+    tests/vqa/pddl_consult_test.py, which replays this same prompt against saved
+    images so wording changes can be tried without a connected robot).
 
-    If the VQA response contains a new PDDL domain, it is saved to
-    pddl/robot_domain_fixed.pddl. pddl/robot_domain.pddl (the git-tracked
-    original) is never modified. The next call to plan_pddl will use the
-    updated domain.
+    The VQA may fix the domain (general actions/predicates), the problem (this
+    task's objects/init/goal), or both — whichever block(s) are present in its
+    response are extracted and applied. A new domain is saved to
+    pddl/robot_domain_fixed.pddl (pddl/robot_domain.pddl, the git-tracked
+    original, is never modified). A new problem is used for the replan below
+    but is NOT persisted anywhere — re-supply it to any later plan_pddl call.
+
+    This tool then immediately replans — calling plan_pddl itself against
+    whatever domain/problem are now active — so the caller never has to
+    remember that as a separate step. "directive" and "updated_plan" are the
+    primary output and are placed first in the response for that reason;
+    "vqa_response" and the rest are supporting detail, not the required next
+    action.
 
     NOTE: pddl/robot_domain_fixed.pddl is gitignored and never committed.
     Delete it (rm pddl/robot_domain_fixed.pddl) to return to the original
@@ -1867,9 +1944,15 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
         failure_context: 1-3 sentences on what was tried and why it failed.
 
     Returns:
-        vqa_response   — raw VQA model text
-        domain_updated — True if a new domain was extracted and saved
-        new_domain     — new domain text if domain_updated, else null
+        directive       — required next action, in plain imperative language
+        updated_plan    — plan from auto-replanning against the fix, or null
+                           if no problem PDDL was available to replan with
+        plan_error      — present only if the auto-replan itself failed
+        vqa_response    — raw VQA model text
+        domain_updated  — True if a new domain was extracted and saved to disk
+        new_domain      — new domain text if domain_updated, else null
+        problem_updated — True if a new problem was extracted from the response
+        new_problem     — new problem text if problem_updated, else null
     """
     from mcp_robot import planner as planner_mod
 
@@ -1899,7 +1982,9 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
         f"CURRENT PLAN: {_format_plan(_last_plan)}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"
-        f"{domain_text}"
+        f"{domain_text}\n\n"
+        "...and the following PDDL problem (this task's objects/init/goal):\n\n"
+        f"{_format_problem(_last_problem_pddl)}"
     )
 
     vqa_response = vision.ask_with_images(prompt, labeled_images)
@@ -1916,7 +2001,48 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
             planner_mod.DOMAIN_FIXED_PATH, planner_mod.DOMAIN_PATH,
         )
 
-    return _ok({"vqa_response": vqa_response, "domain_updated": domain_updated, "new_domain": new_domain})
+    # Extract a new problem from the response if present. Unlike the domain,
+    # this is never written to disk — it only feeds the replan below and is
+    # returned so the caller can pass it to plan_pddl itself afterward.
+    new_problem = _extract_pddl_problem(vqa_response)
+    problem_updated = new_problem is not None
+
+    # Auto-replan against whatever is now active: the just-written domain (if
+    # any — planner.solve() re-reads DOMAIN_FIXED_PATH/DOMAIN_PATH from disk on
+    # every call, so it picks up the write above for free) and the VQA-refined
+    # problem if one came back, else whatever plan_pddl was last called with.
+    # This is what makes the fix actually actionable — without it,
+    # domain_updated/new_domain are inert facts the caller has to notice and
+    # act on unprompted, which is the exact failure this tool exists to close.
+    replan_problem = new_problem if new_problem else _last_problem_pddl
+    updated_plan: list[str] | None = None
+    plan_error: str | None = None
+    if replan_problem is not None:
+        log.info(
+            "consult_vqa_for_pddl_domain: auto-replanning (problem source: %s)",
+            "VQA-refined problem" if new_problem else "last plan_pddl call",
+        )
+        replan_result = plan_pddl(replan_problem)
+        if replan_result["ok"]:
+            updated_plan = replan_result["plan"]
+        else:
+            plan_error = replan_result["error"]
+            log.info("consult_vqa_for_pddl_domain: auto-replan failed: %s", plan_error)
+    else:
+        log.info("consult_vqa_for_pddl_domain: no problem_pddl on record — auto-replan skipped")
+
+    result = {
+        "directive": _consult_directive(updated_plan, plan_error, replan_problem is None),
+        "updated_plan": updated_plan,
+        "vqa_response": vqa_response,
+        "domain_updated": domain_updated,
+        "new_domain": new_domain,
+        "problem_updated": problem_updated,
+        "new_problem": new_problem,
+    }
+    if plan_error is not None:
+        result["plan_error"] = plan_error
+    return _ok(result)
 
 
 # ── background streaming ──────────────────────────────────────────────────────
