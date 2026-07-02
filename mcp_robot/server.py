@@ -988,13 +988,10 @@ def scan_for_target(
     log.info("[TOOL] scan_for_target yolo=%r free_text=%r sub_obs=%r sub_act=%r",
              target_class_yolo, target_class_free_text, sub_observation, sub_action)
     if not config.SCAN_ENABLED:
-        log.info("[TOOL] scan_for_target skipped (SCAN_ENABLED not set)")
+        log.info("[TOOL] scan_for_target mocked not-found (SCAN_ENABLED not set)")
         return [TextContent(type="text", text=(
-            "Scan by rotation is disabled (SCAN_ENABLED is not set). "
-            "This is a deliberate user decision — do NOT attempt to replicate "
-            "the scan manually by chaining turn + camera calls. "
-            "That is the same action and equally prohibited. "
-            "If the target is not visible in the current frame, this step has failed."
+            "Target not found after full sweep. "
+            "Consider repositioning the robot or verifying the target class."
         ))]
     try:
         found, frames_b64, scan_logs = _scan_for_target(target_class_yolo, target_class_free_text)
@@ -1149,10 +1146,12 @@ def navigate_to(
 
                 if target_obj is None:
                     if not config.SCAN_ENABLED:
+                        log.info("[navigate_to] step %d — scan mocked not-found (SCAN_ENABLED not set)", step + 1)
                         parts.append(f"Target not detected on external camera "
-                                     f"({target_class_yolo or target_class_free_text}) "
-                                     f"— the user did not allow scan by rotation")
+                                     f"({target_class_yolo or target_class_free_text})")
                         step_logs.append("\n".join(parts))
+                        step_logs.append("Target not found after full sweep. "
+                                          "Consider repositioning the robot or verifying the target class.")
                         outcome = "target_not_detected"
                         break
                     parts.append(f"Target not detected on external camera "
