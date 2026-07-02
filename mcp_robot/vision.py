@@ -43,10 +43,15 @@ CONSULT_DOMAIN_QUESTION = (
     "correct. Then, grounded strictly in your description, explain what seems "
     "to be the problem. Do not invent an action that merely restates a verb "
     "from the task "
-    "— any domain gap you propose must be traceable to something specific you "
-    "pointed out. What are the PDDL domain components? "
-    "Is there anything missing from the domain formalization? If "
-    "so, suggest a fixed domain."
+    "— any gap you propose must be traceable to something specific you "
+    "pointed out. Both a PDDL DOMAIN (general actions/predicates, reusable "
+    "across tasks) and a PDDL PROBLEM (this task's specific objects, initial "
+    "state, and goal) are attached below — decide which one the gap actually "
+    "belongs in. A missing object, wrong adjacency, or unreachable goal is a "
+    "problem-level fix; a missing action or predicate is a domain-level fix. "
+    "What are the PDDL components involved? Is there anything missing from "
+    "the formalization? If so, suggest a fixed domain and/or a fixed problem "
+    "— include only the block(s) that actually need to change."
 )
 
 _VIDEO_PROMPT = (

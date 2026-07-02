@@ -28,14 +28,19 @@ Usage:
       --plan "(navigate loc-start loc-table)" --plan "(open-gripper)" \\
       --plan "(lower-arm)" --plan "(pick-up cup loc-table)"
 
-  # Write out the suggested domain if the response contains one
-  python3 tests/vqa/pddl_consult_test.py --save-domain /tmp/suggested_domain.pddl
+  # Write out the suggested domain and/or problem if the response contains them
+  python3 tests/vqa/pddl_consult_test.py \\
+      --save-domain /tmp/suggested_domain.pddl --save-problem /tmp/suggested_problem.pddl
+
+  # Simulate consult_vqa_for_pddl_domain being called before any plan_pddl
+  # call this session (no problem PDDL on record yet)
+  python3 tests/vqa/pddl_consult_test.py --problem ""
 
   # Run the same prompt/images N times to check how consistently it lands on
   # the intended fix before treating the wording as settled. --expect checks
-  # only the suggested domain block, not the surrounding prose — a response
-  # can name the right concept while describing the scene and still ship a
-  # domain fix about something unrelated. It's a substring tally only (not
+  # only the suggested domain/problem blocks, not the surrounding prose — a
+  # response can name the right concept while describing the scene and still
+  # ship a fix about something unrelated. It's a substring tally only (not
   # sent to the model) — keep it experiment-local rather than encoding it
   # into CONSULT_DOMAIN_QUESTION, which should stay general.
   python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
@@ -73,6 +78,21 @@ DEFAULT_CONTEXT  = (
     "External camera shows a wooden-floor room corner with no cup visible; front "
     "camera shows a wall-mounted light switch at close range."
 )
+# The actual problem_pddl in play for the 2026-07-02 10:59:25 incident above.
+DEFAULT_PROBLEM = (
+    "(define (problem lift-cup)\n"
+    "  (:domain lego-robot)\n"
+    "  (:objects loc-start loc-cup cup)\n"
+    "  (:init\n"
+    "    (robot-at loc-start)\n"
+    "    (object-at cup loc-cup)\n"
+    "    (gripper-empty)\n"
+    "    (adjacent loc-start loc-cup)\n"
+    "    (adjacent loc-cup loc-start)\n"
+    "  )\n"
+    "  (:goal (holding cup))\n"
+    ")"
+)
 
 
 def format_plan(plan: list[str] | None) -> str:
@@ -84,7 +104,16 @@ def format_plan(plan: list[str] | None) -> str:
     return ", ".join(plan)
 
 
-def build_prompt(question: str, context: str, domain_text: str, plan: list[str] | None) -> str:
+def format_problem(problem_pddl: str | None) -> str:
+    """Copied verbatim from mcp_robot/server.py::_format_problem."""
+    if problem_pddl is None:
+        return "plan_pddl has not been called yet this session — no problem PDDL to show."
+    return problem_pddl
+
+
+def build_prompt(
+    question: str, context: str, domain_text: str, problem_text: str | None, plan: list[str] | None,
+) -> str:
     """Mirrors the prompt assembly in consult_vqa_for_pddl_domain (server.py)."""
     return (
         f"{question}\n\n"
@@ -92,13 +121,15 @@ def build_prompt(question: str, context: str, domain_text: str, plan: list[str] 
         f"CURRENT PLAN: {format_plan(plan)}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"
-        f"{domain_text}"
+        f"{domain_text}\n\n"
+        "...and the following PDDL problem (this task's objects/init/goal):\n\n"
+        f"{format_problem(problem_text)}"
     )
 
 
-def extract_pddl_domain(text: str) -> str | None:
-    """Copied verbatim from mcp_robot/server.py::_extract_pddl_domain."""
-    m = re.search(r'\(define\s+\(domain\b', text, re.IGNORECASE)
+def extract_pddl_block(text: str, keyword: str) -> str | None:
+    """Copied verbatim from mcp_robot/server.py::_extract_pddl_block."""
+    m = re.search(rf'\(define\s+\({keyword}\b', text, re.IGNORECASE)
     if not m:
         return None
     start = m.start()
@@ -111,6 +142,14 @@ def extract_pddl_domain(text: str) -> str | None:
             if depth == 0:
                 return text[start:i + 1]
     return None
+
+
+def extract_pddl_domain(text: str) -> str | None:
+    return extract_pddl_block(text, "domain")
+
+
+def extract_pddl_problem(text: str) -> str | None:
+    return extract_pddl_block(text, "problem")
 
 
 def load_image(path: Path) -> bytes:
@@ -176,8 +215,9 @@ def run_trial(
     labeled_bytes: list[tuple[str, bytes]],
     expect: list[str] | None,
     save_domain: str | None,
+    save_problem: str | None,
 ) -> tuple[bool, bool | None]:
-    """Run one Gemini call; return (domain_block_found, expect_hit_or_None)."""
+    """Run one Gemini call; return (domain_or_problem_block_found, expect_hit_or_None)."""
     if total > 1:
         print(f"\n{'=' * 70}\nTRIAL {index}/{total}\n{'=' * 70}")
 
@@ -189,6 +229,8 @@ def run_trial(
 
     new_domain = extract_pddl_domain(response)
     domain_found = bool(new_domain)
+    new_problem = extract_pddl_problem(response)
+    problem_found = bool(new_problem)
     print()
     if domain_found:
         print("[domain] response contains a PDDL domain block.")
@@ -201,18 +243,30 @@ def run_trial(
     else:
         print("[domain] no PDDL domain block found in the response.")
 
+    if problem_found:
+        print("[problem] response contains a PDDL problem block.")
+        if save_problem:
+            path = Path(save_problem if total == 1 else f"{save_problem}.{index}")
+            path.write_text(new_problem)  # type: ignore[arg-type]
+            print(f"[problem] saved to {path}")
+        else:
+            print("[problem] pass --save-problem PATH to write it out.")
+    else:
+        print("[problem] no PDDL problem block found in the response.")
+
     expect_hit: bool | None = None
     if expect:
-        # Checked against the suggested domain block only, not the surrounding
-        # prose: the model can name the right concept while describing the
-        # scene and still fail to encode it as an action/predicate (e.g. it
-        # mentioned a switch in its diagnosis, then shipped a domain fix about
-        # something else entirely) — matching on prose would call that a hit.
-        haystack = new_domain or ""
+        # Checked against the suggested domain/problem blocks only, not the
+        # surrounding prose: the model can name the right concept while
+        # describing the scene and still fail to encode it as an
+        # action/predicate/object (e.g. it mentioned a switch in its
+        # diagnosis, then shipped a fix about something else entirely) —
+        # matching on prose would call that a hit.
+        haystack = (new_domain or "") + "\n" + (new_problem or "")
         expect_hit = any(s.lower() in haystack.lower() for s in expect)
-        print(f"[expect] {'HIT' if expect_hit else 'miss'} in suggested domain — looked for: {', '.join(expect)}")
+        print(f"[expect] {'HIT' if expect_hit else 'miss'} in suggested domain/problem — looked for: {', '.join(expect)}")
 
-    return domain_found, expect_hit
+    return (domain_found or problem_found), expect_hit
 
 
 def main() -> None:
@@ -226,15 +280,21 @@ def main() -> None:
                           "'(navigate loc-start loc-table)'; repeatable, in plan order. "
                           "Omit to simulate consult_vqa_for_pddl_domain being called before "
                           "any plan_pddl call this session.")
+    ap.add_argument("--problem", default=DEFAULT_PROBLEM, metavar="PDDL",
+                     help="literal problem_pddl text (not a file path) from the most recent "
+                          "plan_pddl call being replayed. Pass '' to simulate "
+                          "consult_vqa_for_pddl_domain being called before any plan_pddl call "
+                          "this session.")
     ap.add_argument("--save-domain", metavar="PATH", help="if a response contains a new PDDL domain, write it here")
+    ap.add_argument("--save-problem", metavar="PATH", help="if a response contains a new PDDL problem, write it here")
     ap.add_argument("--repeat", type=int, default=1, metavar="N",
                      help="call Gemini N times with the identical prompt/images and tally results")
     ap.add_argument("--expect", action="append", metavar="SUBSTRING",
-                     help="case-insensitive substring to look for in the SUGGESTED PDDL DOMAIN block only "
-                          "(not the surrounding prose) — the model can name the right concept in its "
-                          "diagnosis without encoding it as an action/predicate, so matching on prose "
-                          "alone gives false positives. Repeatable; a trial counts as a hit if ANY match. "
-                          "Purely a local grading aid — never sent to the model.")
+                     help="case-insensitive substring to look for in the SUGGESTED PDDL DOMAIN/PROBLEM "
+                          "blocks only (not the surrounding prose) — the model can name the right concept "
+                          "in its diagnosis without encoding it as an action/predicate/object, so matching "
+                          "on prose alone gives false positives. Repeatable; a trial counts as a hit if ANY "
+                          "match. Purely a local grading aid — never sent to the model.")
     args = ap.parse_args()
 
     if not GEMINI_API_KEY:
@@ -246,16 +306,18 @@ def main() -> None:
     if not domain_path.exists():
         sys.exit(f"Domain file not found: {domain_path}")
     domain_text = domain_path.read_text()
+    problem_text = args.problem or None
 
     front_path, external_path = Path(args.front), Path(args.external)
     images = [("pi_camera", front_path), ("droidcam", external_path)]
     labeled_bytes = [(label, load_image(path)) for label, path in images]
 
-    prompt = build_prompt(QUESTION_TEXT, args.context, domain_text, args.plan)
+    prompt = build_prompt(QUESTION_TEXT, args.context, domain_text, problem_text, args.plan)
     print_call_summary(GEMINI_MODEL, domain_path, images, prompt)
 
     results = [
-        run_trial(i, args.repeat, GEMINI_MODEL, prompt, labeled_bytes, args.expect, args.save_domain)
+        run_trial(i, args.repeat, GEMINI_MODEL, prompt, labeled_bytes, args.expect,
+                  args.save_domain, args.save_problem)
         for i in range(1, args.repeat + 1)
     ]
 
