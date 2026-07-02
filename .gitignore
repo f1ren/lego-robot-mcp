@@ -16,8 +16,6 @@ output/
 tests/fixtures/*/annotated/
 
 
-pddl/robot_domain.pddl
-
 # VQA-suggested domain fix (consult_vqa_for_pddl_domain); overrides
 # robot_domain.pddl for plan_pddl when present — delete to reset
 pddl/robot_domain_fixed.pddl
