@@ -35,7 +35,7 @@ class TestGraspReadiness(unittest.TestCase):
         _load_model()  # pre-download weights if needed
 
     def check(self, bgr):
-        return self._check(bgr)
+        return self._check(bgr, target_class_yolo="ball")
 
     def test_not_ready_ball_far_from_robot(self):
         """Ball is in the bottom-right corner, robot is in centre — not ready."""

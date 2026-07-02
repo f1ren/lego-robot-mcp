@@ -23,16 +23,20 @@ Usage:
   python3 tests/vqa/pddl_consult_test.py \\
       --front /path/to/pi_camera.jpg --external /path/to/droidcam.jpg \\
       --context "The gripper closed on empty air; the cup was 5cm to the left of center." \\
-      --domain pddl/robot_domain.pddl.bak
+      --domain pddl/robot_domain.pddl.bak \\
+      --plan "(navigate loc-start loc-table)" --plan "(open-gripper)" \\
+      --plan "(lower-arm)" --plan "(pick-up cup loc-table)"
 
   # Write out the suggested domain if the response contains one
   python3 tests/vqa/pddl_consult_test.py --save-domain /tmp/suggested_domain.pddl
 
   # Run the same prompt/images N times to check how consistently it lands on
-  # the intended fix before treating the wording as settled. --expect is a
-  # substring tally only (not sent to the model) — keep it experiment-local
-  # rather than encoding it into CONSULT_DOMAIN_QUESTION, which should stay
-  # general.
+  # the intended fix before treating the wording as settled. --expect checks
+  # only the suggested domain block, not the surrounding prose — a response
+  # can name the right concept while describing the scene and still ship a
+  # domain fix about something unrelated. It's a substring tally only (not
+  # sent to the model) — keep it experiment-local rather than encoding it
+  # into CONSULT_DOMAIN_QUESTION, which should stay general.
   python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
 """
 from __future__ import annotations
@@ -70,11 +74,21 @@ DEFAULT_CONTEXT  = (
 )
 
 
-def build_prompt(question: str, context: str, domain_text: str) -> str:
+def format_plan(plan: list[str] | None) -> str:
+    """Copied verbatim from mcp_robot/server.py::_format_plan."""
+    if plan is None:
+        return "plan_pddl has not been called yet this session."
+    if not plan:
+        return "(empty) — the last plan_pddl call found no solution."
+    return ", ".join(plan)
+
+
+def build_prompt(question: str, context: str, domain_text: str, plan: list[str] | None) -> str:
     """Mirrors the prompt assembly in consult_vqa_for_pddl_domain (server.py)."""
     return (
         f"{question}\n\n"
         f"CONTEXT: {context}\n"
+        f"CURRENT PLAN: {format_plan(plan)}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"
         f"{domain_text}"
@@ -188,8 +202,14 @@ def run_trial(
 
     expect_hit: bool | None = None
     if expect:
-        expect_hit = any(s.lower() in response.lower() for s in expect)
-        print(f"[expect] {'HIT' if expect_hit else 'miss'} — looked for: {', '.join(expect)}")
+        # Checked against the suggested domain block only, not the surrounding
+        # prose: the model can name the right concept while describing the
+        # scene and still fail to encode it as an action/predicate (e.g. it
+        # mentioned a switch in its diagnosis, then shipped a domain fix about
+        # something else entirely) — matching on prose would call that a hit.
+        haystack = new_domain or ""
+        expect_hit = any(s.lower() in haystack.lower() for s in expect)
+        print(f"[expect] {'HIT' if expect_hit else 'miss'} in suggested domain — looked for: {', '.join(expect)}")
 
     return domain_found, expect_hit
 
@@ -200,12 +220,19 @@ def main() -> None:
     ap.add_argument("--front",    default=str(DEFAULT_FRONT), help="pi_camera (front) image")
     ap.add_argument("--external", default=str(DEFAULT_EXTERNAL), help="droidcam (external) image")
     ap.add_argument("--context",  default=DEFAULT_CONTEXT, help="failure_context text")
+    ap.add_argument("--plan", action="append", metavar="ACTION",
+                     help="one grounded PDDL action from the plan being replayed, e.g. "
+                          "'(navigate loc-start loc-table)'; repeatable, in plan order. "
+                          "Omit to simulate consult_vqa_for_pddl_domain being called before "
+                          "any plan_pddl call this session.")
     ap.add_argument("--save-domain", metavar="PATH", help="if a response contains a new PDDL domain, write it here")
     ap.add_argument("--repeat", type=int, default=1, metavar="N",
                      help="call Gemini N times with the identical prompt/images and tally results")
     ap.add_argument("--expect", action="append", metavar="SUBSTRING",
-                     help="case-insensitive substring to look for in each response, for a quick tally "
-                          "across --repeat trials (repeatable; a trial counts as a hit if ANY match). "
+                     help="case-insensitive substring to look for in the SUGGESTED PDDL DOMAIN block only "
+                          "(not the surrounding prose) — the model can name the right concept in its "
+                          "diagnosis without encoding it as an action/predicate, so matching on prose "
+                          "alone gives false positives. Repeatable; a trial counts as a hit if ANY match. "
                           "Purely a local grading aid — never sent to the model.")
     args = ap.parse_args()
 
@@ -223,7 +250,7 @@ def main() -> None:
     images = [("pi_camera", front_path), ("droidcam", external_path)]
     labeled_bytes = [(label, load_image(path)) for label, path in images]
 
-    prompt = build_prompt(QUESTION_TEXT, args.context, domain_text)
+    prompt = build_prompt(QUESTION_TEXT, args.context, domain_text, args.plan)
     print_call_summary(GEMINI_MODEL, domain_path, images, prompt)
 
     results = [

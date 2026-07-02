@@ -78,6 +78,14 @@ _last_target_robot_radius_px: float | None = None
 _last_target_yolo: str = ""
 _last_target_free_text: str = ""
 
+# ── last PDDL plan tracker ───────────────────────────────────────────────────
+# Stored by plan_pddl after every solve() call, including an empty result —
+# that's itself one of the two documented triggers for
+# consult_vqa_for_pddl_domain, which reads this to show the VQA model the
+# plan the robot was actually following. None means plan_pddl has not been
+# called yet this session, distinct from [] meaning it ran and found no plan.
+_last_plan: list[str] | None = None
+
 # ── initialization tracker ────────────────────────────────────────────────────
 
 _INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
@@ -758,7 +766,7 @@ def control_gripper(
             return _err(str(exc))
 
     # Gate: check grasp readiness before closing.
-    frame_result = cam_mod.capture_droidcam_still(annotate=False)
+    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
     import numpy as _np, cv2 as _cv2
     raw = base64.b64decode(frame_result["frame"])
     arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -843,7 +851,7 @@ def check_grasp_readiness(
     if not target_class_yolo or not target_class_free_text:
         return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
     try:
-        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         import numpy as _np, cv2 as _cv2
         arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1088,7 +1096,7 @@ def navigate_to(
 
             # ── 1. Capture external frame ─────────────────────────────────
             try:
-                frame_result = cam_mod.capture_droidcam_still(annotate=False)
+                frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
             except Exception as exc:
                 parts.append(f"Camera capture failed: {exc}")
                 step_logs.append("\n".join(parts))
@@ -1161,7 +1169,7 @@ def navigate_to(
                     # re-detect the target — it may now be in frame from the
                     # new heading.
                     try:
-                        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+                        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
                         raw_bytes = base64.b64decode(frame_result["frame"])
                         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
                         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1405,7 +1413,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     log.info("[TOOL] locate_object description=%r", description)
     try:
         # Capture external camera (unannotated — VLM should see the raw scene)
-        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+        frame_result = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         arr = np.frombuffer(raw, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1515,7 +1523,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
     log.info("[TOOL] get_external_camera_image")
     try:
-        result = cam_mod.capture_droidcam_still()
+        result = cam_mod.capture_droidcam_still(target_class_yolo="")
         viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
@@ -1593,7 +1601,7 @@ def capture_external_video_clip(
 
 @mcp.tool()
 def get_robot_state(
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> list[ImageContent | TextContent]:
     """
@@ -1604,11 +1612,12 @@ def get_robot_state(
     Args:
         target_class_yolo:      YOLO class to detect and annotate in the external
                                 camera frame. Supported values:
-                                  "cup"    → cup, bowl, bottle, vase  (default)
+                                  "cup"    → cup, bowl, bottle, vase
                                   "ball"   → sports ball, orange, apple
                                   "bottle" → bottle, cup, vase
                                   "any"    → most-forward object of any class
-                                Pass "" to skip YOLO.
+                                No default — state explicitly what you're
+                                looking for, or pass "" to skip YOLO.
         target_class_free_text: Free-text description for Gemini Flash when YOLO
                                 finds nothing (e.g. "light switch", "door handle").
                                 The detected object's angle from the robot's heading
@@ -1766,6 +1775,7 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Raises an error if pyperplan is not installed or the domain file is missing.
     """
+    global _last_plan
     log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
     from mcp_robot import planner
     try:
@@ -1775,7 +1785,20 @@ def plan_pddl(problem_pddl: str) -> dict:
     except RuntimeError as exc:
         return _err(str(exc))
     log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
+    _last_plan = actions
     return _ok({"plan": actions})
+
+
+def _format_plan(plan: list[str] | None) -> str:
+    """Render the last plan_pddl output for the consult_vqa_for_pddl_domain prompt.
+
+    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
+    """
+    if plan is None:
+        return "plan_pddl has not been called yet this session."
+    if not plan:
+        return "(empty) — the last plan_pddl call found no solution."
+    return ", ".join(plan)
 
 
 def _extract_pddl_domain(text: str) -> str | None:
@@ -1802,10 +1825,11 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
 
     Captures the current robot view and external camera, reads the active domain
-    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl), then
-    asks the question in vision.CONSULT_DOMAIN_QUESTION (shared with
-    tests/vqa/pddl_consult_test.py, which replays this same prompt against
-    saved images so wording changes can be tried without a connected robot).
+    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
+    the plan from the most recent plan_pddl call, then asks the question in
+    vision.CONSULT_DOMAIN_QUESTION (shared with tests/vqa/pddl_consult_test.py,
+    which replays this same prompt against saved images so wording changes can
+    be tried without a connected robot).
 
     If the VQA response contains a new PDDL domain, it is saved to
     pddl/robot_domain_fixed.pddl. pddl/robot_domain.pddl (the git-tracked
@@ -1837,9 +1861,10 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     with open(domain_path) as f:
         domain_text = f.read()
 
-    # Capture both cameras
+    # Capture both cameras. Unannotated: this is a general "what's going on"
+    # question, not a heading/grasp decision, and no single target class applies.
     front = cam_mod.capture_still()
-    ext = cam_mod.capture_droidcam_still()
+    ext = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
     labeled_images: list[tuple[str, str]] = [
         ("pi_camera", front["frame"]),
         ("droidcam", ext["frame"]),
@@ -1848,6 +1873,7 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     prompt = (
         f"{vision.CONSULT_DOMAIN_QUESTION}\n\n"
         f"CONTEXT: {failure_context}\n"
+        f"CURRENT PLAN: {_format_plan(_last_plan)}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"
         f"{domain_text}"

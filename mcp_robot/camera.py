@@ -690,8 +690,8 @@ def stream_droidcam_bgr(
 
 
 def capture_droidcam_still(
+    target_class_yolo: str,
     annotate: bool = True,
-    target_class_yolo: str = "cup",
     target_class_free_text: str = "",
 ) -> dict:
     """
@@ -704,13 +704,17 @@ def capture_droidcam_still(
     detected (see mcp_robot.heading).
 
     Args:
+        target_class_yolo:      YOLO class key to detect (e.g. "cup", "ball", "any").
+                                The detected object's angle relative to the robot's
+                                heading is included in the returned dict. Pass ""
+                                to skip object detection (heading arrow only, or
+                                no annotation at all if annotate=False). Every
+                                caller must decide explicitly — there is no
+                                sensible universal default.
         annotate:               If True (default), overlay the heading arrow. Pass
                                 False when the frame is destined for VLM change
                                 analysis to avoid the arrow causing spurious motion
                                 detections.
-        target_class_yolo:      YOLO class key to detect (e.g. "cup", "ball", "any").
-                                The detected object's angle relative to the robot's
-                                heading is included in the returned dict.
         target_class_free_text: Free-text description for Gemini Flash fallback when
                                 YOLO finds nothing (e.g. "light switch").
 

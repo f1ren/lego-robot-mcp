@@ -45,7 +45,7 @@ class TestYoloDetectAnnotate(unittest.TestCase):
         bgr = cv2.imread(str(CUP_IMG))
         self.assertIsNotNone(bgr, f"Could not load {CUP_IMG}")
 
-        objects = self._yolo_detect(bgr)
+        objects = self._yolo_detect(bgr, target_class="cup")
         print(f"\ndroidcam_cup.jpg: {len(objects)} YOLO detection(s)")
         for o in objects:
             print(f"  class={o.class_name!r}  conf={o.confidence:.2f}"

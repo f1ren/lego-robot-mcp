@@ -57,9 +57,12 @@ python3 tests/vqa/pddl_consult_test.py \
 
 # Run the same prompt/images N times before trusting a wording — Gemini is
 # stochastic, so one good response doesn't mean the wording is reliable.
-# --expect is a local substring tally only (never sent to the model); keep
-# scenario-specific hints out of QUESTION_TEXT itself so it stays reusable
-# across unrelated experiments.
+# --expect checks only the suggested domain block, not the surrounding prose
+# (a response can name the right concept while describing the scene and
+# still ship an unrelated domain fix — that's not a pass). It's a local
+# substring tally only (never sent to the model); keep scenario-specific
+# hints out of QUESTION_TEXT itself so it stays reusable across unrelated
+# experiments.
 python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
 ```
 

@@ -3,6 +3,7 @@
   ; Predicate structure constrains the search sufficiently without explicit types.
   (:requirements :strips)
 
+  ; Robot direction is managed by other tools, and is NOT relevant for high-level planning
   (:predicates
     (robot-at ?l)
     (object-at ?o ?l)
@@ -10,11 +11,13 @@
     (gripper-empty)
     (adjacent ?l1 ?l2)
     (arm-lowered)
+    (arm-raised)
     (gripper-open)
   )
 
   ; Move between two adjacent locations.  Declare (adjacent from to) for every
   ; navigable pair in the problem (:init).
+  ; Plan and execute a path that avoids obstacles, reverse and rotates when necessary.
   (:action navigate
     :parameters (?from ?to)
     :precondition (and (robot-at ?from) (adjacent ?from ?to))
@@ -37,7 +40,13 @@
   (:action lower-arm
     :parameters ()
     :precondition (and)
-    :effect (arm-lowered)
+    :effect (and (arm-lowered) (not (arm-raised)))
+  )
+
+  (:action lift-arm
+    :parameters (?o)
+    :precondition (and (holding ?o) (arm-lowered))
+    :effect (and (arm-raised) (not (arm-lowered)))
   )
 
   ; Grasp an object at the robot's current location.
