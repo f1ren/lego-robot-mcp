@@ -77,6 +77,11 @@ ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 # effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
 NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 
+# ── Button press (click_button pre-alignment) ────────────────────────────────
+# Max heading error (degrees) tolerated before click_button issues a turn
+# correction to square the robot up perpendicular to the switch/button.
+CLICK_ALIGN_TOLERANCE_DEG = float(os.getenv("CLICK_ALIGN_TOLERANCE_DEG", "10.0"))
+
 # ── Target scan (front-camera sweep when external camera can't see target) ───
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
 SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "360"))   # total arc to sweep

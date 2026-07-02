@@ -590,8 +590,74 @@ def turn(
     )
 
 
+def _square_up_to_target(
+    target_class_yolo: str,
+    target_class_free_text: str,
+    tolerance_deg: float,
+) -> dict | None:
+    """
+    Square the robot's heading up to within *tolerance_deg* of the target so
+    an upcoming forward press lands perpendicular to it.
+
+    Measures the target's angle off the robot's forward heading via the
+    external camera. If the target isn't visible at all, repositions with
+    navigate_to() (which scans and approaches automatically) and re-measures.
+    If visible but off-angle beyond tolerance_deg, issues a single turn()
+    correction — CLAUDE.md reserves turn() for exactly this: a small heading
+    fix once already within reach of the target.
+
+    Returns an error dict on failure, else None once aligned (or already was).
+    """
+    def _measure() -> float | None:
+        global _last_target_distance_px, _last_target_robot_radius_px
+        global _last_target_yolo, _last_target_free_text
+        frame_result = cam_mod.capture_droidcam_still(
+            target_class_yolo=target_class_yolo,
+            target_class_free_text=target_class_free_text,
+        )
+        _last_target_distance_px = frame_result.get("object_distance_px")
+        _last_target_robot_radius_px = frame_result.get("robot_radius_px")
+        _last_target_yolo = target_class_yolo
+        _last_target_free_text = target_class_free_text
+        return frame_result.get("object_angle_deg")
+
+    try:
+        angle_deg = _measure()
+        if angle_deg is None:
+            navigate_to(
+                target_class_yolo, target_class_free_text,
+                sub_observation="Switch not in view",
+                sub_action="Repositioning to switch",
+            )
+            angle_deg = _measure()
+    except Exception as exc:
+        return _err(f"click_button: alignment check failed: {exc}")
+
+    if angle_deg is None:
+        return _err(
+            f"click_button: could not locate the switch "
+            f"({target_class_yolo or target_class_free_text}) to verify "
+            "perpendicular alignment, even after navigate_to."
+        )
+
+    if abs(angle_deg) <= tolerance_deg:
+        return None
+
+    result = turn(
+        angle_deg,
+        speed=config.SPEED_MIN,
+        expected=f"robot rotates ~{abs(angle_deg):.0f}° to square up perpendicular to the switch",
+        context="click_button pre-press alignment: squaring up to the switch before pressing",
+        sub_observation="Switch off-angle",
+        sub_action="Squaring to switch",
+    )
+    return None if result.get("ok") else result
+
+
 @mcp.tool()
 def click_button(
+    target_class_yolo: str,
+    target_class_free_text: str,
     speed: int = 20,
     press_duration_s: float = 1.0,
     release_duration_s: float = 1.0,
@@ -599,30 +665,70 @@ def click_button(
     context: str = "",
 ) -> dict:
     """
-    Press and immediately release a button in one atomic motion, guaranteeing
-    the button is released within press_duration_s + release_duration_s seconds
-    — regardless of VLM validation latency.
+    Prepare and press a button/switch, then immediately release it.
 
-    Both the press and release run inside a **single RPi Python script**,
-    so there is no host round-trip and no VLM pause between them.  VLM
-    validation happens only once, after the button is already released.
+    Before the press, the robot:
+      1. Fully raises the arm and closes the gripper — clearing the switch
+         and presenting a compact pressing profile — verified together in
+         one before/after check (like put() bundles open-gripper + lift-arm).
+      2. Squares up to face the switch perpendicular: a single turn()
+         correction if the switch is visible but off-angle, or navigate_to()
+         first if it isn't visible at all.
 
-    Use this instead of two separate `drive` calls whenever the button
-    must be released within a fixed time window (e.g. < 10 s).
+    The press and release themselves still run inside a **single RPi Python
+    script**, so there is no host round-trip and no VLM pause between them —
+    guaranteeing the button is released within
+    press_duration_s + release_duration_s seconds of the press, regardless
+    of VLM validation latency. VLM validation of the press/release happens
+    only once, after the button is already released.
 
     Args:
-        speed:              Wheel speed 15–20. Positive = forward (into button).
-        press_duration_s:   Seconds driving forward to depress the button.
-        release_duration_s: Seconds driving backward to un-press the button.
-        expected:           What should visually happen (auto-generated if blank).
-        context:            Why this action is being taken and evaluation hints.
+        target_class_yolo:      YOLO class for the button/switch (e.g. "button").
+                                REQUIRED — must be non-empty.
+        target_class_free_text: Free-text description (e.g. "white wall switch"),
+                                used to verify heading and as a VLM fallback.
+                                REQUIRED — must be non-empty.
+        speed:               Wheel speed 15–20. Positive = forward (into button).
+        press_duration_s:    Seconds driving forward to depress the button.
+        release_duration_s:  Seconds driving backward to un-press the button.
+        expected:            What should visually happen during the press/release
+                             (auto-generated if blank).
+        context:             Why this action is being taken and evaluation hints.
     """
     log.info(
-        "[TOOL] click_button speed=%r press=%.2fs release=%.2fs",
-        speed, press_duration_s, release_duration_s,
+        "[TOOL] click_button yolo=%r free_text=%r speed=%r press=%.2fs release=%.2fs",
+        target_class_yolo, target_class_free_text, speed, press_duration_s, release_duration_s,
     )
+    if not target_class_yolo or not target_class_free_text:
+        return _err(
+            "target_class_yolo and target_class_free_text must both be non-empty — "
+            "describe the button/switch so the robot can verify it is squarely "
+            "facing it before pressing."
+        )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+
+    # 1. Fully raise the arm + close the gripper — clears the switch and
+    #    presents a compact pressing profile.
+    prep_result = _with_change_analysis(
+        "prep for button press (raise arm fully + close gripper)",
+        "arm raises to its fully raised position and gripper jaws close into "
+        "a compact pressing profile; wheels unchanged",
+        robot_mod.prep_for_press,
+        annotate=False,
+    )
+    if not prep_result.get("ok"):
+        return prep_result
+
+    # 2. Square up to the switch: navigate_to if not visible, else a single
+    #    turn correction if off-angle beyond tolerance.
+    align_err = _square_up_to_target(
+        target_class_yolo, target_class_free_text, config.CLICK_ALIGN_TOLERANCE_DEG,
+    )
+    if align_err is not None:
+        return align_err
+
+    # 3. Press and release — single RPi script, one VQA call.
     desc = (
         f"click_button speed={speed} press={press_duration_s}s release={release_duration_s}s"
     )
