@@ -110,7 +110,7 @@ class TestFullPipelineNoCup(unittest.TestCase):
         from mcp_robot.grasp_readiness import check_grasp_readiness, _load_model, annotate_frame_with_object
         _load_model()
 
-        result = check_grasp_readiness(bgr)
+        result = check_grasp_readiness(bgr, target_class_yolo="cup")
         print(f"\ncheck_grasp_readiness result:")
         print(f"  ready            = {result.ready}")
         print(f"  object_detected  = {result.object_detected}")
@@ -123,7 +123,7 @@ class TestFullPipelineNoCup(unittest.TestCase):
             print(f"  object_class     = {result.object_class}  conf={result.object_confidence:.2f}")
         print(f"\n  Full dict: {result.to_dict()}")
 
-        annotated = annotate_frame_with_object(bgr)
+        annotated = annotate_frame_with_object(bgr, target_class_yolo="cup")
         out_path = OUT_DIR / "droidcam_no_cup_full_pipeline.jpg"
         if isinstance(annotated, np.ndarray):
             cv2.imwrite(str(out_path), annotated)

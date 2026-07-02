@@ -758,7 +758,7 @@ def control_gripper(
             return _err(str(exc))
 
     # Gate: check grasp readiness before closing.
-    frame_result = cam_mod.capture_droidcam_still(annotate=False)
+    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
     import numpy as _np, cv2 as _cv2
     raw = base64.b64decode(frame_result["frame"])
     arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -843,7 +843,7 @@ def check_grasp_readiness(
     if not target_class_yolo or not target_class_free_text:
         return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
     try:
-        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         import numpy as _np, cv2 as _cv2
         arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1088,7 +1088,7 @@ def navigate_to(
 
             # ── 1. Capture external frame ─────────────────────────────────
             try:
-                frame_result = cam_mod.capture_droidcam_still(annotate=False)
+                frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
             except Exception as exc:
                 parts.append(f"Camera capture failed: {exc}")
                 step_logs.append("\n".join(parts))
@@ -1161,7 +1161,7 @@ def navigate_to(
                     # re-detect the target — it may now be in frame from the
                     # new heading.
                     try:
-                        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+                        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
                         raw_bytes = base64.b64decode(frame_result["frame"])
                         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
                         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1405,7 +1405,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     log.info("[TOOL] locate_object description=%r", description)
     try:
         # Capture external camera (unannotated — VLM should see the raw scene)
-        frame_result = cam_mod.capture_droidcam_still(annotate=False)
+        frame_result = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         arr = np.frombuffer(raw, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1515,7 +1515,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
     log.info("[TOOL] get_external_camera_image")
     try:
-        result = cam_mod.capture_droidcam_still()
+        result = cam_mod.capture_droidcam_still(target_class_yolo="")
         viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
@@ -1593,7 +1593,7 @@ def capture_external_video_clip(
 
 @mcp.tool()
 def get_robot_state(
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> list[ImageContent | TextContent]:
     """
@@ -1604,11 +1604,12 @@ def get_robot_state(
     Args:
         target_class_yolo:      YOLO class to detect and annotate in the external
                                 camera frame. Supported values:
-                                  "cup"    → cup, bowl, bottle, vase  (default)
+                                  "cup"    → cup, bowl, bottle, vase
                                   "ball"   → sports ball, orange, apple
                                   "bottle" → bottle, cup, vase
                                   "any"    → most-forward object of any class
-                                Pass "" to skip YOLO.
+                                No default — state explicitly what you're
+                                looking for, or pass "" to skip YOLO.
         target_class_free_text: Free-text description for Gemini Flash when YOLO
                                 finds nothing (e.g. "light switch", "door handle").
                                 The detected object's angle from the robot's heading
@@ -1837,9 +1838,10 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     with open(domain_path) as f:
         domain_text = f.read()
 
-    # Capture both cameras
+    # Capture both cameras. Unannotated: this is a general "what's going on"
+    # question, not a heading/grasp decision, and no single target class applies.
     front = cam_mod.capture_still()
-    ext = cam_mod.capture_droidcam_still()
+    ext = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
     labeled_images: list[tuple[str, str]] = [
         ("pi_camera", front["frame"]),
         ("droidcam", ext["frame"]),

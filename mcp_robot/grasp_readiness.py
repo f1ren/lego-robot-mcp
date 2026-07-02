@@ -174,7 +174,7 @@ def _load_model():
 
 def _yolo_detect(
     bgr: np.ndarray,
-    target_class: str = "cup",
+    target_class: str,
 ) -> list[DetectedObject]:
     """Run YOLO and return only detections matching *target_class* (or its synonyms).
 
@@ -311,7 +311,7 @@ def _save_debug_image(
 
 def _compute_readiness(
     bgr: np.ndarray,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> tuple[GraspReadiness, Heading | None, DetectedObject | None]:
     """Core logic — returns (result, heading, selected_object) for debug annotation."""
@@ -464,7 +464,7 @@ def _compute_readiness(
 
 def check_grasp_readiness(
     bgr: np.ndarray,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> GraspReadiness:
     """Check whether the scene is ready for the gripper to close.
@@ -472,6 +472,7 @@ def check_grasp_readiness(
     Args:
         bgr: BGR image from the external (DroidCam) camera.
         target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS).
+            No default — every caller must state what it is looking for.
         target_class_free_text: free-text description for Gemini Flash fallback
             (e.g. "light switch"). Used only when YOLO finds nothing.
 
@@ -495,7 +496,7 @@ def check_grasp_readiness(
 
 def check_grasp_readiness_jpeg_bytes(
     jpeg: bytes,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> GraspReadiness:
     arr = np.frombuffer(jpeg, dtype=np.uint8)
@@ -507,7 +508,7 @@ def check_grasp_readiness_jpeg_bytes(
 
 def check_grasp_readiness_b64(
     b64: str,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> GraspReadiness:
     try:
@@ -521,7 +522,7 @@ def check_grasp_readiness_b64(
 
 def annotate_frame_with_object(
     bgr: np.ndarray,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> tuple[np.ndarray, float | None, str, float | None, float | None]:
     """Detect heading + object, annotate frame with arrow + bbox + angle line.
@@ -568,7 +569,7 @@ def annotate_frame_with_object(
 
 def annotate_frame_with_object_b64(
     b64: str,
-    target_class_yolo: str = "cup",
+    target_class_yolo: str,
     target_class_free_text: str = "",
 ) -> tuple[str, float | None, str, float | None, float | None]:
     """Base64 JPEG in/out version of annotate_frame_with_object."""

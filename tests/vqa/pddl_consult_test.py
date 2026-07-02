@@ -29,10 +29,12 @@ Usage:
   python3 tests/vqa/pddl_consult_test.py --save-domain /tmp/suggested_domain.pddl
 
   # Run the same prompt/images N times to check how consistently it lands on
-  # the intended fix before treating the wording as settled. --expect is a
-  # substring tally only (not sent to the model) — keep it experiment-local
-  # rather than encoding it into CONSULT_DOMAIN_QUESTION, which should stay
-  # general.
+  # the intended fix before treating the wording as settled. --expect checks
+  # only the suggested domain block, not the surrounding prose — a response
+  # can name the right concept while describing the scene and still ship a
+  # domain fix about something unrelated. It's a substring tally only (not
+  # sent to the model) — keep it experiment-local rather than encoding it
+  # into CONSULT_DOMAIN_QUESTION, which should stay general.
   python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
 """
 from __future__ import annotations
@@ -188,8 +190,14 @@ def run_trial(
 
     expect_hit: bool | None = None
     if expect:
-        expect_hit = any(s.lower() in response.lower() for s in expect)
-        print(f"[expect] {'HIT' if expect_hit else 'miss'} — looked for: {', '.join(expect)}")
+        # Checked against the suggested domain block only, not the surrounding
+        # prose: the model can name the right concept while describing the
+        # scene and still fail to encode it as an action/predicate (e.g. it
+        # mentioned a switch in its diagnosis, then shipped a domain fix about
+        # something else entirely) — matching on prose would call that a hit.
+        haystack = new_domain or ""
+        expect_hit = any(s.lower() in haystack.lower() for s in expect)
+        print(f"[expect] {'HIT' if expect_hit else 'miss'} in suggested domain — looked for: {', '.join(expect)}")
 
     return domain_found, expect_hit
 
@@ -204,8 +212,10 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1, metavar="N",
                      help="call Gemini N times with the identical prompt/images and tally results")
     ap.add_argument("--expect", action="append", metavar="SUBSTRING",
-                     help="case-insensitive substring to look for in each response, for a quick tally "
-                          "across --repeat trials (repeatable; a trial counts as a hit if ANY match). "
+                     help="case-insensitive substring to look for in the SUGGESTED PDDL DOMAIN block only "
+                          "(not the surrounding prose) — the model can name the right concept in its "
+                          "diagnosis without encoding it as an action/predicate, so matching on prose "
+                          "alone gives false positives. Repeatable; a trial counts as a hit if ANY match. "
                           "Purely a local grading aid — never sent to the model.")
     args = ap.parse_args()
 

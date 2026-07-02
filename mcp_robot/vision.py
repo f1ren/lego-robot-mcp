@@ -42,9 +42,10 @@ CONSULT_DOMAIN_QUESTION = (
     "against what you actually see rather than assuming it is complete or "
     "correct. Then, grounded strictly in your description, explain what seems "
     "to be the problem. Do not invent an action that merely restates a verb "
-    "from the task (e.g. do not add a step just because the goal says 'lift') "
+    "from the task "
     "— any domain gap you propose must be traceable to something specific you "
-    "pointed out. Is there anything missing from the domain formalization? If "
+    "pointed out. What are the PDDL domain components? "
+    "Is there anything missing from the domain formalization? If "
     "so, suggest a fixed domain."
 )
 
