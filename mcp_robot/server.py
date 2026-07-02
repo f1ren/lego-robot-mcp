@@ -78,6 +78,14 @@ _last_target_robot_radius_px: float | None = None
 _last_target_yolo: str = ""
 _last_target_free_text: str = ""
 
+# ── last PDDL plan tracker ───────────────────────────────────────────────────
+# Stored by plan_pddl after every solve() call, including an empty result —
+# that's itself one of the two documented triggers for
+# consult_vqa_for_pddl_domain, which reads this to show the VQA model the
+# plan the robot was actually following. None means plan_pddl has not been
+# called yet this session, distinct from [] meaning it ran and found no plan.
+_last_plan: list[str] | None = None
+
 # ── initialization tracker ────────────────────────────────────────────────────
 
 _INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
@@ -1767,6 +1775,7 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Raises an error if pyperplan is not installed or the domain file is missing.
     """
+    global _last_plan
     log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
     from mcp_robot import planner
     try:
@@ -1776,7 +1785,20 @@ def plan_pddl(problem_pddl: str) -> dict:
     except RuntimeError as exc:
         return _err(str(exc))
     log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
+    _last_plan = actions
     return _ok({"plan": actions})
+
+
+def _format_plan(plan: list[str] | None) -> str:
+    """Render the last plan_pddl output for the consult_vqa_for_pddl_domain prompt.
+
+    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
+    """
+    if plan is None:
+        return "plan_pddl has not been called yet this session."
+    if not plan:
+        return "(empty) — the last plan_pddl call found no solution."
+    return ", ".join(plan)
 
 
 def _extract_pddl_domain(text: str) -> str | None:
@@ -1803,10 +1825,11 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
 
     Captures the current robot view and external camera, reads the active domain
-    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl), then
-    asks the question in vision.CONSULT_DOMAIN_QUESTION (shared with
-    tests/vqa/pddl_consult_test.py, which replays this same prompt against
-    saved images so wording changes can be tried without a connected robot).
+    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
+    the plan from the most recent plan_pddl call, then asks the question in
+    vision.CONSULT_DOMAIN_QUESTION (shared with tests/vqa/pddl_consult_test.py,
+    which replays this same prompt against saved images so wording changes can
+    be tried without a connected robot).
 
     If the VQA response contains a new PDDL domain, it is saved to
     pddl/robot_domain_fixed.pddl. pddl/robot_domain.pddl (the git-tracked
@@ -1850,6 +1873,7 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     prompt = (
         f"{vision.CONSULT_DOMAIN_QUESTION}\n\n"
         f"CONTEXT: {failure_context}\n"
+        f"CURRENT PLAN: {_format_plan(_last_plan)}\n"
         "Attached are the images from the robot's view and the external camera. "
         "Both were considered, alongside the following PDDL domain:\n\n"
         f"{domain_text}"
