@@ -216,6 +216,11 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
     Used when YOLO finds no matching objects for non-COCO classes (e.g. "light
     switch", "door handle"). Returns a DetectedObject so the rest of the
     heading-angle pipeline can operate unchanged.
+
+    Raises vision.LowConfidenceDetection (uncaught) if a candidate was found
+    but below the confidence threshold required to act — callers should catch
+    this specifically to report the achieved certainty rather than treating it
+    like a plain miss.
     """
     from mcp_robot import vision as _vision
     try:
@@ -230,6 +235,8 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
             note=note,
             contact_px=centroid,
         )
+    except _vision.LowConfidenceDetection:
+        raise
     except Exception as exc:
         log.warning("VLM detect fallback failed for '%s': %s", description, exc)
         return None
@@ -348,7 +355,18 @@ def _compute_readiness(
         )
         # VLM path: try Gemini Flash if a free-text description was provided
         if target_class_free_text:
-            vlm_obj = _vlm_detect(bgr, target_class_free_text)
+            from mcp_robot.vision import LowConfidenceDetection
+            try:
+                vlm_obj = _vlm_detect(bgr, target_class_free_text)
+            except LowConfidenceDetection as exc:
+                return GraspReadiness(
+                    ready=False,
+                    reason=(
+                        f"No '{target_class_yolo}' detected by YOLO (looking for: {looking_for}). "
+                        f"{exc}"
+                    ),
+                    action="Reposition for a clearer view of the target, then retry.",
+                ), heading, None
             if vlm_obj is not None:
                 log.info("_compute_readiness: YOLO found nothing for %r; VLM found '%s' at %s (conf=%.2f)",
                          target_class_yolo or "(skipped)", target_class_free_text,

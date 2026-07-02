@@ -1086,6 +1086,7 @@ def navigate_to(
     step_logs: list[str] = []
     outcome = "max_steps_reached"
     debug_saved = False
+    low_confidence_seen: str | None = None
 
     obs_map: nav_mod.ObstacleMap | None = None
     plan: nav_mod.NavPlan | None = None
@@ -1140,7 +1141,11 @@ def navigate_to(
                         parts.append(f"YOLO error: {exc}")
 
                 if target_obj is None and target_class_free_text:
-                    target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                    try:
+                        target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                    except vision.LowConfidenceDetection as exc:
+                        parts.append(str(exc))
+                        low_confidence_seen = str(exc)
 
                 if target_obj is None:
                     if not config.SCAN_ENABLED:
@@ -1191,7 +1196,11 @@ def navigate_to(
                         except Exception:
                             pass
                     if target_obj is None and bgr is not None and target_class_free_text:
-                        target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                        try:
+                            target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                        except vision.LowConfidenceDetection as exc:
+                            step_logs.append(str(exc))
+                            low_confidence_seen = str(exc)
 
                     if target_obj is None:
                         step_logs.append(
@@ -1358,7 +1367,12 @@ def navigate_to(
     outcome_text = {
         "success":              "Navigation successful — robot is at the target.",
         "path_blocked":         "Navigation failed — no obstacle-free path found.",
-        "target_not_detected":  "Navigation aborted — target not detected (YOLO/VLM found nothing).",
+        "target_not_detected":  (
+            "Navigation aborted — a candidate target was seen but below the "
+            "confidence threshold required to act (see log for certainty achieved)."
+            if low_confidence_seen else
+            "Navigation aborted — target not detected (YOLO/VLM found nothing)."
+        ),
         "heading_not_detected": "Navigation aborted — robot heading could not be detected (yellow body not visible).",
         "camera_error":         "Navigation aborted — camera error.",
         "error":                "Navigation aborted — unexpected error.",
@@ -1406,6 +1420,11 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     Pass the returned angle directly to `turn(body_degrees=<angle>)` to face
     the object before driving toward it.
 
+    If a candidate is seen but below the confidence threshold required to act,
+    this reports the achieved certainty (e.g. "Only 82% certainty...") instead
+    of claiming the object was not found — reposition for a clearer view and
+    retry rather than treating it as a definite absence.
+
     Args:
         description: Free-text description of the object to find, e.g.
                      "light switch", "door handle", "yellow power strip".
@@ -1421,20 +1440,25 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
             return [TextContent(type="text", text="ERROR: could not decode external camera frame.")]
 
         # Locate the object with the VLM→CV hybrid pipeline
-        vlm_result = vision.locate_object_hybrid(bgr, description)
+        low_confidence: vision.LowConfidenceDetection | None = None
+        try:
+            vlm_result = vision.locate_object_hybrid(bgr, description)
+        except vision.LowConfidenceDetection as exc:
+            vlm_result = None
+            low_confidence = exc
+
         if vlm_result is None:
             annotated_bgr = heading.annotate_bgr(bgr)
             ok, buf = cv2.imencode(".jpg", annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frame_b64 = base64.b64encode(buf.tobytes()).decode() if ok else frame_result["frame"]
+            text = (
+                str(low_confidence) if low_confidence is not None else
+                f"Object not found: '{description}' was not detected in the external "
+                "camera frame. Check that the object is visible and try again."
+            )
             return [
                 _image_content(frame_b64),
-                TextContent(
-                    type="text",
-                    text=(
-                        f"Object not found: '{description}' was not detected in the external "
-                        "camera frame. Check that the object is visible and try again."
-                    ),
-                ),
+                TextContent(type="text", text=text),
             ]
 
         (x1, y1, x2, y2), obj_center, confidence, note = vlm_result
