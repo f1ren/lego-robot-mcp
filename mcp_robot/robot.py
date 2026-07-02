@@ -12,7 +12,7 @@ On error they raise RuntimeError (caught and wrapped by the MCP server).
 """
 from __future__ import annotations
 
-from mcp_robot import config
+from mcp_robot import config, viz
 from mcp_robot.rpi_client import get_client
 
 # ── RPi script templates ──────────────────────────────────────────────────────

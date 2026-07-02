@@ -330,6 +330,7 @@ def _with_change_analysis(
     try:
         result = action_fn()
     except Exception as exc:
+        log.warning("[TOOL] %s error: %s", action_desc, exc, exc_info=True)
         if stop_event:
             stop_event.set()
         if bg_thread:
