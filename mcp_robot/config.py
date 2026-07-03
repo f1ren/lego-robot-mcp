@@ -94,8 +94,11 @@ POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle del
 DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.190:4747/video")
 DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
 # Target capture rate for DroidCam during action execution and video compilation.
-# Higher = smoother video and better optical flow; limited by DroidCam's native rate (~30 fps).
-DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "15.0"))
+# Set to DroidCam's native ceiling (~30 fps) — the per-action VQA cost is unaffected
+# by this value (vision._subsample_frames always caps to 3 frames/camera before the
+# Gemini call regardless of how many were captured), so there's no downside to maxing
+# it out; this only affects recorded-segment/merged-video smoothness.
+DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "30.0"))
 
 # ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
 # stream_live() starts a picamera2 MJPEG server on the RPi and reads it via
@@ -110,8 +113,10 @@ SEGMENT_MANIFEST = os.getenv("SEGMENT_MANIFEST", str(Path(SEGMENT_DIR) / "index.
 SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.25"))
 SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "0.25"))
 # Declared playback fps per camera (container metadata for cv2.VideoWriter).
-# DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate).
-SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "15.0"))
+# DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate). Keep these two
+# in sync — a mismatch still self-corrects via _maybe_remux's itsscale retiming, but
+# every segment then pays for an avoidable ffmpeg remux subprocess on close.
+SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "30.0"))
 # Pi camera: NOT PICAMERA_CAPTURE_FPS (5.0) — that low rate is the bottleneck
 # this feature is meant to move past. The recorder only ever sees pi_camera
 # frames when the MJPEG continuous stream is active (15-30fps native), so
@@ -142,7 +147,10 @@ SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "
 # derived from the Pi camera's native aspect ratio. The right pane is scaled
 # to double that height (to fill the column) at the DroidCam's native aspect.
 MERGE_CELL_HEIGHT = int(os.getenv("MERGE_CELL_HEIGHT", "360"))
-MERGE_FPS = float(os.getenv("MERGE_FPS", "15.0"))
+# Matches SEGMENT_FPS_DROIDCAM/SEGMENT_FPS_PI (both real, remuxed capture rates, not
+# just declared labels) so the fps= filter in _scale_pad is a pass-through rather than
+# a frame-duplicating upsample.
+MERGE_FPS = float(os.getenv("MERGE_FPS", "30.0"))
 # Segments from either camera within this many seconds of each other are
 # treated as one "scene" (tiled together into one clip) rather than being
 # sequential scenes. Derived from the recorder's own pre-roll/cooldown/
