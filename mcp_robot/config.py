@@ -77,10 +77,23 @@ ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 # effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
 NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 
-# ── Button press (click_button pre-alignment) ────────────────────────────────
+# ── Button press (click_button pre-alignment + press distance) ───────────────
 # Max heading error (degrees) tolerated before click_button issues a turn
 # correction to square the robot up perpendicular to the switch/button.
 CLICK_ALIGN_TOLERANCE_DEG = float(os.getenv("CLICK_ALIGN_TOLERANCE_DEG", "10.0"))
+
+# click_button drives forward by a distance derived from the measured
+# distance to the switch (same px->mm calibration navigate_to uses — see
+# navigation.mm_per_px), not a fixed blind duration. The measured distance is
+# clamped to [CLICK_PRESS_MIN_MM, CLICK_PRESS_MAX_MM] to protect against a bad
+# reading, then CLICK_PRESS_MARGIN_MM of overtravel is added — overshooting
+# into a spring-loaded switch is harmless, undershooting and missing it
+# entirely is the real failure mode. CLICK_PRESS_FALLBACK_MM is used only
+# when the distance can't be measured at all.
+CLICK_PRESS_MIN_MM      = float(os.getenv("CLICK_PRESS_MIN_MM",      "20.0"))
+CLICK_PRESS_MAX_MM      = float(os.getenv("CLICK_PRESS_MAX_MM",      "200.0"))
+CLICK_PRESS_MARGIN_MM   = float(os.getenv("CLICK_PRESS_MARGIN_MM",   "20.0"))
+CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 
 # ── Target scan (front-camera sweep when external camera can't see target) ───
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step

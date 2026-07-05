@@ -11,7 +11,7 @@ update position, replan on deviation — without any camera or robot connection.
 `commands_for_step` now returns wheel-encoder degrees (drive_degrees(), an
 exact, repeatable distance) rather than a fixed duration, converted from the
 pixel distance to the next waypoint via the robot's apparent body size as a
-ruler (mcp_robot.navigation._mm_per_px). The simulation inverts that same
+ruler (mcp_robot.navigation.mm_per_px). The simulation inverts that same
 conversion to dead-reckon a pixel trajectory, so — unlike a duration-based
 simulation, which could only guess at a px/s travel speed — this is exact: it
 uses the identical mm<->px calibration as the production code.

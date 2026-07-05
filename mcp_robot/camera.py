@@ -720,13 +720,15 @@ def capture_droidcam_still(
 
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
-         "object_angle_deg": float | None, "vlm_note": str}
+         "object_angle_deg": float | None, "vlm_note": str,
+         "object_distance_px": float | None, "robot_radius_px": float | None,
+         "robot_body_area_px": int | None}
     """
-    def _maybe_annotate(b64: str) -> tuple[str, float | None, str, float | None, float | None]:
+    def _maybe_annotate(b64: str) -> tuple[str, float | None, str, float | None, float | None, int | None]:
         if not annotate:
-            return b64, None, "", None, None
+            return b64, None, "", None, None, None
         from mcp_robot import grasp_readiness as _gr
-        annotated_b64, angle_deg, note, dist_px, robot_radius_px = _gr.annotate_frame_with_object_b64(
+        annotated_b64, angle_deg, note, dist_px, robot_radius_px, body_area_px = _gr.annotate_frame_with_object_b64(
             b64,
             target_class_yolo=target_class_yolo,
             target_class_free_text=target_class_free_text,
@@ -743,14 +745,15 @@ def capture_droidcam_still(
                 "Heading analysis: yolo=%r free_text=%r — no matching object detected; heading arrow only",
                 target_class_yolo, target_class_free_text,
             )
-        return annotated_b64, angle_deg, note, dist_px, robot_radius_px
+        return annotated_b64, angle_deg, note, dist_px, robot_radius_px, body_area_px
 
     def _build_result(base: dict, b64: str) -> dict:
-        frame, angle_deg, note, dist_px, robot_radius_px = _maybe_annotate(b64)
+        frame, angle_deg, note, dist_px, robot_radius_px, body_area_px = _maybe_annotate(b64)
         path = _save_snapshot(frame, "droidcam")
         return {**base, "frame": frame, "path": path,
                 "object_angle_deg": angle_deg, "vlm_note": note,
-                "object_distance_px": dist_px, "robot_radius_px": robot_radius_px}
+                "object_distance_px": dist_px, "robot_radius_px": robot_radius_px,
+                "robot_body_area_px": body_area_px}
 
     cached = _droidcam_cache.latest()
     if cached is not None:

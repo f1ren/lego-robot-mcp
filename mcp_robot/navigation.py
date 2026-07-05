@@ -10,6 +10,8 @@ Public API:
     commands_for_step(obs_map, plan, heading) -> tuple[float, float, bool]
     near_target(obs_map) -> bool
     save_debug_images(bgr, obs_map, plan, outdir, step, suffix="") -> dict[str, str]
+    mm_per_px(body_area_px) -> float | None    (shared px->mm distance calibration)
+    mm_to_wheel_degrees(distance_mm) -> float  (shared mm->encoder-degrees conversion)
 """
 from __future__ import annotations
 
@@ -82,24 +84,30 @@ _MAX_STEP_BODY_LENGTHS = 3.0
 _MAX_STEP_MM = _MAX_STEP_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
 
 # Blind-driving distance used only when the yellow body wasn't detected, i.e.
-# no pixel->mm calibration is possible (see _mm_per_px).
+# no pixel->mm calibration is possible (see mm_per_px).
 _FALLBACK_STEP_MM = 100.0
 
 _WHEEL_CIRCUMFERENCE_MM = math.pi * config.WHEEL_DIAMETER_MM
 
 
-def _mm_to_wheel_degrees(distance_mm: float) -> float:
+def mm_to_wheel_degrees(distance_mm: float) -> float:
     """Straight-line travel distance (mm) -> wheel-encoder degrees, for
     passing directly to robot.drive_degrees()."""
     return (distance_mm / _WHEEL_CIRCUMFERENCE_MM) * 360.0
 
 
-def _mm_per_px(body_area_px: int) -> float | None:
+def mm_per_px(body_area_px: int) -> float | None:
     """Pixel -> millimetre scale derived from the robot's visible yellow-body
     area.  Area is rotation-invariant — unlike an axis-aligned bounding-box
     measurement such as robot_radius_px, which grows and shrinks as the robot
     turns — so this calibration stays valid no matter which way the robot is
     currently facing.  Returns None when the body wasn't detected.
+
+    Shared distance-estimation primitive: used by commands_for_step() below
+    for navigate_to's per-step drive distance, and by server.py's click_button
+    to convert the measured distance to a switch into press degrees — both
+    go through this same calibration so "how far to drive" is computed one way
+    across the codebase.
     """
     if body_area_px <= 0:
         return None
@@ -1012,7 +1020,7 @@ def commands_for_step(
                covers a precise, repeatable distance regardless of speed,
                battery voltage, or load. The pixel distance to the next
                waypoint is converted to mm using the robot's apparent body
-               size as a ruler (see _mm_per_px), then to wheel-encoder degrees
+               size as a ruler (see mm_per_px), then to wheel-encoder degrees
                via the wheel circumference — so the robot drives toward the
                waypoint by roughly the right amount instead of for a fixed,
                waypoint-distance-agnostic duration (which previously caused it
@@ -1059,13 +1067,13 @@ def commands_for_step(
             dx, dy, target_angle_deg,
             turn_deg,
         )
-        mm_per_px = _mm_per_px(nav_heading.body_area)
+        px_scale = mm_per_px(nav_heading.body_area)
 
         # Floor-plane correction: re-derive a perspective homography from the
         # robot's own body each frame and use it to correct both the turn
         # angle and the distance-per-pixel along this specific direction,
         # accounting for the external camera's tilt. Falls back to the
-        # pixel-space turn_deg / scalar mm_per_px above when unavailable.
+        # pixel-space turn_deg / scalar px_scale above when unavailable.
         H = _floor_homography(obs_map.bgr, nav_heading)
         if H is not None:
             rmx, rmy = _project_to_floor_mm(H, robot_px[0], robot_px[1])
@@ -1106,11 +1114,11 @@ def commands_for_step(
                 )
     else:
         turn_deg = 0.0
-        mm_per_px = None
+        px_scale = None
         log.info("[commands_for_step] no heading available — turn_deg=0")
 
-    if mm_per_px is not None:
-        step_px = min(dist_px, _MAX_STEP_MM / mm_per_px)
+    if px_scale is not None:
+        step_px = min(dist_px, _MAX_STEP_MM / px_scale)
 
         # Don't drive past grasp distance: stop with the robot and target
         # rings just touching, not stacked on top of each other.
@@ -1121,17 +1129,17 @@ def commands_for_step(
             if remaining_px > 0:
                 step_px = min(step_px, remaining_px)
 
-        step_mm_per_px = mm_per_px_dir if mm_per_px_dir is not None else mm_per_px
-        drive_deg = _mm_to_wheel_degrees(step_px * step_mm_per_px)
+        step_mm_per_px = mm_per_px_dir if mm_per_px_dir is not None else px_scale
+        drive_deg = mm_to_wheel_degrees(step_px * step_mm_per_px)
         log.info(
             "[commands_for_step] mm_per_px=%.3f%s (body_area=%dpx²)  "
             "step=%.0fpx -> %.0fmm -> %.0f wheel-deg",
-            mm_per_px,
+            px_scale,
             f" (dir={mm_per_px_dir:.3f})" if mm_per_px_dir is not None else "",
             nav_heading.body_area, step_px, step_px * step_mm_per_px, drive_deg,
         )
     else:
-        drive_deg = _mm_to_wheel_degrees(min(_FALLBACK_STEP_MM, _MAX_STEP_MM))
+        drive_deg = mm_to_wheel_degrees(min(_FALLBACK_STEP_MM, _MAX_STEP_MM))
         log.info("[commands_for_step] no body-area calibration — "
                  "falling back to %.0fmm blind step", _FALLBACK_STEP_MM)
 

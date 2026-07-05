@@ -594,7 +594,7 @@ def _square_up_to_target(
     target_class_yolo: str,
     target_class_free_text: str,
     tolerance_deg: float,
-) -> dict | None:
+) -> tuple[dict | None, float | None]:
     """
     Square the robot's heading up to within *tolerance_deg* of the target so
     an upcoming forward press lands perpendicular to it.
@@ -606,9 +606,16 @@ def _square_up_to_target(
     correction — CLAUDE.md reserves turn() for exactly this: a small heading
     fix once already within reach of the target.
 
-    Returns an error dict on failure, else None once aligned (or already was).
+    Returns (error_or_None, distance_mm). error_or_None is a dict on failure,
+    else None once aligned (or already was). distance_mm is the most recent
+    measured straight-line distance from the robot to the target — converted
+    from pixels via navigation.mm_per_px(), the same body-plate calibration
+    navigate_to() uses for its own drive distances — or None if it couldn't
+    be computed (heading/target not detected, or body plate not visible).
+    Re-measured after a turn correction, since the drive-forward distance
+    should reflect the robot's post-turn position.
     """
-    def _measure() -> float | None:
+    def _measure() -> tuple[float | None, float | None]:
         global _last_target_distance_px, _last_target_robot_radius_px
         global _last_target_yolo, _last_target_free_text
         frame_result = cam_mod.capture_droidcam_still(
@@ -619,11 +626,18 @@ def _square_up_to_target(
         _last_target_robot_radius_px = frame_result.get("robot_radius_px")
         _last_target_yolo = target_class_yolo
         _last_target_free_text = target_class_free_text
-        return frame_result.get("object_angle_deg")
+        dist_px = frame_result.get("object_distance_px")
+        body_area_px = frame_result.get("robot_body_area_px")
+        distance_mm = None
+        if dist_px is not None and body_area_px is not None:
+            scale = nav_mod.mm_per_px(body_area_px)
+            if scale is not None:
+                distance_mm = dist_px * scale
+        return frame_result.get("object_angle_deg"), distance_mm
 
     log.info("click_button: positioning — measuring alignment to switch")
     try:
-        angle_deg = _measure()
+        angle_deg, distance_mm = _measure()
         if angle_deg is None:
             log.info("click_button: positioning — switch not in view, repositioning")
             navigate_to(
@@ -631,20 +645,20 @@ def _square_up_to_target(
                 sub_observation="Switch not in view",
                 sub_action="Repositioning to switch",
             )
-            angle_deg = _measure()
+            angle_deg, distance_mm = _measure()
     except Exception as exc:
-        return _err(f"click_button: alignment check failed: {exc}")
+        return _err(f"click_button: alignment check failed: {exc}"), None
 
     if angle_deg is None:
         return _err(
             f"click_button: could not locate the switch "
             f"({target_class_yolo or target_class_free_text}) to verify "
             "perpendicular alignment, even after navigate_to."
-        )
+        ), None
 
     if abs(angle_deg) <= tolerance_deg:
         log.info("click_button: positioning — aligned within %.1f° (angle=%.1f°), no turn needed", tolerance_deg, angle_deg)
-        return None
+        return None, distance_mm
 
     log.info("click_button: positioning — off by %.1f°, squaring up with turn", angle_deg)
     result = turn(
@@ -655,7 +669,14 @@ def _square_up_to_target(
         sub_observation="Switch off-angle",
         sub_action="Squaring to switch",
     )
-    return None if result.get("ok") else result
+    if not result.get("ok"):
+        return result, distance_mm
+
+    # Re-measure: turning in place can shift the camera's view of both the
+    # robot's own body plate and the target enough to change the distance
+    # estimate, so use the freshest reading for the upcoming press.
+    _, distance_mm = _measure()
+    return None, distance_mm
 
 
 @mcp.tool()
@@ -663,8 +684,6 @@ def click_button(
     target_class_yolo: str,
     target_class_free_text: str,
     speed: int = 20,
-    press_duration_s: float = 1.0,
-    release_duration_s: float = 1.0,
     expected: str = "",
     context: str = "",
 ) -> dict:
@@ -677,14 +696,22 @@ def click_button(
          one before/after check (like put() bundles open-gripper + lift-arm).
       2. Squares up to face the switch perpendicular: a single turn()
          correction if the switch is visible but off-angle, or navigate_to()
-         first if it isn't visible at all.
+         first if it isn't visible at all. This also measures the straight-
+         line distance to the switch.
+
+    The press distance is computed from that measured distance — converted to
+    wheel-encoder degrees via the same px->mm body-plate calibration
+    navigate_to() uses for its own drive distances (see navigation.mm_per_px /
+    mm_to_wheel_degrees) — clamped to a sane range and given a small forward
+    margin, rather than a fixed blind duration. The release drives back the
+    same number of degrees. See config.CLICK_PRESS_* for the margin/clamp/
+    fallback constants.
 
     The press and release themselves still run inside a **single RPi Python
     script**, so there is no host round-trip and no VLM pause between them —
-    guaranteeing the button is released within
-    press_duration_s + release_duration_s seconds of the press, regardless
-    of VLM validation latency. VLM validation of the press/release happens
-    only once, after the button is already released.
+    guaranteeing the button is released immediately after the press,
+    regardless of VLM validation latency. VLM validation of the press/release
+    happens only once, after the button is already released.
 
     Args:
         target_class_yolo:      YOLO class for the button/switch (e.g. "button").
@@ -693,15 +720,13 @@ def click_button(
                                 used to verify heading and as a VLM fallback.
                                 REQUIRED — must be non-empty.
         speed:               Wheel speed 15–20. Positive = forward (into button).
-        press_duration_s:    Seconds driving forward to depress the button.
-        release_duration_s:  Seconds driving backward to un-press the button.
         expected:            What should visually happen during the press/release
                              (auto-generated if blank).
         context:             Why this action is being taken and evaluation hints.
     """
     log.info(
-        "[TOOL] click_button yolo=%r free_text=%r speed=%r press=%.2fs release=%.2fs",
-        target_class_yolo, target_class_free_text, speed, press_duration_s, release_duration_s,
+        "[TOOL] click_button yolo=%r free_text=%r speed=%r",
+        target_class_yolo, target_class_free_text, speed,
     )
     if not target_class_yolo or not target_class_free_text:
         return _err(
@@ -725,24 +750,37 @@ def click_button(
         return prep_result
 
     # 2. Square up to the switch: navigate_to if not visible, else a single
-    #    turn correction if off-angle beyond tolerance.
-    align_err = _square_up_to_target(
+    #    turn correction if off-angle beyond tolerance. Also yields the
+    #    freshest measured distance to the switch.
+    align_err, distance_mm = _square_up_to_target(
         target_class_yolo, target_class_free_text, config.CLICK_ALIGN_TOLERANCE_DEG,
     )
     if align_err is not None:
         return align_err
 
-    # 3. Press and release — single RPi script, one VQA call.
-    desc = (
-        f"click_button speed={speed} press={press_duration_s}s release={release_duration_s}s"
-    )
+    # 3. Convert measured distance to a press distance: clamp + margin, same
+    #    px->mm->wheel-degrees pipeline navigate_to uses (see docstring).
+    if distance_mm is None:
+        press_mm = config.CLICK_PRESS_FALLBACK_MM
+        log.info("click_button: distance unmeasured — using fallback press distance %.0fmm", press_mm)
+    else:
+        clamped_mm = max(config.CLICK_PRESS_MIN_MM, min(distance_mm, config.CLICK_PRESS_MAX_MM))
+        press_mm = clamped_mm + config.CLICK_PRESS_MARGIN_MM
+        log.info(
+            "click_button: measured distance=%.0fmm (clamped=%.0fmm) — press distance=%.0fmm (+%.0fmm margin)",
+            distance_mm, clamped_mm, press_mm, config.CLICK_PRESS_MARGIN_MM,
+        )
+    press_degrees = int(round(nav_mod.mm_to_wheel_degrees(press_mm)))
+
+    # 4. Press and release — single RPi script, one VQA call.
+    desc = f"click_button speed={speed} press_degrees={press_degrees}"
     expected_str = expected if expected else (
-        f"robot drives forward ~{press_duration_s}s (pressing button), "
-        f"then immediately reverses ~{release_duration_s}s (releasing)"
+        f"robot drives forward ~{press_degrees}° wheel rotation (pressing button), "
+        "then immediately reverses the same amount (releasing)"
     )
     return _with_change_analysis(
         desc, expected_str,
-        lambda: robot_mod.click_button(speed, press_duration_s, release_duration_s),
+        lambda: robot_mod.click_button(speed, press_degrees),
         context=context,
         vqa_cameras={"droidcam"},
     )

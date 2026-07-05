@@ -108,8 +108,12 @@ import json
 from buildhat import MotorPair
 
 # Both press and release run in a single RPi script — no host round-trip
-# between them — so the button is guaranteed released within
-# press_duration + release_duration seconds, well before any VLM validation begins.
+# between them — so the button is guaranteed released as soon as this script
+# returns, well before any VLM validation begins. Degree-based (not
+# time-based): press_degrees is computed host-side from the measured
+# distance to the switch (see server._square_up_to_target and
+# navigation.mm_to_wheel_degrees) — the same px->mm->wheel-degrees pipeline
+# navigate_to() uses for its own drive distances.
 #
 # WARNING: never `del pair` — BuildHAT triggers firmware jitter on destruction.
 pair = MotorPair({left_port!r}, {right_port!r})
@@ -117,13 +121,13 @@ start_left = pair._leftmotor.get_position()
 start_right = pair._rightmotor.get_position()
 
 # Press forward into the button
-pair.run_for_seconds({press_duration}, {left_press_speed}, {right_press_speed})
+pair.run_for_degrees({press_degrees}, {left_press_speed}, {right_press_speed})
 
 mid_left = pair._leftmotor.get_position()
 mid_right = pair._rightmotor.get_position()
 
 # Immediately release by driving backward
-pair.run_for_seconds({release_duration}, {left_release_speed}, {right_release_speed})
+pair.run_for_degrees({release_degrees}, {left_release_speed}, {right_release_speed})
 
 end_left = pair._leftmotor.get_position()
 end_right = pair._rightmotor.get_position()
@@ -266,40 +270,50 @@ def turn(body_degrees: float, speed: int) -> dict:
 
 
 def click_button(
-    speed: int = 20,
-    press_duration_s: float = 1.0,
-    release_duration_s: float = 1.0,
+    speed: int,
+    press_degrees: int,
+    release_degrees: int | None = None,
 ) -> dict:
     """
     Press and immediately release a button in one atomic RPi script.
 
     Both press and release execute inside a single run_python call so no
-    host round-trip (and no VLM pause) separates them.  The button is
-    physically released within press_duration_s + release_duration_s seconds.
+    host round-trip (and no VLM pause) separates them. The button is
+    physically released as soon as the script returns.
+
+    Distance-based (wheel-encoder degrees), not time-based — the caller
+    measures the real remaining distance to the switch (see
+    server._square_up_to_target and navigation.mm_to_wheel_degrees) and
+    passes it in as press_degrees, the same way navigate_to converts
+    measured distance to wheel-encoder degrees for its own driving.
 
     Args:
-        speed:              Wheel speed (positive = forward into button).
-        press_duration_s:   Time driving forward to depress the button.
-        release_duration_s: Time driving backward to un-press the button.
+        speed:           Wheel speed (positive = forward into button).
+        press_degrees:   Wheel-encoder degrees to drive forward (into button).
+        release_degrees: Wheel-encoder degrees to drive back afterward.
+                         Defaults to press_degrees (returns to start position).
     """
+    if release_degrees is None:
+        release_degrees = press_degrees
     # Motor A (left wheel) is physically inverted — negate so positive=forward.
     left_press   = -speed   # forward
     right_press  =  speed
     left_release =  speed   # backward
     right_release = -speed
-    total_timeout = int(press_duration_s + release_duration_s + 10)
+    total_degrees = abs(press_degrees) + abs(release_degrees)
+    total_timeout = max(30, total_degrees // 10 + 10)
     log.info(
-        "click_button: driving forward %.1fs (press) then backward %.1fs (release) at speed %d",
-        press_duration_s, release_duration_s, speed,
+        "click_button: driving forward %d° (press) then backward %d° (release) at speed %d",
+        press_degrees, release_degrees, speed,
     )
     result = get_client().run_python(
         _CLICK_BUTTON.format(
             left_port=config.PORT_LEFT_WHEEL,
             right_port=config.PORT_RIGHT_WHEEL,
-            press_duration=press_duration_s,
+            press_degrees=press_degrees,
             left_press_speed=left_press,
             right_press_speed=right_press,
-            release_duration=release_duration_s,
+            release_degrees=release_degrees,
             left_release_speed=left_release,
             right_release_speed=right_release,
         ),
