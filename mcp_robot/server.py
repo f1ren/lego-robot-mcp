@@ -621,9 +621,11 @@ def _square_up_to_target(
         _last_target_free_text = target_class_free_text
         return frame_result.get("object_angle_deg")
 
+    log.info("click_button: positioning — measuring alignment to switch")
     try:
         angle_deg = _measure()
         if angle_deg is None:
+            log.info("click_button: positioning — switch not in view, repositioning")
             navigate_to(
                 target_class_yolo, target_class_free_text,
                 sub_observation="Switch not in view",
@@ -641,8 +643,10 @@ def _square_up_to_target(
         )
 
     if abs(angle_deg) <= tolerance_deg:
+        log.info("click_button: positioning — aligned within %.1f° (angle=%.1f°), no turn needed", tolerance_deg, angle_deg)
         return None
 
+    log.info("click_button: positioning — off by %.1f°, squaring up with turn", angle_deg)
     result = turn(
         angle_deg,
         speed=config.SPEED_MIN,

@@ -12,8 +12,12 @@ On error they raise RuntimeError (caught and wrapped by the MCP server).
 """
 from __future__ import annotations
 
-from mcp_robot import config, viz
+import logging
+
+from mcp_robot import config
 from mcp_robot.rpi_client import get_client
+
+log = logging.getLogger(__name__)
 
 # ── RPi script templates ──────────────────────────────────────────────────────
 
@@ -109,14 +113,26 @@ from buildhat import MotorPair
 #
 # WARNING: never `del pair` — BuildHAT triggers firmware jitter on destruction.
 pair = MotorPair({left_port!r}, {right_port!r})
+start_left = pair._leftmotor.get_position()
+start_right = pair._rightmotor.get_position()
 
 # Press forward into the button
 pair.run_for_seconds({press_duration}, {left_press_speed}, {right_press_speed})
 
+mid_left = pair._leftmotor.get_position()
+mid_right = pair._rightmotor.get_position()
+
 # Immediately release by driving backward
 pair.run_for_seconds({release_duration}, {left_release_speed}, {right_release_speed})
 
-print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
+end_left = pair._leftmotor.get_position()
+end_right = pair._rightmotor.get_position()
+print(json.dumps({{
+    "left": end_left, "right": end_right,
+    "left_delta": end_left - start_left, "right_delta": end_right - start_right,
+    "press_left_delta": mid_left - start_left, "press_right_delta": mid_right - start_right,
+    "release_left_delta": end_left - mid_left, "release_right_delta": end_right - mid_right,
+}}))
 """
 
 
@@ -272,6 +288,10 @@ def click_button(
     left_release =  speed   # backward
     right_release = -speed
     total_timeout = int(press_duration_s + release_duration_s + 10)
+    log.info(
+        "click_button: driving forward %.1fs (press) then backward %.1fs (release) at speed %d",
+        press_duration_s, release_duration_s, speed,
+    )
     result = get_client().run_python(
         _CLICK_BUTTON.format(
             left_port=config.PORT_LEFT_WHEEL,
@@ -285,10 +305,12 @@ def click_button(
         ),
         timeout=total_timeout,
     )
-    viz.log_motor_positions({
-        "left_wheel":  result.get("left"),
-        "right_wheel": result.get("right"),
-    })
+    log.info(
+        "click_button: pressed forward (left_delta=%s right_delta=%s), "
+        "released backward (left_delta=%s right_delta=%s)",
+        result.get("press_left_delta"), result.get("press_right_delta"),
+        result.get("release_left_delta"), result.get("release_right_delta"),
+    )
     return result
 
 
@@ -304,9 +326,14 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
         degrees: How far to move. Positive = down, negative = up.
         speed:   Motor speed 1–100.
     """
+    direction = "down" if degrees > 0 else "up"
+    log.info("move_arm: moving arm %s %d° at speed %d", direction, abs(degrees), speed)
     result = move_motor(config.PORT_ARM, -degrees, speed)  # motor is physically inverted; negate so positive=down as documented
     if degrees > 0:
         move_motor(config.PORT_ARM, 17, speed)  # raise 17° so gripper clears the ground
+        log.info("move_arm: arm lowered %d° (delta=%s), raised 17° for ground clearance", abs(degrees), result.get("delta"))
+    else:
+        log.info("move_arm: arm raised %d° (delta=%s)", abs(degrees), result.get("delta"))
     return result
 
 
@@ -348,8 +375,11 @@ def control_gripper(
         raise ValueError(f"action must be 'open' or 'close', got {action!r}")
 
     if _gripper_state == action:
+        log.info("control_gripper: gripper already %s, skipping", action)
         return {"action": action, "delta": 0, "note": "already at target"}
 
+    verb = "opening" if action == "open" else "closing"
+    log.info("control_gripper: %s gripper", verb)
     # Negative = opening direction, positive = closing direction (matches the
     # existing motor wiring convention used when the absolute approach worked).
     degrees = -config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
@@ -358,6 +388,7 @@ def control_gripper(
         move_motor(config.PORT_GRIPPER, 17, speed)  # close 17° to release pressure from wheels
     result["action"] = action
     _gripper_state = action
+    log.info("control_gripper: gripper %sd (delta=%s)", action, result.get("delta"))
     return result
 
 
