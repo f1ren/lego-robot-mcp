@@ -154,6 +154,9 @@ SEGMENT_RECENT_RING = int(os.getenv("SEGMENT_RECENT_RING", "8"))
 SEGMENT_CALIB_ENABLED = bool(int(os.getenv("SEGMENT_CALIB_ENABLED", "1")))
 SEGMENT_CALIB_FRAMES  = int(os.getenv("SEGMENT_CALIB_FRAMES", "40"))
 SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
+# Pi camera default AE/AWB hunting shifts whole-frame brightness more than
+# DroidCam's ISP does, so it needs a wider margin above its noise floor.
+SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
 # Cross-camera sync: a motion event on any camera triggers recording on all
 # cameras within this time window (seconds).
 SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "1.0"))
