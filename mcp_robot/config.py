@@ -100,7 +100,7 @@ CLICK_ALIGN_TOLERANCE_DEG = float(os.getenv("CLICK_ALIGN_TOLERANCE_DEG", "10.0")
 # when the distance can't be measured at all.
 CLICK_PRESS_MIN_MM      = float(os.getenv("CLICK_PRESS_MIN_MM",      "20.0"))
 CLICK_PRESS_MAX_MM      = float(os.getenv("CLICK_PRESS_MAX_MM",      "200.0"))
-CLICK_PRESS_MARGIN_MM   = float(os.getenv("CLICK_PRESS_MARGIN_MM",   "20.0"))
+CLICK_PRESS_MARGIN_MM   = float(os.getenv("CLICK_PRESS_MARGIN_MM",   "40.0"))
 CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 
 # ── Target scan (front-camera sweep when external camera can't see target) ───
