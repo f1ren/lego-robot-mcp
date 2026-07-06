@@ -17,6 +17,13 @@ FIXTURES  = pathlib.Path(__file__).parent / "fixtures" / "grasp_readiness"
 OUT_DIR   = FIXTURES / "annotated"
 SNAP_CUP  = pathlib.Path("output/snapshots/navigate_to_20260616_095547/step_00_a_raw.jpg")
 
+# Manually verified switch location in droidcam_light_switch.png (confirmed by
+# visual inspection of the fixture, generous margin around the switch itself).
+# Used as ground truth instead of the VLM's own rough bbox: that bbox has real
+# call-to-call jitter, so checking a result against it would only test
+# VLM/CV self-consistency, not whether the switch was actually found.
+_SWITCH_GROUND_TRUTH_BBOX = (370, 260, 480, 360)
+
 
 def _annotate(bgr, rough_bbox, refined_bbox, centroid):
     out = bgr.copy()
@@ -77,12 +84,12 @@ class TestHybridLocate(unittest.TestCase):
         out_path = OUT_DIR / f"{img_path.stem}_hybrid.jpg"
         cv2.imwrite(str(out_path), out)
         print(f"  -> saved {out_path}")
-        return refined is not None
+        return centroid, rough_bbox
 
     def test_blue_cup_snapshot(self):
         """Primary assertion: blue cup clearly visible in the nav snapshot."""
-        found = self._run_one(SNAP_CUP, "blue cup on the floor")
-        self.assertTrue(found, "CV refinement should find the blue cup in the snapshot")
+        centroid, _ = self._run_one(SNAP_CUP, "blue cup on the floor")
+        self.assertIsNotNone(centroid, "CV refinement should find the blue cup in the snapshot")
 
     def test_white_cup_fixture(self):
         """droidcam_cup.jpg has a white cup — tests VLM finds it and CV refines."""
@@ -95,6 +102,24 @@ class TestHybridLocate(unittest.TestCase):
     def test_droidcam_000(self):
         """droidcam_000.jpg — blue cup may or may not be present."""
         self._run_one(FIXTURES / "droidcam_000.jpg", "blue cup on the floor")
+
+    def test_white_light_switch_fixture(self):
+        """droidcam_light_switch.png has a white wall light switch — non-COCO
+        target, same free-text description click_button uses (see server.py's
+        target_class_free_text for click_button). The switch sits right where
+        sunlight hits the wall, so a same-brightness patch of floor/wall right
+        next to it is a trap for HSV-based CV refinement."""
+        centroid, _ = self._run_one(
+            FIXTURES / "droidcam_light_switch.png", "white light switch on the wall")
+        self.assertIsNotNone(centroid, "CV refinement should find the white light switch in the fixture")
+        gx1, gy1, gx2, gy2 = _SWITCH_GROUND_TRUTH_BBOX
+        cx, cy = centroid
+        self.assertTrue(
+            gx1 <= cx <= gx2 and gy1 <= cy <= gy2,
+            f"Refined centroid {centroid} should land on the switch (ground truth "
+            f"{_SWITCH_GROUND_TRUTH_BBOX}) — if it's outside, detection drifted to a "
+            "different region entirely (VLM mislocalization or CV merging with background)",
+        )
 
 
 if __name__ == "__main__":
