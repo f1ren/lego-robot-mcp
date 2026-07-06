@@ -799,8 +799,16 @@ def locate_object_vlm(
     return (x1, y1, x2, y2), confidence, note, hsv_lo, hsv_hi, area_frac
 
 
-# How many times the rough bbox size to expand when searching for the object.
+# Max multiple of the rough bbox size to expand the search window to.
 _CV_SEARCH_EXPANSION = 3.0
+
+# Search radii (× rough-bbox size) to try, smallest first, capped at
+# _CV_SEARCH_EXPANSION. Stopping at the first radius whose best contour falls
+# within the expected area range keeps the search tight around the VLM's
+# rough bbox whenever possible: a same-colour region further out (e.g. a
+# sunlit wall behind a white switch) would otherwise merge with the target
+# and win by sheer size once the full window is searched in one shot.
+_CV_SEARCH_RADII = (0.0, 0.25, 0.5, 1.0, 2.0, _CV_SEARCH_EXPANSION)
 
 
 def cv_refine_location(
@@ -813,54 +821,67 @@ def cv_refine_location(
     """
     Refine a VLM rough bounding box using HSV color segmentation.
 
-    Expands the rough bbox by _CV_SEARCH_EXPANSION × bbox_size in every direction,
-    then finds the largest color blob matching hsv_lo..hsv_hi within that region.
+    Searches progressively larger windows around the rough bbox (see
+    _CV_SEARCH_RADII, capped at _CV_SEARCH_EXPANSION × bbox_size), stopping at
+    the first radius whose best color blob falls within the expected area
+    range. Falls back to the largest blob at the widest radius if none do.
 
     Returns (refined_bbox, centroid) in full-image pixel coords, or None if no
-    matching blob is found.
+    matching blob is found at any radius.
     """
     import cv2 as _cv2
 
     img_h, img_w = bgr.shape[:2]
     rx1, ry1, rx2, ry2 = rough_bbox
+    bbox_size = max(rx2 - rx1, ry2 - ry1)
 
-    pad = int(max(rx2 - rx1, ry2 - ry1) * _CV_SEARCH_EXPANSION)
-    sx1 = max(0, rx1 - pad)
-    sy1 = max(0, ry1 - pad)
-    sx2 = min(img_w, rx2 + pad)
-    sy2 = min(img_h, ry2 + pad)
-
-    roi = bgr[sy1:sy2, sx1:sx2]
-    hsv_roi = _cv2.cvtColor(roi, _cv2.COLOR_BGR2HSV)
-
-    # Handle hue wrap-around (e.g. red spans 170–179 and 0–10)
-    if hsv_lo[0] <= hsv_hi[0]:
-        mask = _cv2.inRange(hsv_roi, hsv_lo, hsv_hi)
-    else:
-        lo_a = hsv_lo.copy(); hi_a = np.array([179, hsv_hi[1], hsv_hi[2]], dtype=np.uint8)
-        lo_b = np.array([0,   hsv_lo[1], hsv_lo[2]], dtype=np.uint8); hi_b = hsv_hi.copy()
-        mask = _cv2.bitwise_or(_cv2.inRange(hsv_roi, lo_a, hi_a),
-                               _cv2.inRange(hsv_roi, lo_b, hi_b))
-
-    kernel = np.ones((7, 7), np.uint8)
-    mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, kernel)
-    mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN,  kernel)
-
-    contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        log.warning("cv_refine_location: no contours found in search region")
-        return None
-
-    # Prefer contours near the expected area; fall back to largest if none qualify
     total_px = img_h * img_w
     exp_px   = expected_area_frac * total_px
-    valid = [c for c in contours
-             if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0]
-    if not valid:
-        log.warning("cv_refine_location: no contour in area range (exp=%.0fpx); using largest", exp_px)
-        valid = contours
+    kernel   = np.ones((7, 7), np.uint8)
 
-    best = max(valid, key=_cv2.contourArea)
+    contours: list = []
+    sx1 = sy1 = sx2 = sy2 = 0
+    best = None
+
+    for radius in _CV_SEARCH_RADII:
+        pad = int(bbox_size * radius)
+        sx1 = max(0, rx1 - pad)
+        sy1 = max(0, ry1 - pad)
+        sx2 = min(img_w, rx2 + pad)
+        sy2 = min(img_h, ry2 + pad)
+
+        roi = bgr[sy1:sy2, sx1:sx2]
+        hsv_roi = _cv2.cvtColor(roi, _cv2.COLOR_BGR2HSV)
+
+        # Handle hue wrap-around (e.g. red spans 170–179 and 0–10)
+        if hsv_lo[0] <= hsv_hi[0]:
+            mask = _cv2.inRange(hsv_roi, hsv_lo, hsv_hi)
+        else:
+            lo_a = hsv_lo.copy(); hi_a = np.array([179, hsv_hi[1], hsv_hi[2]], dtype=np.uint8)
+            lo_b = np.array([0,   hsv_lo[1], hsv_lo[2]], dtype=np.uint8); hi_b = hsv_hi.copy()
+            mask = _cv2.bitwise_or(_cv2.inRange(hsv_roi, lo_a, hi_a),
+                                   _cv2.inRange(hsv_roi, lo_b, hi_b))
+
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, kernel)
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN,  kernel)
+
+        contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+
+        valid = [c for c in contours
+                 if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0]
+        if valid:
+            best = max(valid, key=_cv2.contourArea)
+            log.info("cv_refine_location: valid contour at radius=%.2fx bbox_size", radius)
+            break
+
+    if best is None:
+        if not contours:
+            log.warning("cv_refine_location: no contours found in search region")
+            return None
+        log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; using largest", exp_px)
+        best = max(contours, key=_cv2.contourArea)
 
     M = _cv2.moments(best)
     if M["m00"] == 0:
