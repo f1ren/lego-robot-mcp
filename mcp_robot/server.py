@@ -903,6 +903,7 @@ def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context:
         lambda: robot_mod.lift_arm(speed),
         context=context,
         annotate=False,
+        skip_vqa=not config.LIFT_ARM_VQA,
         sub_observation=sub_observation,
         sub_action=sub_action,
     )

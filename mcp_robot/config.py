@@ -184,6 +184,10 @@ LOCATE_OBJECT_MODEL = os.getenv("LOCATE_OBJECT_MODEL", "gemini-2.5-flash")
 # Set LOWER_ARM_VQA=1 to re-enable.
 LOWER_ARM_VQA = bool(os.getenv("LOWER_ARM_VQA", ""))
 
+# exp:49e9ab56 — lift_arm is safe/reliable enough to skip VQA, same as
+# control_gripper's "open" action. Set LIFT_ARM_VQA=1 to re-enable.
+LIFT_ARM_VQA = bool(os.getenv("LIFT_ARM_VQA", ""))
+
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
