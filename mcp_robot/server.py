@@ -445,7 +445,7 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
         port:     BuildHat port — "A", "B", "C", or "D".
         degrees:  Positive = one direction, negative = opposite.
                   Use small values (e.g. 30–90) to start with.
-        speed:    Motor speed, 15–20.
+        speed:    Motor speed, 15–20 (port D / arm: 7–15).
         expected: Short, precise description of what should physically happen
                   (e.g. "arm rotates down 45°"). Defaults to a technical summary.
         context:  Why this action is being taken and hints for evaluation
@@ -458,9 +458,11 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
     log.info("[TOOL] move_motor port=%r degrees=%r speed=%r", port, degrees, speed)
     if port.upper() not in ("A", "B", "C", "D"):
         return _err(f"Invalid port {port!r}. Must be A, B, C or D.")
-    speed_max = config.ARM_SPEED_MAX if port.upper() == config.PORT_ARM else config.SPEED_MAX
-    if not (config.SPEED_MIN <= abs(speed) <= speed_max):
-        return _err(f"speed must be between {config.SPEED_MIN} and {speed_max} (abs).")
+    is_arm = port.upper() == config.PORT_ARM
+    speed_min = config.ARM_SPEED_MIN if is_arm else config.SPEED_MIN
+    speed_max = config.ARM_SPEED_MAX if is_arm else config.SPEED_MAX
+    if not (speed_min <= abs(speed) <= speed_max):
+        return _err(f"speed must be between {speed_min} and {speed_max} (abs).")
     p = port.upper()
     role = {
         config.PORT_LEFT_WHEEL:  "left wheel turns (may translate or pivot the robot)",
@@ -790,7 +792,7 @@ def click_button(
 # ── arm ───────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "",
+def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Move the robot arm by the given number of degrees. Captures before/after
@@ -799,7 +801,9 @@ def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "
     Args:
         degrees:  How far to move. Positive = down, negative = up.
                   Start with values like ±30–90 and adjust based on results.
-        speed:    Motor speed, 15 (max 15 to prevent arm jitter).
+        speed:    Motor speed, 7-15 (default 7 — halved from the old default
+                  of 15 to slow the move down for diagnosing the raise/lower-
+                  then-fall bug; max 15 still caps jitter).
         expected: Short, precise description of the expected outcome
                   (e.g. "arm moves down ~45°, tip reaches ball height").
         context:  Why this action is being taken and hints for evaluation
@@ -810,8 +814,8 @@ def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "
                          (e.g. "Lowering arm down").
     """
     log.info("[TOOL] move_arm degrees=%r speed=%r", degrees, speed)
-    if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
-        return _err(f"arm speed must be between {config.SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
+    if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
+        return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
     suffix = "; then raises 17° to clear gripper from ground" if degrees > 0 else ""
     expected_str = expected if expected else (
@@ -830,7 +834,7 @@ def move_arm(degrees: int, speed: int = 15, expected: str = "", context: str = "
 
 
 @mcp.tool()
-def lower_arm(speed: int = 15, expected: str = "", context: str = "",
+def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
               sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Lower the robot arm fully to ground level, then raise it 17° to keep the
@@ -838,7 +842,9 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "",
     before/after images and returns a Gemini-generated `change_description`.
 
     Args:
-        speed:    Motor speed, 15 (max 15 to prevent arm jitter).
+        speed:    Motor speed, 7-15 (default 7 — halved from the old default
+                  of 15 to slow the move down for diagnosing the raise/lower-
+                  then-fall bug; max 15 still caps jitter).
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
         sub_observation: ~4-word video subtitle: what was just observed or instructed
@@ -847,8 +853,8 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "",
                          (e.g. "Lowering arm down").
     """
     log.info("[TOOL] lower_arm speed=%r", speed)
-    if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
-        return _err(f"arm speed must be between {config.SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
+    if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
+        return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     expected_str = expected if expected else (
         f"arm lowers fully to ground level (~{config.ARM_DOWN_DEG}°), then raises 17° "
         "so the gripper just clears the floor; final arm position is slightly above ground"
@@ -866,7 +872,7 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "",
 
 
 @mcp.tool()
-def lift_arm(speed: int = 15, expected: str = "", context: str = "",
+def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Lift the robot arm fully to the home/retracted position (the same call
@@ -874,7 +880,9 @@ def lift_arm(speed: int = 15, expected: str = "", context: str = "",
     before/after images and returns a Gemini-generated `change_description`.
 
     Args:
-        speed:    Motor speed, 15 (max 15 to prevent arm jitter).
+        speed:    Motor speed, 7-15 (default 7 — halved from the old default
+                  of 15 to slow the move down for diagnosing the raise-then-
+                  fall bug; max 15 still caps jitter).
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
         sub_observation: ~4-word video subtitle: what was just observed or instructed
@@ -883,8 +891,8 @@ def lift_arm(speed: int = 15, expected: str = "", context: str = "",
                          (e.g. "Raising arm up").
     """
     log.info("[TOOL] lift_arm speed=%r", speed)
-    if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
-        return _err(f"arm speed must be between {config.SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
+    if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
+        return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     expected_str = expected if expected else (
         f"arm raises fully to home position (~{config.ARM_UP_DEG}°, i.e. ~"
         f"{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° up from fully lowered)"

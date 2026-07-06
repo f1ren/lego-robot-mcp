@@ -66,11 +66,19 @@ SPEED_MAX = int(os.getenv("SPEED_MAX", "20"))
 
 # ── Default speeds (range -100 to 100) ───────────────────────────────────────
 DEFAULT_WHEEL_SPEED   = int(os.getenv("DEFAULT_WHEEL_SPEED",   "50"))
-DEFAULT_ARM_SPEED     = int(os.getenv("DEFAULT_ARM_SPEED",     "15"))
+# Halved from 15: lift_arm/lower_arm raise (or lower) and then fall back
+# afterward; running slower makes the raise-then-fall easier to observe and
+# diagnose. See ARM_SPEED_MIN below — it had to move down with this default,
+# since it used to sit exactly at the shared SPEED_MIN floor (15).
+DEFAULT_ARM_SPEED     = int(os.getenv("DEFAULT_ARM_SPEED",     "7"))
 DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
 
 # Arm motor speed cap — slower to avoid jitter, especially with a load.
 ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
+# Arm-specific floor, decoupled from the shared SPEED_MIN (which stays 15 for
+# wheels/gripper, per the CV-detectability rule above) — DEFAULT_ARM_SPEED is
+# now below that shared floor, so arm moves need their own.
+ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "7"))
 
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined
