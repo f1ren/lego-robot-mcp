@@ -17,6 +17,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
+  lift_arm               Lift arm fully to home/retracted position
   control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
@@ -859,6 +860,41 @@ def lower_arm(speed: int = 15, expected: str = "", context: str = "",
         context=context,
         annotate=False,
         skip_vqa=not config.LOWER_ARM_VQA,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
+    )
+
+
+@mcp.tool()
+def lift_arm(speed: int = 15, expected: str = "", context: str = "",
+             sub_observation: str = "", sub_action: str = "") -> dict:
+    """
+    Lift the robot arm fully to the home/retracted position (the same call
+    click_button's prep_for_press and put() use internally). Captures
+    before/after images and returns a Gemini-generated `change_description`.
+
+    Args:
+        speed:    Motor speed, 15 (max 15 to prevent arm jitter).
+        expected: Short, precise description of the expected outcome.
+        context:  Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Arm still lowered").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Raising arm up").
+    """
+    log.info("[TOOL] lift_arm speed=%r", speed)
+    if not (config.SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
+        return _err(f"arm speed must be between {config.SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
+    expected_str = expected if expected else (
+        f"arm raises fully to home position (~{config.ARM_UP_DEG}°, i.e. ~"
+        f"{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° up from fully lowered)"
+    )
+    return _with_change_analysis(
+        f"lift arm fully to home position at speed {speed}",
+        expected_str,
+        lambda: robot_mod.lift_arm(speed),
+        context=context,
+        annotate=False,
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -1903,10 +1939,11 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     The robot domain (pddl/robot_domain.pddl, or pddl/robot_domain_fixed.pddl
     when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
-    defines five actions:
+    defines six actions:
       - navigate     ?from ?to         → navigate_to
       - open-gripper                   → control_gripper(open)
       - lower-arm                      → lower_arm
+      - lift-arm     ?object           → lift_arm  [requires holding ?object + arm-lowered]
       - pick-up      ?object ?location → control_gripper(close)  [gripper+arm must be ready]
       - place        ?object ?location → put  (opens gripper + raises arm)
 
