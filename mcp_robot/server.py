@@ -695,8 +695,9 @@ def click_button(
 
     Before the press, the robot:
       1. Fully raises the arm and closes the gripper — clearing the switch
-         and presenting a compact pressing profile — verified together in
-         one before/after check (like put() bundles open-gripper + lift-arm).
+         and presenting a compact pressing profile. Not VQA-verified: this
+         step is reliable enough that checking it would only cost time and
+         a cloud API call (same reasoning as lift_arm's own VQA skip).
       2. Squares up to face the switch perpendicular: a single turn()
          correction if the switch is visible but off-angle, or navigate_to()
          first if it isn't visible at all. This also measures the straight-
@@ -741,16 +742,14 @@ def click_button(
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
     # 1. Fully raise the arm + close the gripper — clears the switch and
-    #    presents a compact pressing profile.
-    prep_result = _with_change_analysis(
-        "prep for button press (raise arm fully + close gripper)",
-        "arm raises to its fully raised position and gripper jaws close into "
-        "a compact pressing profile; wheels unchanged",
-        robot_mod.prep_for_press,
-        annotate=False,
-    )
-    if not prep_result.get("ok"):
-        return prep_result
+    #    presents a compact pressing profile. No _with_change_analysis here:
+    #    this step works reliably enough that the video capture + VQA call
+    #    just cost time and a cloud API call for no real benefit — the
+    #    actual press/release below still gets a full checked analysis.
+    try:
+        robot_mod.prep_for_press()
+    except Exception as exc:
+        return _err(f"click_button: prep_for_press failed: {exc}")
 
     # 2. Square up to the switch: navigate_to if not visible, else a single
     #    turn correction if off-angle beyond tolerance. Also yields the
