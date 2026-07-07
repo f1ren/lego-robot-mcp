@@ -715,8 +715,13 @@ def click_button(
     The press and release themselves still run inside a **single RPi Python
     script**, so there is no host round-trip and no VLM pause between them —
     guaranteeing the button is released immediately after the press,
-    regardless of VLM validation latency. VLM validation of the press/release
-    happens only once, after the button is already released.
+    regardless of VLM validation latency.
+
+    VQA verification of the press/release is currently **skipped by default**
+    (config.CLICK_BUTTON_VQA=0): its verdicts on this action have proven
+    unreliable, while the measured-distance press + fractional release is
+    reliable enough for the current experiment. No `change_description` will
+    be present in the result. Set CLICK_BUTTON_VQA=1 to re-enable.
 
     Args:
         target_class_yolo:      YOLO class for the button/switch (e.g. "button").
@@ -787,6 +792,7 @@ def click_button(
         lambda: robot_mod.click_button(speed, press_degrees),
         context=context,
         vqa_cameras={"droidcam"},
+        skip_vqa=not config.CLICK_BUTTON_VQA,
     )
 
 
