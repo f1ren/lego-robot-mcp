@@ -1923,13 +1923,19 @@ def compile_video(since: str, camera: str = "droidcam") -> dict:
     Args:
         since:  UNIX timestamp as a string (e.g. "1746613200.0"), or a legacy
                 "YYYY-MM-DD HH:MM:SS[,ms]" / "YYYYMMDD_HHMMSS" string.
-        camera: "droidcam" (default) or "pi_camera".
+        camera: "droidcam" (default) or "pi_camera" for a single-camera clip,
+                or "merged" to tile both cameras plus a subtitle card
+                (observation, then action) into one video: subtitle
+                top-left, Pi camera bottom-left, DroidCam full-height right.
 
     Returns a dict with video_path, segment_count, total_duration_s.
     """
     log.info("[TOOL] compile_video since=%r camera=%r", since, camera)
-    from mcp_robot.video_compiler import compile_task_video
-    result = compile_task_video(since, config.SEGMENT_MANIFEST, camera)
+    from mcp_robot.video_compiler import compile_merged_video, compile_task_video
+    if camera == "merged":
+        result = compile_merged_video(since, config.SEGMENT_MANIFEST)
+    else:
+        result = compile_task_video(since, config.SEGMENT_MANIFEST, camera)
     if not result.ok:
         return _err(result.error)
     if result.video_path is None:

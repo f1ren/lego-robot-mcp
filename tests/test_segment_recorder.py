@@ -19,6 +19,17 @@ def _load_b64(path: pathlib.Path) -> str:
     return base64.b64encode(path.read_bytes()).decode()
 
 
+def _solid_b64(width: int, height: int, value: int) -> str:
+    """A solid-color width×height JPEG, base64-encoded. Two different
+    `value`s produce a guaranteed-large frame diff regardless of the
+    recorder's calibrated motion threshold — used to drive segment open/close
+    deterministically without depending on real footage's motion timing."""
+    import numpy as np
+    img = np.full((height, width, 3), value, dtype=np.uint8)
+    _, buf = cv2.imencode(".jpg", img)
+    return base64.b64encode(buf.tobytes()).decode()
+
+
 def _read_manifest(manifest_path: str) -> list[dict]:
     if not os.path.exists(manifest_path):
         return []
@@ -474,6 +485,79 @@ class TestSegmentRecorder(unittest.TestCase):
             pi_state.open_segment,
             "pi_camera should have an open segment due to cross-trigger from droidcam motion",
         )
+
+    # ── 17: compile_merged_video tiles both cameras + subtitle ──────────────
+
+    def test_compile_merged_video(self):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            self.skipTest("ffmpeg/ffprobe not available")
+
+        rec = self._make_recorder(fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0})
+
+        # Synthetic solid-color frames (not real fixtures): droidcam portrait
+        # 480x640 (like a rotated DroidCam feed), pi_camera landscape 640x480
+        # — guarantees deterministic motion (huge frame diff) and exercises
+        # aspect-preserving scale/pad for both orientations.
+        droid_w, droid_h = 480, 640
+        pi_w, pi_h = 640, 480
+        droid_lo, droid_hi = _solid_b64(droid_w, droid_h, 40), _solid_b64(droid_w, droid_h, 220)
+        pi_lo, pi_hi = _solid_b64(pi_w, pi_h, 40), _solid_b64(pi_w, pi_h, 220)
+
+        t0 = 1000.0
+        t = t0
+        rec.on_frame("droidcam", droid_lo, t); t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", droid_hi, t); t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", droid_lo, t); t = round(t + 0.1, 3)
+        droid_close = round(t + rec.cooldown_s, 3)
+        rec.on_frame("droidcam", droid_lo, droid_close)
+
+        t = round(t0 + 0.05, 3)  # slightly offset from droidcam, within cross-trigger window
+        rec.on_frame("pi_camera", pi_lo, t); t = round(t + 0.1, 3)
+        rec.on_frame("pi_camera", pi_hi, t); t = round(t + 0.1, 3)
+        rec.on_frame("pi_camera", pi_lo, t); t = round(t + 0.1, 3)
+        pi_close = round(t + rec.cooldown_s, 3)
+        rec.on_frame("pi_camera", pi_lo, pi_close)
+
+        meta = {"tool": "drive", "sub_observation": "Path is clear", "sub_action": "Driving backward"}
+        self.assertTrue(rec.tag_range("droidcam", t0, droid_close, meta))
+        self.assertTrue(rec.tag_range("pi_camera", t0, pi_close, meta))
+
+        from mcp_robot.video_compiler import compile_merged_video
+        result = compile_merged_video(since=str(t0 - 1), manifest_path=rec.manifest_path, out_dir=self.tmpdir)
+        self.assertTrue(result.ok, result.error)
+        self.assertIsNotNone(result.video_path)
+        self.assertTrue(os.path.exists(result.video_path))
+        self.assertEqual(result.segment_count, 2)
+        self.assertGreater(result.total_duration_s, 0)
+
+        # Expected geometry: mirrors compile_merged_video's own math.
+        from mcp_robot import config
+        from mcp_robot.video_compiler import _even
+
+        cell_h = _even(config.MERGE_CELL_HEIGHT)
+        cell_w = _even(cell_h * pi_w / pi_h)
+        right_h = cell_h * 2
+        right_w = _even(right_h * droid_w / droid_h)
+
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", result.video_path],
+            capture_output=True, text=True,
+        )
+        w_str, h_str = out.stdout.strip().split("x")
+        self.assertEqual(int(h_str), right_h)
+        self.assertEqual(int(w_str), cell_w + right_w)
+
+        # Content check: the top-left (subtitle-on-black) cell must be much
+        # darker on average than the bottom-left (real camera footage) cell —
+        # catches an accidental pane swap that dimension checks alone would miss.
+        cap = cv2.VideoCapture(result.video_path)
+        ok, frame = cap.read()
+        cap.release()
+        self.assertTrue(ok)
+        top_left = frame[0:cell_h, 0:cell_w]
+        bottom_left = frame[cell_h:2 * cell_h, 0:cell_w]
+        self.assertLess(top_left.mean(), bottom_left.mean())
 
 
 if __name__ == "__main__":
