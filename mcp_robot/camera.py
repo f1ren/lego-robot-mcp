@@ -33,22 +33,35 @@ def _rotate_droidcam(frame):
     return cv2.rotate(frame, code)
 
 
-def _save_snapshot(frame_b64: str, label: str, index: int | None = None) -> str | None:
+def _snapshot_ts_key() -> str:
+    """Timestamp key used in snapshot filenames (also shared by raw/annotated pairs)."""
+    return f"{time.strftime('%Y%m%d_%H%M%S')}_{int((time.time() % 1) * 1000):03d}"
+
+
+def _save_snapshot(
+    frame_b64: str,
+    label: str,
+    index: int | None = None,
+    ts_key: str | None = None,
+) -> str | None:
     """
     Decode frame_b64 and write it to SNAPSHOT_DIR as a JPEG.
 
     Returns the file path on success, None if saving is disabled or fails.
-    label:  "picamera" or "clip"
-    index:  frame index within a clip (None for stills)
+    label:   "picamera", "clip", "droidcam", "droidcam_raw", ...
+    index:   frame index within a clip (None for stills)
+    ts_key:  shared timestamp key so a raw/annotated pair of the same frame
+             gets matching filenames (differing only by label). Generated
+             fresh if not given.
     """
     if not config.SNAPSHOT_DIR:
         return None
     try:
         os.makedirs(config.SNAPSHOT_DIR, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        ms = int((time.time() % 1) * 1000)
+        if ts_key is None:
+            ts_key = _snapshot_ts_key()
         suffix = f"_f{index:02d}" if index is not None else ""
-        path = os.path.join(config.SNAPSHOT_DIR, f"{label}_{ts}_{ms:03d}{suffix}.jpg")
+        path = os.path.join(config.SNAPSHOT_DIR, f"{label}_{ts_key}{suffix}.jpg")
         with open(path, "wb") as fh:
             fh.write(base64.b64decode(frame_b64))
         log.info("Snapshot saved: %s", path)
@@ -596,18 +609,35 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
                   Pass False when frames are destined for VLM motion analysis.
 
     Returns:
-        {"frames": ["<base64>", ...], "raw_frames": ["<base64>", ...], "count": int}
-        raw_frames always contains unannotated frames for VLM use.
+        {"frames": ["<base64>", ...], "raw_frames": ["<base64>", ...], "count": int,
+         "paths": [...], "raw_paths": [...]}
+        raw_frames always contains unannotated frames for VLM use. raw_paths
+        mirrors paths but points at the on-disk unannotated copy (same as
+        paths when annotate=False, since there's nothing to tell apart then).
     """
     def _maybe_annotate(b64: str) -> str:
         return _heading.annotate_jpeg_b64(b64) if annotate else b64
+
+    def _save_pair(raw_b64: str, display_b64: str, index: int) -> tuple[str | None, str | None]:
+        ts_key = _snapshot_ts_key()
+        path = _save_snapshot(display_b64, "droidcam_clip", index=index, ts_key=ts_key)
+        if not annotate:
+            return path, path
+        raw_path = _save_snapshot(raw_b64, "droidcam_clip_raw", index=index, ts_key=ts_key)
+        return path, raw_path
 
     clip_frames = _droidcam_cache.clip(duration_s, fps)
     if clip_frames is not None:
         raw = [f["frame"] for f in clip_frames]
         display = [_maybe_annotate(f) for f in raw]
-        paths = [_save_snapshot(f, "droidcam_clip", index=i) for i, f in enumerate(display)]
-        return {"frames": display, "raw_frames": raw, "count": len(display), "paths": paths}
+        paths: list[str | None] = []
+        raw_paths: list[str | None] = []
+        for i, (r, d) in enumerate(zip(raw, display)):
+            path, raw_path = _save_pair(r, d, i)
+            paths.append(path)
+            raw_paths.append(raw_path)
+        return {"frames": display, "raw_frames": raw, "count": len(display),
+                "paths": paths, "raw_paths": raw_paths}
 
     import cv2
 
@@ -619,7 +649,8 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
         interval = 1.0 / fps
         raw_frames: list[str] = []
         display_frames: list[str] = []
-        paths: list[str | None] = []
+        paths = []
+        raw_paths = []
         for i in range(n_frames):
             t0 = time.time()
             ok, frame = cap.read()
@@ -631,11 +662,14 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
             display = _maybe_annotate(raw)
             raw_frames.append(raw)
             display_frames.append(display)
-            paths.append(_save_snapshot(display, "droidcam_clip", index=i))
+            path, raw_path = _save_pair(raw, display, i)
+            paths.append(path)
+            raw_paths.append(raw_path)
             slack = interval - (time.time() - t0)
             if slack > 0 and i < n_frames - 1:
                 time.sleep(slack)
-        return {"frames": display_frames, "raw_frames": raw_frames, "count": len(display_frames), "paths": paths}
+        return {"frames": display_frames, "raw_frames": raw_frames, "count": len(display_frames),
+                "paths": paths, "raw_paths": raw_paths}
     finally:
         cap.release()
 
@@ -720,9 +754,13 @@ def capture_droidcam_still(
 
     Returns:
         {"frame": "<base64>", "ts": float, "bytes": int, "path": str | None,
+         "raw_path": str | None,
          "object_angle_deg": float | None, "vlm_note": str,
          "object_distance_px": float | None, "robot_radius_px": float | None,
          "robot_body_area_px": int | None}
+        raw_path points at the on-disk unannotated copy (same as path when
+        annotate=False). Kept alongside the annotated copy so a bad heading
+        arrow or object angle can be diagnosed against the clean frame.
     """
     def _maybe_annotate(b64: str) -> tuple[str, float | None, str, float | None, float | None, int | None]:
         if not annotate:
@@ -749,8 +787,10 @@ def capture_droidcam_still(
 
     def _build_result(base: dict, b64: str) -> dict:
         frame, angle_deg, note, dist_px, robot_radius_px, body_area_px = _maybe_annotate(b64)
-        path = _save_snapshot(frame, "droidcam")
-        return {**base, "frame": frame, "path": path,
+        ts_key = _snapshot_ts_key()
+        path = _save_snapshot(frame, "droidcam", ts_key=ts_key)
+        raw_path = _save_snapshot(b64, "droidcam_raw", ts_key=ts_key) if annotate else path
+        return {**base, "frame": frame, "path": path, "raw_path": raw_path,
                 "object_angle_deg": angle_deg, "vlm_note": note,
                 "object_distance_px": dist_px, "robot_radius_px": robot_radius_px,
                 "robot_body_area_px": body_area_px}
