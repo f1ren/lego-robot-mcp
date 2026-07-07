@@ -88,3 +88,4 @@ def _reset_gemini_module_state():
     yield
     vision._gemini_client = None
     vision._active_model = None
+    vision._active_locate_model = None

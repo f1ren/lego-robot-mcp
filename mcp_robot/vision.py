@@ -152,6 +152,7 @@ def _has_motion_labeled(labeled: Sequence[tuple[str, str]]) -> bool:
 _gemini_client = None
 _gemini_lock = threading.Lock()
 _active_model: str | None = None
+_active_locate_model: str | None = None
 _model_lock = threading.Lock()
 
 
@@ -224,6 +225,25 @@ def _switch_gemini_to_fallback() -> str:
                 config.GEMINI_FALLBACK_MODEL,
             )
     return _active_model
+
+
+def _get_active_locate_model() -> str:
+    global _active_locate_model
+    if _active_locate_model is None:
+        _active_locate_model = config.LOCATE_OBJECT_MODEL
+    return _active_locate_model
+
+
+def _switch_locate_to_fallback() -> str:
+    global _active_locate_model
+    with _model_lock:
+        if _active_locate_model != config.LOCATE_OBJECT_FALLBACK_MODEL:
+            _active_locate_model = config.LOCATE_OBJECT_FALLBACK_MODEL
+            log.warning(
+                "locate_object_vlm quota exhausted — switching to fallback model: %s",
+                config.LOCATE_OBJECT_FALLBACK_MODEL,
+            )
+    return _active_locate_model
 
 
 
@@ -731,19 +751,30 @@ def locate_object_vlm(
         _gtypes.Part.from_text(text=prompt),
     ]
 
-    t0 = time.monotonic()
-    resp = _gemini_generate_with_retry(
-        client, config.LOCATE_OBJECT_MODEL,
-        [_gtypes.Content(role="user", parts=parts)],
-        config=_gtypes.GenerateContentConfig(
-            thinking_config=_gtypes.ThinkingConfig(thinking_budget=0),
-        ),
+    model = _get_active_locate_model()
+    gen_config = _gtypes.GenerateContentConfig(
+        thinking_config=_gtypes.ThinkingConfig(thinking_budget=0),
     )
+    t0 = time.monotonic()
+    try:
+        resp = _gemini_generate_with_retry(
+            client, model, [_gtypes.Content(role="user", parts=parts)],
+            config=gen_config,
+        )
+    except Exception as exc:
+        if _is_quota_error(exc) and model != config.LOCATE_OBJECT_FALLBACK_MODEL:
+            model = _switch_locate_to_fallback()
+            resp = _gemini_generate_with_retry(
+                client, model, [_gtypes.Content(role="user", parts=parts)],
+                config=gen_config,
+            )
+        else:
+            raise
     text = (resp.text or "").strip()
 
     elapsed = time.monotonic() - t0
     log.info("VLM locate '%s' model=%s (%.1fs):\n%s",
-             description, config.LOCATE_OBJECT_MODEL, elapsed, text)
+             description, model, elapsed, text)
 
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)

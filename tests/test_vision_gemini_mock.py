@@ -73,6 +73,24 @@ def test_describe_video_falls_back_to_secondary_model_on_quota_error(fake_gemini
     assert client.calls[1]["model"] == config.GEMINI_FALLBACK_MODEL
 
 
+def test_locate_object_vlm_falls_back_to_secondary_model_on_quota_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    quota_exc = Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+    payload = json.dumps({
+        "found": True, "x1": 0.1, "y1": 0.2, "x2": 0.5, "y2": 0.6,
+        "hsv_hue_lo": 100, "hsv_hue_hi": 130, "hsv_sat_min": 50, "hsv_val_min": 60,
+        "approx_area_frac": 0.08, "confidence": 0.97, "note": "blue cup on floor",
+    })
+    client = fake_gemini_client([quota_exc, payload])
+
+    result = vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+    assert result is not None
+    assert len(client.calls) == 2
+    assert client.calls[0]["model"] == config.LOCATE_OBJECT_MODEL
+    assert client.calls[1]["model"] == config.LOCATE_OBJECT_FALLBACK_MODEL
+
+
 # ── locate_object_vlm JSON parsing ───────────────────────────────────────────
 
 
