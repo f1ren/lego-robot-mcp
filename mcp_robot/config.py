@@ -228,6 +228,12 @@ LOWER_ARM_VQA = bool(os.getenv("LOWER_ARM_VQA", ""))
 # control_gripper's "open" action. Set LIFT_ARM_VQA=1 to re-enable.
 LIFT_ARM_VQA = bool(os.getenv("LIFT_ARM_VQA", ""))
 
+# click_button's VQA verdicts on the press/release have proven unreliable,
+# while the action itself (measured-distance press + fractional release) is
+# reliable enough for the current experiment. Skip VQA for now. Set
+# CLICK_BUTTON_VQA=1 to re-enable.
+CLICK_BUTTON_VQA = bool(os.getenv("CLICK_BUTTON_VQA", ""))
+
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
