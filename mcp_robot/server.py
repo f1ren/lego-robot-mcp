@@ -707,9 +707,10 @@ def click_button(
     wheel-encoder degrees via the same px->mm body-plate calibration
     navigate_to() uses for its own drive distances (see navigation.mm_per_px /
     mm_to_wheel_degrees) — clamped to a sane range and given a small forward
-    margin, rather than a fixed blind duration. The release drives back the
-    same number of degrees. See config.CLICK_PRESS_* for the margin/clamp/
-    fallback constants.
+    margin, rather than a fixed blind duration. The release drives back
+    config.CLICK_RELEASE_FRACTION of that distance — just enough to clear
+    the switch, without needing to return to the start position. See
+    config.CLICK_PRESS_* for the margin/clamp/fallback constants.
 
     The press and release themselves still run inside a **single RPi Python
     script**, so there is no host round-trip and no VLM pause between them —
@@ -776,9 +777,10 @@ def click_button(
 
     # 4. Press and release — single RPi script, one VQA call.
     desc = f"click_button speed={speed} press_degrees={press_degrees}"
+    release_degrees = int(round(press_degrees * config.CLICK_RELEASE_FRACTION))
     expected_str = expected if expected else (
         f"robot drives forward ~{press_degrees}° wheel rotation (pressing button), "
-        "then immediately reverses the same amount (releasing)"
+        f"then immediately reverses ~{release_degrees}° (releasing, clearing the switch)"
     )
     return _with_change_analysis(
         desc, expected_str,

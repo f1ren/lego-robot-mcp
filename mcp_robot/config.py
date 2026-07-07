@@ -103,6 +103,11 @@ CLICK_PRESS_MAX_MM      = float(os.getenv("CLICK_PRESS_MAX_MM",      "200.0"))
 CLICK_PRESS_MARGIN_MM   = float(os.getenv("CLICK_PRESS_MARGIN_MM",   "40.0"))
 CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 
+# After pressing, click_button only needs to back off far enough to clear
+# the switch — it does not need to return to the pre-press position. Default
+# release distance is this fraction of press_degrees.
+CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
+
 # ── Target scan (front-camera sweep when external camera can't see target) ───
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
 SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "360"))   # total arc to sweep

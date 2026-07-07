@@ -291,10 +291,12 @@ def click_button(
         speed:           Wheel speed (positive = forward into button).
         press_degrees:   Wheel-encoder degrees to drive forward (into button).
         release_degrees: Wheel-encoder degrees to drive back afterward.
-                         Defaults to press_degrees (returns to start position).
+                         Defaults to config.CLICK_RELEASE_FRACTION of
+                         press_degrees — just enough to clear the switch;
+                         no need to return all the way to the start position.
     """
     if release_degrees is None:
-        release_degrees = press_degrees
+        release_degrees = int(round(press_degrees * config.CLICK_RELEASE_FRACTION))
     # Motor A (left wheel) is physically inverted — negate so positive=forward.
     left_press   = -speed   # forward
     right_press  =  speed
