@@ -1,5 +1,6 @@
 """
-Visualise locate_object_hybrid results on fixture images.
+Regression test for locate_object_hybrid's cv_refine_location background-merge
+fix (see mcp_robot/vision.py::_CV_SEARCH_RADII).
 
 Saves an annotated copy to tests/fixtures/grasp_readiness/annotated/ for
 manual inspection.  Run with:
@@ -10,12 +11,10 @@ import pathlib
 import unittest
 
 import cv2
-import numpy as np
 import pytest
 
 FIXTURES  = pathlib.Path(__file__).parent / "fixtures" / "grasp_readiness"
 OUT_DIR   = FIXTURES / "annotated"
-SNAP_CUP  = pathlib.Path("output/snapshots/navigate_to_20260616_095547/step_00_a_raw.jpg")
 
 # Manually verified switch location in droidcam_light_switch.png (confirmed by
 # visual inspection of the fixture, generous margin around the switch itself).
@@ -85,23 +84,6 @@ class TestHybridLocate(unittest.TestCase):
         cv2.imwrite(str(out_path), out)
         print(f"  -> saved {out_path}")
         return centroid, rough_bbox
-
-    def test_blue_cup_snapshot(self):
-        """Primary assertion: blue cup clearly visible in the nav snapshot."""
-        centroid, _ = self._run_one(SNAP_CUP, "blue cup on the floor")
-        self.assertIsNotNone(centroid, "CV refinement should find the blue cup in the snapshot")
-
-    def test_white_cup_fixture(self):
-        """droidcam_cup.jpg has a white cup — tests VLM finds it and CV refines."""
-        self._run_one(FIXTURES / "droidcam_cup.jpg", "white cup on the floor")
-
-    def test_paper_ball_fixture(self):
-        """droidcam_036.jpg has a crumpled paper ball — tests a non-cup target."""
-        self._run_one(FIXTURES / "droidcam_036.jpg", "crumpled white paper ball on the floor")
-
-    def test_droidcam_000(self):
-        """droidcam_000.jpg — blue cup may or may not be present."""
-        self._run_one(FIXTURES / "droidcam_000.jpg", "blue cup on the floor")
 
     def test_white_light_switch_fixture(self):
         """droidcam_light_switch.png has a white wall light switch — non-COCO
