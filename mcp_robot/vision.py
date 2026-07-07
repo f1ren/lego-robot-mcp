@@ -834,12 +834,20 @@ def locate_object_vlm(
 _CV_SEARCH_EXPANSION = 3.0
 
 # Search radii (× rough-bbox size) to try, smallest first, capped at
-# _CV_SEARCH_EXPANSION. Stopping at the first radius whose best contour falls
-# within the expected area range keeps the search tight around the VLM's
-# rough bbox whenever possible: a same-colour region further out (e.g. a
-# sunlit wall behind a white switch) would otherwise merge with the target
-# and win by sheer size once the full window is searched in one shot.
+# _CV_SEARCH_EXPANSION. The leading _CV_SEARCH_RADII_TRUSTED radii are all
+# tried, keeping the largest in-range contour across them — the VLM's rough
+# bbox can be anchored to just part of the object (a corner, an edge, a
+# highlight), so the smallest radius often finds a plausible-sized but
+# incomplete blob; only a larger radius reveals the object's true extent.
+# The remaining (wider) radii are a last resort, tried only if nothing
+# qualifies within the trusted radii, and stop at the first hit: a same-colour
+# region further out (e.g. a sunlit wall behind a white switch) reliably
+# merges with the target once the window is wide enough, and can still land
+# inside the (generous) area range by sheer size — the area range alone can't
+# be trusted to reject it, so once a trusted-radius match exists, wider radii
+# are never even considered.
 _CV_SEARCH_RADII = (0.0, 0.25, 0.5, 1.0, 2.0, _CV_SEARCH_EXPANSION)
+_CV_SEARCH_RADII_TRUSTED = 4
 
 
 def cv_refine_location(
@@ -853,9 +861,15 @@ def cv_refine_location(
     Refine a VLM rough bounding box using HSV color segmentation.
 
     Searches progressively larger windows around the rough bbox (see
-    _CV_SEARCH_RADII, capped at _CV_SEARCH_EXPANSION × bbox_size), stopping at
-    the first radius whose best color blob falls within the expected area
-    range. Falls back to the largest blob at the widest radius if none do.
+    _CV_SEARCH_RADII / _CV_SEARCH_RADII_TRUSTED). Within the trusted radii,
+    tries all of them and keeps the largest color blob that falls within the
+    expected area range, rather than stopping at the first radius with any
+    in-range blob — the rough bbox can be anchored to only part of the
+    object, so a small radius can find a plausible-sized but incomplete blob
+    before a larger radius reveals the object's true, larger extent. Only
+    widens past the trusted radii if none of them land a match, and then
+    stops at the first hit. Falls back to the largest raw blob at the widest
+    radius if nothing lands in range anywhere.
 
     Returns (refined_bbox, centroid) in full-image pixel coords, or None if no
     matching blob is found at any radius.
@@ -870,11 +884,15 @@ def cv_refine_location(
     exp_px   = expected_area_frac * total_px
     kernel   = np.ones((7, 7), np.uint8)
 
-    contours: list = []
-    sx1 = sy1 = sx2 = sy2 = 0
     best = None
+    best_origin = (0, 0)
+    last_contours: list = []
+    last_origin = (0, 0)
 
-    for radius in _CV_SEARCH_RADII:
+    for i, radius in enumerate(_CV_SEARCH_RADII):
+        if best is not None and i >= _CV_SEARCH_RADII_TRUSTED:
+            break  # already have a trustworthy match nearby — don't risk widening into merged background
+
         pad = int(bbox_size * radius)
         sx1 = max(0, rx1 - pad)
         sy1 = max(0, ry1 - pad)
@@ -897,23 +915,31 @@ def cv_refine_location(
         mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN,  kernel)
 
         contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        last_contours, last_origin = contours, (sx1, sy1)
         if not contours:
             continue
 
         valid = [c for c in contours
                  if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0]
-        if valid:
-            best = max(valid, key=_cv2.contourArea)
-            log.info("cv_refine_location: valid contour at radius=%.2fx bbox_size", radius)
-            break
+        if not valid:
+            continue
+
+        candidate = max(valid, key=_cv2.contourArea)
+        if best is None or _cv2.contourArea(candidate) > _cv2.contourArea(best):
+            best = candidate
+            best_origin = (sx1, sy1)
+            log.info("cv_refine_location: new best contour at radius=%.2fx bbox_size (area=%.0f)",
+                     radius, _cv2.contourArea(candidate))
 
     if best is None:
-        if not contours:
+        if not last_contours:
             log.warning("cv_refine_location: no contours found in search region")
             return None
         log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; using largest", exp_px)
-        best = max(contours, key=_cv2.contourArea)
+        best = max(last_contours, key=_cv2.contourArea)
+        best_origin = last_origin
 
+    sx1, sy1 = best_origin
     M = _cv2.moments(best)
     if M["m00"] == 0:
         log.warning("cv_refine_location: zero-area contour moment")
@@ -924,8 +950,8 @@ def cv_refine_location(
     bx, by, bw, bh = _cv2.boundingRect(best)
     refined_bbox = (bx + sx1, by + sy1, bx + sx1 + bw, by + sy1 + bh)
 
-    log.info("cv_refine_location: centroid=(%d,%d) refined_bbox=%s area=%.0fpx search=[%d,%d,%d,%d]",
-             cx, cy, refined_bbox, _cv2.contourArea(best), sx1, sy1, sx2, sy2)
+    log.info("cv_refine_location: centroid=(%d,%d) refined_bbox=%s area=%.0fpx",
+             cx, cy, refined_bbox, _cv2.contourArea(best))
     return refined_bbox, (cx, cy)
 
 
