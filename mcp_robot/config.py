@@ -181,7 +181,11 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
 # Model used for free-text object localization (locate_object tool / VLM fallback).
 # Flash is fast and cheap; override with LOCATE_OBJECT_MODEL if needed.
-LOCATE_OBJECT_MODEL = os.getenv("LOCATE_OBJECT_MODEL", "gemini-2.5-flash")
+# LOCATE_OBJECT_FALLBACK_MODEL is tried on quota exhaustion (429/RESOURCE_EXHAUSTED).
+# It has its own independent per-model RPD quota, so the pair stacks rather than
+# sharing one daily budget.
+LOCATE_OBJECT_MODEL          = os.getenv("LOCATE_OBJECT_MODEL",          "gemini-3.5-flash")
+LOCATE_OBJECT_FALLBACK_MODEL = os.getenv("LOCATE_OBJECT_FALLBACK_MODEL", "gemini-2.5-flash")
 
 # Skip VQA verification for lower_arm (the action is reliable enough).
 # Set LOWER_ARM_VQA=1 to re-enable.
