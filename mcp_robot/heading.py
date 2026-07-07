@@ -112,10 +112,12 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
 
     contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
+        log.info("body_hull: no yellow contours found in frame")
         return None
     seed = max(contours, key=cv2.contourArea)
     seed_center = _centroid(seed)
     if seed_center is None:
+        log.info("body_hull: largest yellow contour has degenerate (zero-area) centroid")
         return None
     sx, sy, sw, sh = cv2.boundingRect(seed)
     cluster_radius = float(np.hypot(sw, sh)) * 1.6
@@ -130,7 +132,14 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
             pts.append(c.reshape(-1, 2))
     body_pts = np.vstack(pts)
     body = cv2.convexHull(body_pts)
-    if cv2.contourArea(body) < _MIN_BODY_AREA_FRAC * frame_area:
+    area = cv2.contourArea(body)
+    min_area = _MIN_BODY_AREA_FRAC * frame_area
+    if area < min_area:
+        log.info(
+            "body_hull: yellow blob too small (%.0fpx < %.0fpx min, %.2f%% of frame) — "
+            "robot may be out of frame, far away, or occluded",
+            area, min_area, 100.0 * area / frame_area,
+        )
         return None
     return body
 
@@ -141,6 +150,7 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     detection is unreliable (robot out of frame, gripper occluded, etc).
     """
     if bgr is None or bgr.size == 0:
+        log.info("detect_heading: empty/invalid frame")
         return None
     h, w = bgr.shape[:2]
     frame_area = h * w
@@ -154,9 +164,11 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     # ── 1. Find the yellow body ───────────────────────────────────────────
     body = body_hull(bgr)
     if body is None:
+        log.info("detect_heading: aborting — no robot body detected (see body_hull log above)")
         return None
     body_center = _centroid(body)
     if body_center is None:
+        log.info("detect_heading: body hull found but centroid degenerate (zero-area moments)")
         return None
     bx, by, bw, bh = cv2.boundingRect(body)
 
@@ -184,6 +196,10 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         threshold=30, minLineLength=25, maxLineGap=8,
     )
     if lines is None or len(lines) < 3:
+        log.info(
+            "detect_heading: body found at %s but too few Hough lines for forward axis (%d found, need >=3)",
+            body_center, 0 if lines is None else len(lines),
+        )
         return None
     # Length-weighted histogram of line angles in [0, 180).
     angle_hist = np.zeros(180, dtype=np.float32)
@@ -264,6 +280,11 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
             arrow_anchor = (cx_full, cy_full)
             gripper_area = int(area)
     if arrow_anchor is None:
+        log.info(
+            "detect_heading: body+axis found at %s but no gripper/arm blob detected — "
+            "gripper may be occluded or outside the search ROI",
+            body_center,
+        )
         return None
 
     # Disambiguate front-vs-back using the gripper centroid: forward points

@@ -778,9 +778,19 @@ def capture_droidcam_still(
                 target_class_yolo, target_class_free_text, abs(angle_deg), rot_dir,
                 dist_px or 0, robot_radius_px or 0,
             )
+        elif robot_radius_px is None:
+            # annotate_frame_with_object bails out before YOLO/VLM run at all
+            # when detect_heading() itself fails — see mcp_robot.heading logs
+            # for which stage (body/axis/gripper) failed.
+            log.info(
+                "Heading analysis: yolo=%r free_text=%r — robot heading not detected; "
+                "object search was not attempted (see mcp_robot.heading log above)",
+                target_class_yolo, target_class_free_text,
+            )
         else:
             log.info(
-                "Heading analysis: yolo=%r free_text=%r — no matching object detected; heading arrow only",
+                "Heading analysis: yolo=%r free_text=%r — heading OK, but no matching object found "
+                "(YOLO + VLM fallback both missed); heading arrow only",
                 target_class_yolo, target_class_free_text,
             )
         return annotated_b64, angle_deg, note, dist_px, robot_radius_px, body_area_px
