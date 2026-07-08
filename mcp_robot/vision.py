@@ -793,8 +793,10 @@ def locate_object_vlm(
         return None
 
     try:
-        x1 = int(data["x1"] * w)
-        y1 = int(data["y1"] * h)
+        # Gemini occasionally emits "x"/"y" instead of the requested "x1"/"y1"
+        # for the top-left corner — fall back to those before giving up.
+        x1 = int(data.get("x1", data.get("x")) * w)
+        y1 = int(data.get("y1", data.get("y")) * h)
         x2 = int(data["x2"] * w)
         y2 = int(data["y2"] * h)
     except (KeyError, TypeError) as exc:
