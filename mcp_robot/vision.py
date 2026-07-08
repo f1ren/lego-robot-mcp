@@ -850,6 +850,21 @@ _CV_SEARCH_RADII = (0.0, 0.25, 0.5, 1.0, 2.0, _CV_SEARCH_EXPANSION)
 _CV_SEARCH_RADII_TRUSTED = 4
 
 
+def _contour_overlaps_bbox(
+    contour: np.ndarray,
+    origin: tuple[int, int],
+    bbox: tuple[int, int, int, int],
+) -> bool:
+    """True if contour's bounding rect (ROI-local, translated by origin) overlaps bbox."""
+    import cv2 as _cv2
+
+    ox, oy = origin
+    bx, by, bw, bh = _cv2.boundingRect(contour)
+    cx1, cy1, cx2, cy2 = bx + ox, by + oy, bx + ox + bw, by + oy + bh
+    bx1, by1, bx2, by2 = bbox
+    return cx1 < bx2 and cx2 > bx1 and cy1 < by2 and cy2 > by1
+
+
 def cv_refine_location(
     bgr: np.ndarray,
     rough_bbox: tuple[int, int, int, int],
@@ -863,13 +878,18 @@ def cv_refine_location(
     Searches progressively larger windows around the rough bbox (see
     _CV_SEARCH_RADII / _CV_SEARCH_RADII_TRUSTED). Within the trusted radii,
     tries all of them and keeps the largest color blob that falls within the
-    expected area range, rather than stopping at the first radius with any
-    in-range blob — the rough bbox can be anchored to only part of the
-    object, so a small radius can find a plausible-sized but incomplete blob
-    before a larger radius reveals the object's true, larger extent. Only
-    widens past the trusted radii if none of them land a match, and then
-    stops at the first hit. Falls back to the largest raw blob at the widest
-    radius if nothing lands in range anywhere.
+    expected area range AND overlaps the rough bbox, rather than stopping at
+    the first radius with any in-range blob — the rough bbox can be anchored
+    to only part of the object, so a small radius can find a plausible-sized
+    but incomplete blob before a larger radius reveals the object's true,
+    larger extent. The overlap requirement exists because area alone isn't a
+    reliable filter: a same-colour background region just outside the rough
+    bbox (e.g. sunlit floor below a white switch) can produce a contour that
+    coincidentally falls within the generous area band once the window is
+    wide enough, even though it shares no pixels with what the VLM actually
+    pointed at. Only widens past the trusted radii if none of them land a
+    match, and then stops at the first hit. Falls back to the largest raw
+    blob at the widest radius if nothing lands in range anywhere.
 
     Returns (refined_bbox, centroid) in full-image pixel coords, or None if no
     matching blob is found at any radius.
@@ -920,7 +940,8 @@ def cv_refine_location(
             continue
 
         valid = [c for c in contours
-                 if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0]
+                 if exp_px * 0.05 <= _cv2.contourArea(c) <= exp_px * 20.0
+                 and _contour_overlaps_bbox(c, (sx1, sy1), rough_bbox)]
         if not valid:
             continue
 
@@ -935,8 +956,22 @@ def cv_refine_location(
         if not last_contours:
             log.warning("cv_refine_location: no contours found in search region")
             return None
-        log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; using largest", exp_px)
-        best = max(last_contours, key=_cv2.contourArea)
+        # Nothing satisfied the area band at any radius. Prefer a contour that
+        # at least overlaps the rough bbox over the single largest raw blob in
+        # the widest window — the widest window can contain large, completely
+        # unrelated regions (e.g. a sunlit floor patch), and picking by size
+        # alone would pick one of those over a smaller, plausible, on-target
+        # blob that merely missed the area band.
+        overlapping = [c for c in last_contours
+                       if _contour_overlaps_bbox(c, last_origin, rough_bbox)]
+        if overlapping:
+            log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; "
+                        "using largest overlapping rough bbox", exp_px)
+            best = max(overlapping, key=_cv2.contourArea)
+        else:
+            log.warning("cv_refine_location: no contour in area range or overlapping rough bbox "
+                        "(exp=%.0fpx) at any radius; using largest raw blob", exp_px)
+            best = max(last_contours, key=_cv2.contourArea)
         best_origin = last_origin
 
     sx1, sy1 = best_origin
