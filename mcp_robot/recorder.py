@@ -42,6 +42,8 @@ from mcp_robot import config
 from mcp_robot.vision import _CAPTURE_MOTION_THRESHOLD, _MOTION_PIXEL_THRESH, _MOTION_PIXEL_COUNT
 
 log = logging.getLogger(__name__)
+if config.SEGMENT_MOTION_LOG:
+    log.setLevel(logging.DEBUG)
 
 
 @dataclass
@@ -76,8 +78,10 @@ class _CameraState:
     calib_done: bool = False
     motion_threshold: float = _CAPTURE_MOTION_THRESHOLD
     motion_pixel_count: int = _MOTION_PIXEL_COUNT
-    # Cross-camera sync: epoch when another camera last detected its own motion
+    # Cross-camera sync: epoch when another camera last detected its own motion,
+    # and which camera that was (for diagnostics — see SEGMENT_MOTION_LOG).
     cross_trigger_ts: float = 0.0
+    cross_trigger_source: str | None = None
 
 
 def _is_motion(
@@ -85,11 +89,19 @@ def _is_motion(
     cur_gray: np.ndarray,
     mean_threshold: float = _CAPTURE_MOTION_THRESHOLD,
     pixel_count: int = _MOTION_PIXEL_COUNT,
+    camera: str | None = None,
 ) -> bool:
     diff = np.abs(prev_gray.astype(np.float32) - cur_gray.astype(np.float32))
-    if float(diff.mean()) > mean_threshold:
-        return True
-    return int(np.sum(diff > _MOTION_PIXEL_THRESH)) > pixel_count
+    mean_diff = float(diff.mean())
+    n_changed = int(np.sum(diff > _MOTION_PIXEL_THRESH))
+    motion = mean_diff > mean_threshold or n_changed > pixel_count
+    if motion and camera is not None:
+        tripped = "mean" if mean_diff > mean_threshold else "pixel_count"
+        log.debug(
+            "recorder: %s own_motion tripped=%s mean_diff=%.3f(thr=%.2f) changed_px=%d(thr=%d)",
+            camera, tripped, mean_diff, mean_threshold, n_changed, pixel_count,
+        )
+    return motion
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -199,7 +211,7 @@ class SegmentRecorder:
             # ── motion detection ────────────────────────────────────────────
             own_motion = (
                 False if state.prev_gray is None
-                else _is_motion(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count)
+                else _is_motion(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count, camera=camera)
             )
 
             # Cross-trigger: another camera fired its own motion recently.
@@ -209,9 +221,13 @@ class SegmentRecorder:
 
             # Propagate own motion to all other registered cameras.
             if own_motion:
+                others = [c for c in self._cameras if c != camera]
+                if others:
+                    log.debug("recorder: %s own_motion cross-triggers %s", camera, others)
                 for other_cam, other_state in self._cameras.items():
                     if other_cam != camera:
                         other_state.cross_trigger_ts = ts
+                        other_state.cross_trigger_source = camera
 
             # ── segment logic ───────────────────────────────────────────────
             if state.open_segment is None:
