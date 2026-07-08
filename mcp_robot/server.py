@@ -625,6 +625,7 @@ def _square_up_to_target(
             target_class_yolo=target_class_yolo,
             target_class_free_text=target_class_free_text,
         )
+        viz.log_annotated_images(frame_result["frame"])
         _last_target_distance_px = frame_result.get("object_distance_px")
         _last_target_robot_radius_px = frame_result.get("robot_radius_px")
         _last_target_yolo = target_class_yolo
