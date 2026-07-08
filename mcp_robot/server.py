@@ -162,6 +162,50 @@ def _target_too_far() -> str | None:
     )
 
 
+def _resolve_target(target_class_yolo: str, target_class_free_text: str) -> tuple[str, str]:
+    """Fall back to the last target seen by navigate_to()/click_button() when
+    both explicit target params are blank. If either is given explicitly, use
+    exactly what was given — never mix an explicit field with a stale one
+    from a prior, unrelated target.
+    """
+    if not target_class_yolo and not target_class_free_text:
+        return _last_target_yolo, _last_target_free_text
+    return target_class_yolo, target_class_free_text
+
+
+def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tuple[float | None, float | None]:
+    """Capture a fresh droidcam still and measure *target*'s angle off the
+    robot's forward heading and straight-line distance, converted to mm.
+
+    Updates the _last_target_* globals as a side effect (same fields
+    get_robot_state writes), so _target_too_far() reflects this fresh
+    reading immediately afterward.
+
+    Returns (angle_deg, distance_mm) — either is None if the target wasn't
+    detected; distance_mm alone may be None if the target was seen but the
+    robot's own body plate wasn't visible for px->mm calibration.
+    """
+    global _last_target_distance_px, _last_target_robot_radius_px
+    global _last_target_yolo, _last_target_free_text
+    frame_result = cam_mod.capture_droidcam_still(
+        target_class_yolo=target_class_yolo,
+        target_class_free_text=target_class_free_text,
+    )
+    viz.log_annotated_images(frame_result["frame"])
+    _last_target_distance_px = frame_result.get("object_distance_px")
+    _last_target_robot_radius_px = frame_result.get("robot_radius_px")
+    _last_target_yolo = target_class_yolo
+    _last_target_free_text = target_class_free_text
+    dist_px = frame_result.get("object_distance_px")
+    body_area_px = frame_result.get("robot_body_area_px")
+    distance_mm = None
+    if dist_px is not None and body_area_px is not None:
+        scale = nav_mod.mm_per_px(body_area_px)
+        if scale is not None:
+            distance_mm = dist_px * scale
+    return frame_result.get("object_angle_deg"), distance_mm
+
+
 # Image size caps for frames returned to the MCP client (i.e. shown to Claude).
 # Claude Code truncates MCP tool output at ~25 000 tokens.  A 640×480 JPEG at
 # quality 85 is ~80–120 KB, which base64-encodes to ~110–160 KB (~30–46 K
@@ -593,6 +637,229 @@ def turn(
     )
 
 
+@mcp.tool()
+def turn_to(
+    target_class_yolo: str = "",
+    target_class_free_text: str = "",
+    tolerance_deg: float = config.TURN_TO_TOLERANCE_DEG,
+    speed: int = 20,
+    expected: str = "",
+    context: str = "",
+    sub_observation: str = "",
+    sub_action: str = "",
+) -> dict:
+    """
+    Turn in place to face a target — measures the heading error itself via
+    the external camera, so you don't need to estimate body_degrees by eye.
+
+    If the target isn't visible, repositions once with navigate_to() (which
+    scans and approaches automatically) and re-measures. If already within
+    tolerance_deg, does nothing — no turn, no video/VQA call — and reports
+    the measured angle. Otherwise issues a single turn() by exactly the
+    measured angle.
+
+    Falls back to the last target passed to navigate_to()/click_button()
+    when target_class_yolo and target_class_free_text are both omitted.
+
+    Like turn(), this is only for fine-grained corrections when already
+    within camera range of the target: one uncorrected in-place turn, no
+    obstacle avoidance, refused if the target is too far away (same
+    near-target guard as turn()/drive()). For anything farther, call
+    navigate_to() instead.
+
+    Args:
+        target_class_yolo:      YOLO class for the target (e.g. "cup"). Falls
+                                back to the last target used by navigate_to/
+                                click_button if omitted.
+        target_class_free_text: Free-text description of the target (e.g.
+                                "red plastic cup"). Same fallback as
+                                target_class_yolo.
+        tolerance_deg: Max heading error (degrees) treated as "already facing
+                       the target" — below this, no turn is issued.
+        speed:         Wheel speed, 15–20.
+        expected:      Short description of the expected outcome
+                       (auto-generated if blank).
+        context:       Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup is to the left").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Turning to face cup").
+    """
+    log.info(
+        "[TOOL] turn_to yolo=%r free_text=%r tolerance_deg=%r",
+        target_class_yolo, target_class_free_text, tolerance_deg,
+    )
+    yolo, free = _resolve_target(target_class_yolo, target_class_free_text)
+    if not yolo and not free:
+        return _err(
+            "turn_to: no target specified and no prior target on record — "
+            "pass target_class_yolo/target_class_free_text, or call "
+            "navigate_to()/click_button() first."
+        )
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+
+    try:
+        angle_deg, distance_mm = _measure_target(yolo, free)
+        if angle_deg is None:
+            log.info("turn_to: target not in view, repositioning")
+            navigate_to(
+                yolo, free,
+                sub_observation="Target not in view",
+                sub_action="Repositioning to target",
+            )
+            angle_deg, distance_mm = _measure_target(yolo, free)
+    except Exception as exc:
+        return _err(f"turn_to: alignment check failed: {exc}")
+
+    if angle_deg is None:
+        return _err(
+            f"turn_to: could not locate target ({yolo or free}) to measure "
+            "heading, even after navigate_to."
+        )
+
+    if abs(angle_deg) <= tolerance_deg:
+        log.info("turn_to: already aligned within %.1f° (angle=%.1f°), no turn needed", tolerance_deg, angle_deg)
+        return _ok({
+            "message": f"already facing target within {tolerance_deg}° (measured {angle_deg:.1f}°); no turn needed",
+            "measured_angle_deg": angle_deg,
+            "measured_distance_mm": distance_mm,
+        })
+
+    log.info("turn_to: off by %.1f°, turning to face target", angle_deg)
+    expected_str = expected if expected else f"robot rotates ~{abs(angle_deg):.0f}° to face the target"
+    result = turn(
+        angle_deg,
+        speed=speed,
+        expected=expected_str,
+        context=context or "turn_to: turning to face measured target",
+        sub_observation=sub_observation,
+        sub_action=sub_action,
+    )
+    result["measured_angle_deg"] = angle_deg
+    result["measured_distance_mm"] = distance_mm
+    return result
+
+
+@mcp.tool()
+def drive_to(
+    target_class_yolo: str = "",
+    target_class_free_text: str = "",
+    speed: int = 20,
+    expected: str = "",
+    context: str = "",
+    sub_observation: str = "",
+    sub_action: str = "",
+) -> dict:
+    """
+    Drive straight toward a target by exactly its measured distance — you
+    don't need to estimate duration_s by eye.
+
+    Measures the straight-line distance to the target via the external
+    camera (same px->mm body-plate calibration navigate_to()/click_button()
+    use, then mm->wheel-encoder-degrees via navigation.mm_to_wheel_degrees),
+    and drives forward that far. Unlike click_button()'s press distance,
+    there is no min/max clamp and no overtravel margin added — this aims to
+    stop at the target, not push through it.
+
+    The measured distance is the straight-line distance to the target as
+    currently framed, so it only lands at the target if the robot is
+    already facing it. If the target is off to one side, call turn_to()
+    first.
+
+    If the target isn't visible (or its distance can't be measured),
+    repositions once with navigate_to() and re-measures. Falls back to the
+    last target passed to navigate_to()/click_button() when
+    target_class_yolo and target_class_free_text are both omitted.
+
+    Like drive(), this is only for fine-grained approaches when already
+    within camera range of the target: one uncorrected straight drive, no
+    obstacle avoidance, refused if the target is too far away (same
+    near-target guard as turn()/drive()). For anything farther, call
+    navigate_to() instead.
+
+    Args:
+        target_class_yolo:      YOLO class for the target (e.g. "cup"). Falls
+                                back to the last target used by navigate_to/
+                                click_button if omitted.
+        target_class_free_text: Free-text description of the target (e.g.
+                                "red plastic cup"). Same fallback as
+                                target_class_yolo.
+        speed:    Wheel speed, 15–20. Positive = forward (toward the target).
+        expected: Short description of the expected outcome (auto-generated
+                  if blank).
+        context:  Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Cup dead ahead").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Driving to cup").
+    """
+    log.info(
+        "[TOOL] drive_to yolo=%r free_text=%r speed=%r",
+        target_class_yolo, target_class_free_text, speed,
+    )
+    yolo, free = _resolve_target(target_class_yolo, target_class_free_text)
+    if not yolo and not free:
+        return _err(
+            "drive_to: no target specified and no prior target on record — "
+            "pass target_class_yolo/target_class_free_text, or call "
+            "navigate_to()/click_button() first."
+        )
+    if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
+        return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
+
+    try:
+        angle_deg, distance_mm = _measure_target(yolo, free)
+        if distance_mm is None:
+            log.info("drive_to: target/distance not measurable, repositioning")
+            navigate_to(
+                yolo, free,
+                sub_observation="Target not in view",
+                sub_action="Repositioning to target",
+            )
+            angle_deg, distance_mm = _measure_target(yolo, free)
+    except Exception as exc:
+        return _err(f"drive_to: distance check failed: {exc}")
+
+    if distance_mm is None:
+        return _err(
+            f"drive_to: could not measure distance to target ({yolo or free}), "
+            "even after navigate_to — the target may not be visible, or the "
+            "robot's own body plate isn't visible for px->mm calibration."
+        )
+
+    guard = _target_too_far()
+    if guard:
+        return _err(guard)
+
+    drive_deg = int(round(nav_mod.mm_to_wheel_degrees(distance_mm)))
+    if drive_deg <= 0:
+        log.info("drive_to: already at target (measured distance=%.0fmm), no drive needed", distance_mm)
+        return _ok({
+            "message": f"already at target (measured distance={distance_mm:.0f}mm); no drive needed",
+            "measured_angle_deg": angle_deg,
+            "measured_distance_mm": distance_mm,
+        })
+
+    log.info("drive_to: measured distance=%.0fmm — drive_degrees=%d", distance_mm, drive_deg)
+    desc = f"drive_to speed={speed} drive_degrees={drive_deg} (measured {distance_mm:.0f}mm)"
+    expected_str = expected if expected else (
+        f"robot drives forward ~{drive_deg}° wheel rotation "
+        f"(~{distance_mm:.0f}mm) toward the target"
+    )
+    result = _with_change_analysis(
+        desc, expected_str,
+        lambda: robot_mod.drive_degrees(drive_deg, speed, speed),
+        context=context or "drive_to: driving measured distance to target",
+        vqa_cameras={"droidcam"},
+        sub_observation=sub_observation,
+        sub_action=sub_action,
+    )
+    result["measured_angle_deg"] = angle_deg
+    result["measured_distance_mm"] = distance_mm
+    return result
+
+
 def _square_up_to_target(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -618,30 +885,9 @@ def _square_up_to_target(
     Re-measured after a turn correction, since the drive-forward distance
     should reflect the robot's post-turn position.
     """
-    def _measure() -> tuple[float | None, float | None]:
-        global _last_target_distance_px, _last_target_robot_radius_px
-        global _last_target_yolo, _last_target_free_text
-        frame_result = cam_mod.capture_droidcam_still(
-            target_class_yolo=target_class_yolo,
-            target_class_free_text=target_class_free_text,
-        )
-        viz.log_annotated_images(frame_result["frame"])
-        _last_target_distance_px = frame_result.get("object_distance_px")
-        _last_target_robot_radius_px = frame_result.get("robot_radius_px")
-        _last_target_yolo = target_class_yolo
-        _last_target_free_text = target_class_free_text
-        dist_px = frame_result.get("object_distance_px")
-        body_area_px = frame_result.get("robot_body_area_px")
-        distance_mm = None
-        if dist_px is not None and body_area_px is not None:
-            scale = nav_mod.mm_per_px(body_area_px)
-            if scale is not None:
-                distance_mm = dist_px * scale
-        return frame_result.get("object_angle_deg"), distance_mm
-
     log.info("click_button: positioning — measuring alignment to switch")
     try:
-        angle_deg, distance_mm = _measure()
+        angle_deg, distance_mm = _measure_target(target_class_yolo, target_class_free_text)
         if angle_deg is None:
             log.info("click_button: positioning — switch not in view, repositioning")
             navigate_to(
@@ -649,7 +895,7 @@ def _square_up_to_target(
                 sub_observation="Switch not in view",
                 sub_action="Repositioning to switch",
             )
-            angle_deg, distance_mm = _measure()
+            angle_deg, distance_mm = _measure_target(target_class_yolo, target_class_free_text)
     except Exception as exc:
         return _err(f"click_button: alignment check failed: {exc}"), None
 
@@ -679,7 +925,7 @@ def _square_up_to_target(
     # Re-measure: turning in place can shift the camera's view of both the
     # robot's own body plate and the target enough to change the distance
     # estimate, so use the freshest reading for the upcoming press.
-    _, distance_mm = _measure()
+    _, distance_mm = _measure_target(target_class_yolo, target_class_free_text)
     return None, distance_mm
 
 

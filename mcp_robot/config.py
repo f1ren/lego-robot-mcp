@@ -108,6 +108,13 @@ CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 # release distance is this fraction of press_degrees.
 CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 
+# ── turn_to (target-aware heading correction) ─────────────────────────────────
+# Max heading error (degrees) tolerated before turn_to() issues a turn
+# correction; below this it treats the robot as already facing the target and
+# skips the motor command. Same default as CLICK_ALIGN_TOLERANCE_DEG but kept
+# as a separate knob so tuning one doesn't silently affect the other.
+TURN_TO_TOLERANCE_DEG = float(os.getenv("TURN_TO_TOLERANCE_DEG", "10.0"))
+
 # ── Target scan (front-camera sweep when external camera can't see target) ───
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
 SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "360"))   # total arc to sweep
