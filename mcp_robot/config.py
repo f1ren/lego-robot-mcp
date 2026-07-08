@@ -177,6 +177,13 @@ SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
 # Cross-camera sync: a motion event on any camera triggers recording on all
 # cameras within this time window (seconds).
 SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "1.0"))
+# Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and every
+# cross-camera trigger it causes — mean_diff/pixel counts vs. thresholds, and
+# which camera triggered which. Root logger stays at INFO (server.py), so this
+# only bumps the recorder logger specifically; it won't flood the rest of the
+# log. Default on: this exists to diagnose which camera drives long/stale
+# segments (see 2026-07-08 investigation), set to 0 once that's resolved.
+SEGMENT_MOTION_LOG = bool(int(os.getenv("SEGMENT_MOTION_LOG", "1")))
 
 # ── Merged (tiled) task video ─────────────────────────────────────────────────
 # compile_video.py --camera merged (or compile_video(camera="merged")) tiles
