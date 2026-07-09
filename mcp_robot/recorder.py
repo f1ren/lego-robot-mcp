@@ -113,6 +113,14 @@ def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> boo
     return a_start <= b_end and a_end >= b_start
 
 
+def _decode_frame(frame_b64: str) -> "np.ndarray | None":
+    import base64
+    import cv2
+
+    buf = np.frombuffer(base64.b64decode(frame_b64), dtype=np.uint8)
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
 # Skip the remux when the measured rate is already this close to the declared
 # rate — avoids a pointless ffmpeg call for segments recorded near their
 # intended fps (e.g. the throttled per-action capture path).
@@ -271,17 +279,20 @@ class SegmentRecorder:
         return seg
 
     def _write_frame(self, seg: _Segment, frame_b64: str, ts: float) -> None:
-        import cv2
-        import base64
-
+        # Pre-existing behavior for the continuous live-stream path (unrelated
+        # to log_thought, see below): an occasional corrupt frame from the
+        # camera must not crash on_frame()'s hot path.
         try:
-            buf = np.frombuffer(base64.b64decode(frame_b64), dtype=np.uint8)
-            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            img = _decode_frame(frame_b64)
         except Exception as exc:
             log.debug("recorder._write_frame: decode failed for %s: %s", seg.path, exc)
             return
         if img is None:
             return
+        self._write_decoded_frame(seg, img, ts)
+
+    def _write_decoded_frame(self, seg: _Segment, img: np.ndarray, ts: float) -> None:
+        import cv2
 
         if seg.writer is None:
             h, w = img.shape[:2]
@@ -357,6 +368,69 @@ class SegmentRecorder:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+
+    # ── thought segments ─────────────────────────────────────────────────────
+
+    def log_thought(
+        self,
+        sub_observation: str,
+        sub_action: str,
+        frames_by_camera: dict[str, str],
+        duration_s: float = config.THOUGHT_SEGMENT_DURATION_S,
+        now: float | None = None,
+    ) -> bool:
+        """Synthesize a frozen-frame segment per camera in `frames_by_camera`
+        (camera -> base64 JPEG), each spanning a virtual [now, now+duration_s]
+        window with tool="thought" — for a diagnostic moment that has no real
+        motion to tag. `now` defaults to time.time(); callers (tests) may
+        pass an explicit value to align with a synthetic clock. Segments are
+        permanently exempt from tag_range() (see
+        the `seg.tool != "thought"` guards there) since a synthetic end_ts can
+        still be in the future when the next real action's tag_range call
+        lands, which would otherwise let it overwrite this narration.
+
+        Each camera's segment is built and written entirely outside
+        self._lock: on_frame() is called synchronously, inline, from the same
+        thread that reads each live camera stream (see camera.py's
+        _PiFrameCache.put/_DroidCamFrameCache.put), so holding the lock for
+        the ~45-90 frames written here would stall those threads and drop
+        real, physical frames arriving meanwhile. The lock is only taken
+        briefly at the end, per camera, to pair the manifest append with the
+        recent_closed update atomically.
+
+        Returns True if at least one camera produced a segment.
+        """
+        start_ts = time.time() if now is None else now
+        end_ts = start_ts + duration_s
+        any_ok = False
+        for camera, frame_b64 in frames_by_camera.items():
+            img = _decode_frame(frame_b64)
+            if img is None:
+                continue
+            fps = self.fps_by_camera.get(camera, 15.0)
+            path = os.path.join(self.segment_dir, f"{camera}_{start_ts:.3f}_thought.mp4")
+            seg = _Segment(
+                camera=camera, start_ts=start_ts, path=path, tool="thought",
+                sub_observation=sub_observation or None, sub_action=sub_action or None,
+            )
+            n_frames = max(1, int(round(duration_s * fps)))
+            for i in range(n_frames):
+                self._write_decoded_frame(seg, img, start_ts + i / fps)
+            if seg.writer is not None:
+                seg.writer.release()
+                seg.writer = None
+            if seg.frame_count == 0:
+                continue  # VideoWriter never opened; nothing to record
+            seg.end_ts = end_ts
+            seg.closed = True
+            with self._lock:
+                self._append_manifest(seg)
+                state = self._cameras.setdefault(
+                    camera, _CameraState(recent_closed=deque(maxlen=self.recent_ring))
+                )
+                state.recent_closed.append(seg)
+            any_ok = True
+        return any_ok
 
     # ── manifest I/O (always called while holding self._lock) ──────────────
 
@@ -435,7 +509,7 @@ class SegmentRecorder:
                 rec = json.loads(stripped)
             except Exception:
                 continue
-            if rec.get("camera") != camera or rec.get("end_ts") is None:
+            if rec.get("camera") != camera or rec.get("end_ts") is None or rec.get("tool") == "thought":
                 continue
             if _overlaps(rec["start_ts"], rec["end_ts"], t_start, t_end):
                 rec.update(meta)
@@ -464,15 +538,22 @@ class SegmentRecorder:
             state = self._cameras.get(camera)
             if state is not None:
                 seg = state.open_segment
-                if seg is not None and _overlaps(seg.start_ts, time.time(), t_start, t_end):
+                if (seg is not None and seg.tool != "thought"
+                        and _overlaps(seg.start_ts, time.time(), t_start, t_end)):
                     seg.tool = meta.get("tool", seg.tool)
                     seg.change_description = meta.get("change_description", seg.change_description)
                     seg.sub_observation = meta.get("sub_observation", seg.sub_observation)
                     seg.sub_action = meta.get("sub_action", seg.sub_action)
                     tagged_any = True
 
+                # tool == "thought" segments (log_thought) are permanently
+                # exempt: their end_ts is a synthetic now+duration_s, which can
+                # still be in the future when a real action's window lands, so
+                # without this guard a real tag_range() call could silently
+                # overwrite a diagnostic narration with motor-tool metadata.
                 for seg in state.recent_closed:
-                    if seg.end_ts is not None and _overlaps(seg.start_ts, seg.end_ts, t_start, t_end):
+                    if (seg.tool != "thought" and seg.end_ts is not None
+                            and _overlaps(seg.start_ts, seg.end_ts, t_start, t_end)):
                         seg.tool = meta.get("tool", seg.tool)
                         seg.change_description = meta.get("change_description", seg.change_description)
                         seg.sub_observation = meta.get("sub_observation", seg.sub_observation)

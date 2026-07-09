@@ -28,7 +28,7 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 
 # Troubleshoot
 
-**Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. Pass a 1–3 sentence `failure_context` describing what was tried and why it failed. The tool captures both cameras, attaches the current domain, and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"*
+**Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. Pass a 1–3 sentence `failure_context` describing what was tried and why it failed. Also pass `sub_observation`/`sub_action` (~4 words each, e.g. "No cup found" / "Consulting PDDL domain") — both are **required** (no default): this call has no motion to tag, so it is rendered as its own 3-second subtitled scene in the compiled video, and it is the single most important diagnostic moment to narrate. The tool captures both cameras, attaches the current domain, and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"*
 
 - If the response has `domain_updated: true`, immediately re-call `plan_pddl` with the same problem PDDL — the fix is applied automatically, without touching the original domain file.
 
