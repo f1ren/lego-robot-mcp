@@ -111,6 +111,7 @@ class GraspReadiness:
     arrow_well_over: bool = False
     perp_dist_px: float = 0.0
     dist_to_front_px: float = 0.0
+    missing_distance_mm: float | None = None
     note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -130,6 +131,10 @@ class GraspReadiness:
             "metrics": {
                 "perp_dist_px": round(self.perp_dist_px, 1),
                 "dist_to_front_px": round(self.dist_to_front_px, 1),
+                "missing_distance_mm": (
+                    round(self.missing_distance_mm, 1)
+                    if self.missing_distance_mm is not None else None
+                ),
             },
         }
 
@@ -138,6 +143,8 @@ class GraspReadiness:
         lines = [f"Grasp readiness: {status}", f"Reason: {self.reason}"]
         if self.action:
             lines.append(f"Action needed: {self.action}")
+        if self.missing_distance_mm is not None and self.missing_distance_mm > 0:
+            lines.append(f"Missing drive distance: ~{self.missing_distance_mm:.0f}mm")
         if self.object_detected:
             lines.append(
                 f"Object: {self.object_class} (conf={self.object_confidence:.0%})"
@@ -417,9 +424,27 @@ def _compute_readiness(
     # ── 5. Condition 1: object touching robot body ───────────────────────
     near_x = float(max(obj.x1, min(ax, obj.x2)))
     near_y = float(max(obj.y1, min(ay, obj.y2)))
-    dist_to_front     = math.hypot(ax - near_x, ay - near_y)
-    body_touch_thresh = diag * _BODY_TOUCH_FRAC
-    touches_body      = dist_to_front < body_touch_thresh
+    dist_to_front = math.hypot(ax - near_x, ay - near_y)
+
+    # Real-world gap in mm, via the same body-plate px->mm calibration
+    # drive_to()/click_button() use (navigation.mm_per_px) — see
+    # config.GRASP_TOUCH_THRESHOLD_MM for why this replaced a fixed
+    # image-diagonal pixel fraction (it wasn't perspective-invariant and
+    # under-detected real gaps for objects higher in frame). Imported
+    # lazily: navigation imports DetectedObject from this module at top
+    # level, so a module-level import here would be circular.
+    from mcp_robot import navigation as nav_mod
+    mm_scale = nav_mod.mm_per_px(heading.body_area)
+    dist_to_front_mm = dist_to_front * mm_scale if mm_scale is not None else None
+    if dist_to_front_mm is not None:
+        touches_body = dist_to_front_mm < config.GRASP_TOUCH_THRESHOLD_MM
+        missing_distance_mm = max(0.0, dist_to_front_mm - config.GRASP_TOUCH_THRESHOLD_MM)
+    else:
+        # Body plate not measurable (shouldn't happen once heading is
+        # detected — body_area backs body_center) — fall back to the old
+        # pixel-diagonal heuristic rather than failing closed.
+        touches_body = dist_to_front < diag * _BODY_TOUCH_FRAC
+        missing_distance_mm = None
 
     common = dict(
         object_detected=True,
@@ -430,6 +455,7 @@ def _compute_readiness(
         arrow_well_over=arrow_over,
         perp_dist_px=perp_dist,
         dist_to_front_px=dist_to_front,
+        missing_distance_mm=missing_distance_mm,
         note=obj.note,
     )
 
@@ -451,21 +477,27 @@ def _compute_readiness(
     rot_dir = "CW" if cross > 0 else "CCW"
     rot_deg = math.degrees(math.atan2(perp_dist, max(t, 1.0)))
     rot_hint = f"{rot_deg:.0f}{rot_dir}"
+    gap_desc = f"{dist_to_front_mm:.0f}mm" if dist_to_front_mm is not None else f"{dist_to_front:.0f}px"
 
     # Build actionable feedback
     if not touches_body and not arrow_over:
         reason = (
-            f"Object is too far from the robot "
-            f"(front-gap={dist_to_front:.0f}px, need <{body_touch_thresh:.0f}px) "
+            f"Object is too far from the robot (front-gap={gap_desc}) "
             f"and arrow misses its center (perp={perp_dist:.0f}px)."
         )
-        action = f"Turn {rot_hint} to align the arrow, then drive forward to close the gap."
+        if missing_distance_mm is not None:
+            action = (
+                f"Turn {rot_hint} to align the arrow, then drive forward "
+                f"~{missing_distance_mm:.0f}mm to close the gap."
+            )
+        else:
+            action = f"Turn {rot_hint} to align the arrow, then drive forward to close the gap."
     elif not touches_body:
-        reason = (
-            f"Object is not close enough to the robot body "
-            f"(front-gap={dist_to_front:.0f}px, need <{body_touch_thresh:.0f}px)."
-        )
-        action = "Drive forward to bring the object against the robot's front."
+        reason = f"Object is not close enough to the robot body (front-gap={gap_desc})."
+        if missing_distance_mm is not None:
+            action = f"Drive forward ~{missing_distance_mm:.0f}mm to bring the object against the robot's front."
+        else:
+            action = "Drive forward to bring the object against the robot's front."
     else:
         if t <= 0:
             reason = "Object is behind the robot — arrow does not reach it."
