@@ -117,12 +117,8 @@ def _decode_frame(frame_b64: str) -> "np.ndarray | None":
     import base64
     import cv2
 
-    try:
-        buf = np.frombuffer(base64.b64decode(frame_b64), dtype=np.uint8)
-        return cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    except Exception as exc:
-        log.debug("recorder._decode_frame: decode failed: %s", exc)
-        return None
+    buf = np.frombuffer(base64.b64decode(frame_b64), dtype=np.uint8)
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
 
 # Skip the remux when the measured rate is already this close to the declared
@@ -283,7 +279,14 @@ class SegmentRecorder:
         return seg
 
     def _write_frame(self, seg: _Segment, frame_b64: str, ts: float) -> None:
-        img = _decode_frame(frame_b64)
+        # Pre-existing behavior for the continuous live-stream path (unrelated
+        # to log_thought, see below): an occasional corrupt frame from the
+        # camera must not crash on_frame()'s hot path.
+        try:
+            img = _decode_frame(frame_b64)
+        except Exception as exc:
+            log.debug("recorder._write_frame: decode failed for %s: %s", seg.path, exc)
+            return
         if img is None:
             return
         self._write_decoded_frame(seg, img, ts)
