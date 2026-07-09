@@ -1796,6 +1796,27 @@ def navigate_to(
                 f"Reached max_steps ({max_steps}) without arriving at target"
             )
 
+            # ── Bonus final step: face the target even though we didn't ──
+            # arrive, so the caller isn't left staring at a random heading.
+            frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+            raw_bytes = base64.b64decode(frame_result["frame"])
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            h_result = heading.detect_heading(bgr) if bgr is not None else None
+            robot_px = nav_mod.detect_robot_px(bgr) if bgr is not None else None
+            if robot_px is not None:
+                nav_mod.update_robot_position(obs_map, robot_px)
+            face_deg = (
+                nav_mod.turn_to_face_target(obs_map, h_result)
+                if h_result is not None else None
+            )
+            if face_deg is not None:
+                direction = "CW" if face_deg > 0 else "CCW"
+                log.info("[navigate_to] max_steps reached — final turn %+.0f° %s to face target",
+                         face_deg, direction)
+                robot_mod.turn(float(face_deg), config.NAV_TURN_SPEED)
+                step_logs.append(f"Final turn {face_deg:+.0f}° {direction} to face target (max_steps reached)")
+
     except Exception as exc:
         log.error("[TOOL] navigate_to error: %s", exc, exc_info=True)
         step_logs.append(f"ERROR: {exc}")
