@@ -88,7 +88,7 @@ NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 # ── Button press (click_button pre-alignment + press distance) ───────────────
 # Max heading error (degrees) tolerated before click_button issues a turn
 # correction to square the robot up perpendicular to the switch/button.
-CLICK_ALIGN_TOLERANCE_DEG = float(os.getenv("CLICK_ALIGN_TOLERANCE_DEG", "10.0"))
+CLICK_ALIGN_TOLERANCE_DEG = float(os.getenv("CLICK_ALIGN_TOLERANCE_DEG", "4.0"))
 
 # click_button drives forward by a distance derived from the measured
 # distance to the switch (same px->mm calibration navigate_to uses — see
@@ -127,7 +127,7 @@ GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "40.0"))
 # correction; below this it treats the robot as already facing the target and
 # skips the motor command. Same default as CLICK_ALIGN_TOLERANCE_DEG but kept
 # as a separate knob so tuning one doesn't silently affect the other.
-TURN_TO_TOLERANCE_DEG = float(os.getenv("TURN_TO_TOLERANCE_DEG", "10.0"))
+TURN_TO_TOLERANCE_DEG = float(os.getenv("TURN_TO_TOLERANCE_DEG", "4.0"))
 
 # ── Target scan (front-camera sweep when external camera can't see target) ───
 SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation step
