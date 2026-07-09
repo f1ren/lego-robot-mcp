@@ -428,7 +428,7 @@ class TestSegmentRecorder(unittest.TestCase):
         import numpy as np
         import cv2
 
-        rec = self._make_recorder(calib_enabled=True, calib_frames=4, calib_sigma=3.0)
+        rec = self._make_recorder(calib_enabled=True, calib_frames=4, calib_sigma=3.0, calib_warmup_s=0)
 
         # Build synthetic frames with tiny pixel noise (mean diff ~1, well below 2.5).
         rng = np.random.default_rng(42)
@@ -452,6 +452,35 @@ class TestSegmentRecorder(unittest.TestCase):
         # Threshold must be at or above the global default.
         from mcp_robot.vision import _CAPTURE_MOTION_THRESHOLD
         self.assertGreaterEqual(state.motion_threshold, _CAPTURE_MOTION_THRESHOLD)
+
+    # ── 15b: calibration warm-up delays accumulation until it has elapsed ────
+
+    def test_calibration_warmup_delays_accumulation(self):
+        """Frames arriving before calib_warmup_s has elapsed since the camera's
+        first frame must not be accumulated into the noise sample (they still
+        refresh prev_gray) — accumulation, and eventually calib_done, only
+        start once the warm-up window has closed."""
+        rec = self._make_recorder(calib_enabled=True, calib_frames=2, calib_sigma=3.0, calib_warmup_s=0.5)
+        frame_b64 = _solid_b64(64, 64, 128)
+
+        t = 1000.0
+        # First frame seeds prev_gray and starts the warm-up clock; the next
+        # three land inside the 0.5s warm-up window and must be skipped.
+        for _ in range(4):
+            rec.on_frame("droidcam", frame_b64, t)
+            t = round(t + 0.1, 3)
+
+        state = rec._cameras["droidcam"]
+        self.assertFalse(state.calib_done, "frames inside the warm-up window must not be accumulated")
+        self.assertEqual(len(state.calib_diffs), 0)
+
+        # Jump past the warm-up window (elapsed so far: 0.3s; warm-up ends at 0.5s).
+        t = 1000.6
+        rec.on_frame("droidcam", frame_b64, t)  # first post-warmup diff
+        t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", frame_b64, t)  # second post-warmup diff -> calib_frames=2 reached
+
+        self.assertTrue(state.calib_done, "calibration should complete once warm-up has elapsed and calib_frames diffs are collected")
 
     # ── 16: cross-trigger opens a segment on the second camera ───────────────
 
