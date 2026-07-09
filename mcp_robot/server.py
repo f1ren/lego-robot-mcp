@@ -1830,7 +1830,7 @@ def navigate_to(
         "max_steps_reached":    f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
 
-    if outcome in ("success", "path_blocked", "max_steps_reached"):
+    if outcome in ("success", "max_steps_reached"):
         outcome_text += (
             " If you check the frame(s) above and confirm there are no further "
             "obstacles between the robot and the target, consider drive_to()/"
