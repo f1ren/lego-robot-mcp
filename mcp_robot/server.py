@@ -1830,6 +1830,15 @@ def navigate_to(
         "max_steps_reached":    f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
 
+    if outcome in ("success", "max_steps_reached"):
+        outcome_text += (
+            " If you check the frame(s) above and confirm there are no further "
+            "obstacles between the robot and the target, consider drive_to()/"
+            "turn_to() for the remaining approach instead of calling navigate_to() "
+            "again — they measure the exact angle/distance to the target directly "
+            "from the camera and skip the full replanning loop."
+        )
+
     log_text = "\n\n".join(step_logs) if step_logs else "(no steps executed)"
     if nav_dir and debug_saved:
         log_text += f"\n\nDebug images: {nav_dir}"
