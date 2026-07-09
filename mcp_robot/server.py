@@ -1492,7 +1492,7 @@ def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, 
 def navigate_to(
     target_class_yolo: str,
     target_class_free_text: str,
-    max_steps: int = 6,
+    max_steps: int = 10,
     sub_observation: str = "",
     sub_action: str = "",
 ) -> list[ImageContent | TextContent]:
