@@ -131,8 +131,15 @@ CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 # real-world distance, so a fixed px threshold under-detects real gaps. A
 # ~112mm real gap (object clearly not touching) measured at only ~112px
 # against a ~117px diagonal-fraction threshold — a false "ready" — is what
-# exposed this.
-GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "40.0"))
+# exposed this. The mm-calibrated check must sit strictly between the known
+# touching and not-touching cases logged so far: a cup resting against the
+# gripper (output/logs/mcp_server.log, 2026-07-09 16:51:35,477) measures
+# ~51mm from arrow_anchor — which sits at the yellow body's front-hull edge,
+# not the gripper jaws themselves, so real contact still reads as a nonzero
+# gap — while not-touching cups measure ~110-112mm. 40mm sat below the real
+# touching case (a false "not ready"); 60mm keeps ~9mm margin above the
+# touching case and ~50mm margin below the not-touching cases.
+GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "60.0"))
 
 # ── turn_to (target-aware heading correction) ─────────────────────────────────
 # Max heading error (degrees) tolerated before turn_to() issues a turn
