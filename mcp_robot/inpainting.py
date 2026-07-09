@@ -7,8 +7,11 @@ chain is caught by a separate dark-pixel pass: any dark blob (V<70, S<90) that
 overlaps the dilated footprint zone is included, regardless of the robot's heading.
 Blue wheel hubs are caught by a separate blue-pixel proximity pass so they don't
 bleed into LaMa's output at the mask boundary.
-The target is identified by its YOLO bounding box.  All regions are combined into a
-single binary mask handed to the LaMa deep-inpainting model.
+The target is identified by its detection bounding box (YOLO, or VLM+CV-refine
+hybrid), unioned with its coarser VLM outer_bbox when available so the mask
+reaches real background on every side even if the refined box under-segments
+the object.  All regions are combined into a single binary mask handed to the
+LaMa deep-inpainting model.
 
 Public API:
     build_removal_mask(bgr, nav_heading, target) -> np.ndarray (uint8, 255 = remove)
@@ -215,11 +218,27 @@ def build_removal_mask(
 
     # ── Target mask ───────────────────────────────────────────────────────────
     if target is not None:
+        # Union with outer_bbox (the VLM's coarser pre-refine box) when set.
+        # cv_refine_location's color segmentation can under-segment an object
+        # with non-uniform lighting (e.g. a cup with a shadowed interior),
+        # returning target.x1..y2 anchored well inside the object's true
+        # silhouette. A removal mask built from that alone punches a hole
+        # entirely surrounded by the object's own pixels, so LaMa's
+        # context-aware fill just reconstructs more of the same object
+        # instead of erasing it — the object never visibly disappears from
+        # the frame handed to the depth model. Falling back to the union with
+        # the rough bbox guarantees the mask reaches real floor/background on
+        # every side.
+        tx1, ty1, tx2, ty2 = target.x1, target.y1, target.x2, target.y2
+        if target.outer_bbox is not None:
+            ox1, oy1, ox2, oy2 = target.outer_bbox
+            tx1, ty1 = min(tx1, ox1), min(ty1, oy1)
+            tx2, ty2 = max(tx2, ox2), max(ty2, oy2)
         p = target_padding_px
-        x1 = max(0, target.x1 - p)
-        y1 = max(0, target.y1 - p)
-        x2 = min(w - 1, target.x2 + p)
-        y2 = min(h - 1, target.y2 + p)
+        x1 = max(0, tx1 - p)
+        y1 = max(0, ty1 - p)
+        x2 = min(w - 1, tx2 + p)
+        y2 = min(h - 1, ty2 + p)
         mask[y1:y2, x1:x2] = 255
 
     return mask

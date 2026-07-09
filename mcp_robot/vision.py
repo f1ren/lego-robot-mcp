@@ -995,7 +995,7 @@ def cv_refine_location(
 def locate_object_hybrid(
     bgr: np.ndarray,
     description: str,
-) -> tuple[tuple[int, int, int, int], tuple[int, int], float, str] | None:
+) -> tuple[tuple[int, int, int, int], tuple[int, int], float, str, tuple[int, int, int, int]] | None:
     """
     Locate an object using a VLM→CV hybrid pipeline.
 
@@ -1003,9 +1003,19 @@ def locate_object_hybrid(
     Step 2 — Classical CV: HSV segmentation within a 3× expanded search region
               around the rough bbox → precise contour centroid.
 
-    Returns (bbox, centroid, confidence, note) with pixel coords, where centroid
-    is the CV-derived center (accurate) and bbox is the refined contour bbox.
-    Falls back to the VLM rough bbox center if CV finds nothing.
+    Returns (bbox, centroid, confidence, note, rough_bbox) with pixel coords,
+    where centroid is the CV-derived center (accurate) and bbox is the refined
+    contour bbox. Falls back to the VLM rough bbox center if CV finds nothing.
+
+    rough_bbox is the original (coarser, pre-refine) VLM box, always returned
+    alongside the refined one: cv_refine_location's color segmentation can
+    under-segment an object whose lighting isn't uniform (e.g. a cup with a
+    shadowed interior vs. a bright rim), returning a bbox anchored well inside
+    the object's true silhouette rather than covering it. That's harmless for
+    navigation (centroid stays accurate), but callers that need the object's
+    full extent — e.g. inpainting removal masks — should use the union of
+    bbox and rough_bbox so they don't punch a hole entirely inside the object
+    that a context-aware inpainter just reconstructs as more of that object.
 
     Raises LowConfidenceDetection (propagated from locate_object_vlm) if a
     candidate was found but below the confidence threshold required to act.
@@ -1020,13 +1030,13 @@ def locate_object_hybrid(
     if refined is not None:
         bbox, centroid = refined
         log.info("locate_object_hybrid: CV succeeded — centroid=%s bbox=%s", centroid, bbox)
-        return bbox, centroid, confidence, note
+        return bbox, centroid, confidence, note, rough_bbox
 
     # CV found nothing — fall back to VLM rough center
     rx1, ry1, rx2, ry2 = rough_bbox
     centroid = ((rx1 + rx2) // 2, (ry1 + ry2) // 2)
     log.warning("locate_object_hybrid: CV failed — falling back to VLM rough bbox center %s", centroid)
-    return rough_bbox, centroid, confidence, note
+    return rough_bbox, centroid, confidence, note, rough_bbox
 
 
 def stack_frames(frames_b64: Sequence[str], quality: int = 90) -> str:
