@@ -11,13 +11,24 @@ overlap a given time window.
 Per-camera noise calibration
 ────────────────────────────
 The first SEGMENT_CALIB_FRAMES stable frames received by each camera are used
-to measure that camera's natural frame-to-frame pixel noise.  The motion
-threshold is then set to mean_diff + SIGMA * std_diff above that noise floor,
+to measure that camera's natural frame-to-frame pixel noise.  The mean-diff
+threshold is set to mean_diff + SIGMA * std_diff above that noise floor,
 where SIGMA is SEGMENT_CALIB_SIGMA_PI for the Pi Camera and
 SEGMENT_CALIB_SIGMA for every other camera. This prevents the noisier Pi
 Camera from triggering false-positive segments while the quieter DroidCam
 keeps its baseline sensitivity.  Set SEGMENT_CALIB_ENABLED=0 to skip
 calibration and use the fixed global threshold for all cameras.
+
+The changed-pixel-count threshold uses the same mean + SIGMA * std shape but
+its own, much larger SEGMENT_CALIB_SIGMA_PIXEL_COUNT multiplier, shared
+across cameras. That metric is demonstrably heavy-tailed/bursty (every
+calibration run logged so far measured a pixel-count std comparable to or
+bigger than its own mean) in a way whole-frame mean_diff never is, so it
+needs a much bigger multiple of its own std to get equivalent real-world
+margin against a similarly-sized future spike — see the 2026-07-09
+investigation, where the mean-diff-sized multiplier left the pixel-count
+threshold floor-clipped and a genuine noise frame still cleared it four
+seconds after calibration finished.
 
 Frames are only accumulated into the noise sample after SEGMENT_CALIB_WARMUP_S
 seconds have passed since the camera's first frame (they still keep the
@@ -156,6 +167,7 @@ class SegmentRecorder:
         calib_frames: int = config.SEGMENT_CALIB_FRAMES,
         calib_sigma: float = config.SEGMENT_CALIB_SIGMA,
         calib_sigma_by_camera: dict | None = None,
+        calib_sigma_pixel_count: float = config.SEGMENT_CALIB_SIGMA_PIXEL_COUNT,
         calib_warmup_s: float = config.SEGMENT_CALIB_WARMUP_S,
     ) -> None:
         self.segment_dir = segment_dir
@@ -171,6 +183,7 @@ class SegmentRecorder:
         self.calib_frames = calib_frames
         self.calib_sigma = calib_sigma
         self.calib_sigma_by_camera = calib_sigma_by_camera or {"pi_camera": config.SEGMENT_CALIB_SIGMA_PI}
+        self.calib_sigma_pixel_count = calib_sigma_pixel_count
         self.calib_warmup_s = calib_warmup_s
         self._cameras: dict[str, _CameraState] = {}
         # Shared cross-camera clock (see module docstring): any camera's own
@@ -201,18 +214,22 @@ class SegmentRecorder:
         mean_p = float(np.mean(state.calib_pixel_counts))
         std_p  = float(np.std(state.calib_pixel_counts))
         sigma  = self.calib_sigma_by_camera.get(camera, self.calib_sigma)
+        sigma_px = self.calib_sigma_pixel_count
 
         # Raise the threshold above the noise floor; never drop below the global default.
+        # pixel_count uses its own, much larger sigma_px — see module docstring
+        # ("Per-camera noise calibration") for why this metric needs a bigger
+        # multiplier than mean_diff to get equivalent real-world margin.
         state.motion_threshold  = max(mean_d + sigma * std_d,  _CAPTURE_MOTION_THRESHOLD)
-        state.motion_pixel_count = max(int(mean_p + sigma * std_p), _MOTION_PIXEL_COUNT)
+        state.motion_pixel_count = max(int(mean_p + sigma_px * std_p), _MOTION_PIXEL_COUNT)
         state.calib_done = True
         state.calib_diffs.clear()
         state.calib_pixel_counts.clear()
 
         log.info(
-            "recorder: %s calibrated (σ=%.1f) — noise mean_diff=%.3f σ=%.3f → threshold=%.2f; "
+            "recorder: %s calibrated (σ_diff=%.1f, σ_px=%.1f) — noise mean_diff=%.3f σ=%.3f → threshold=%.2f; "
             "mean_px=%.0f σ=%.0f → pixel_count=%d",
-            camera, sigma, mean_d, std_d, state.motion_threshold,
+            camera, sigma, sigma_px, mean_d, std_d, state.motion_threshold,
             mean_p, std_p, state.motion_pixel_count,
         )
 
