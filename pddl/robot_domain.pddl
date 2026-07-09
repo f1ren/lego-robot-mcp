@@ -15,21 +15,38 @@
     (gripper-open)
   )
 
-  ; Move between two adjacent locations.  Declare (adjacent from to) for every
-  ; navigable pair in the problem (:init).
+  ; Move to approach an object for pick-up.  Requires the arm already lowered
+  ; and the gripper already open, so the robot is grasp-ready for the whole
+  ; approach instead of opening/lowering only after arriving next to the
+  ; target. Declare (adjacent from to) for every navigable pair in the
+  ; problem (:init).
   ; Plan and execute a path that avoids obstacles, reverse and rotates when necessary.
   (:action navigate
     :parameters (?from ?to)
-    :precondition (and (robot-at ?from) (adjacent ?from ?to))
+    :precondition (and (robot-at ?from) (adjacent ?from ?to)
+                       (arm-lowered) (gripper-open))
     :effect (and (not (robot-at ?from)) (robot-at ?to))
   )
 
-  ; Open the gripper.  No precondition — safe to call even if already open.
+  ; Move while already holding an object — the transport leg after pick-up
+  ; and before place. The gripper is necessarily closed around the held
+  ; object here, so (unlike `navigate` above) this does not require
+  ; gripper-open/arm-lowered.
+  (:action navigate-holding
+    :parameters (?from ?to ?o)
+    :precondition (and (robot-at ?from) (adjacent ?from ?to) (holding ?o))
+    :effect (and (not (robot-at ?from)) (robot-at ?to))
+  )
+
+  ; Open the gripper.  Requires the arm to already be lowered (enforces
+  ; "lower arm, then open gripper") and the gripper to be empty — the latter
+  ; also stops the planner from "reopening" the gripper while an object is
+  ; held just to satisfy navigate's precondition again, which would drop it.
   ; Convention: never assert (gripper-open) in (:init), so the planner always
   ; generates this step before pick-up regardless of observed state.
   (:action open-gripper
     :parameters ()
-    :precondition (and)
+    :precondition (and (arm-lowered) (gripper-empty))
     :effect (gripper-open)
   )
 
