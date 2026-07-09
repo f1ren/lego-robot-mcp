@@ -2366,7 +2366,11 @@ def _consult_directive(updated_plan: list[str] | None, plan_error: str | None, n
 
 
 @mcp.tool()
-def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
+def consult_vqa_for_pddl_domain(
+    failure_context: str,
+    sub_observation: str,
+    sub_action: str,
+) -> dict:
     """
     Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
 
@@ -2397,6 +2401,15 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
 
     Args:
         failure_context: 1-3 sentences on what was tried and why it failed.
+        sub_observation: ~4-word video subtitle: what was just observed
+                         (e.g. "No cup found"). REQUIRED — this is the most
+                         important diagnostic moment to narrate, so unlike
+                         motor tools' subtitle params it has no default.
+        sub_action:      ~4-word video subtitle: what's happening now
+                         (e.g. "Consulting PDDL domain"). REQUIRED.
+
+    This call has no motion to tag, so it is rendered as a ~3s frozen-frame
+    scene in the compiled merged video (see recorder.SegmentRecorder.log_thought).
 
     Returns:
         directive       — required next action, in plain imperative language
@@ -2412,6 +2425,8 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
     from mcp_robot import planner as planner_mod
 
     log.info("[TOOL] consult_vqa_for_pddl_domain context=%r", failure_context)
+    if not sub_observation.strip() or not sub_action.strip():
+        return _err("sub_observation and sub_action must both be non-empty.")
 
     # Read the currently active domain (fixed override takes precedence)
     domain_path = (
@@ -2430,6 +2445,12 @@ def consult_vqa_for_pddl_domain(failure_context: str) -> dict:
         ("pi_camera", front["frame"]),
         ("droidcam", ext["frame"]),
     ]
+
+    from mcp_robot.recorder import get_recorder
+    get_recorder().log_thought(
+        sub_observation, sub_action,
+        {"pi_camera": front["frame"], "droidcam": ext["frame"]},
+    )
 
     prompt = (
         f"{vision.CONSULT_DOMAIN_QUESTION}\n\n"

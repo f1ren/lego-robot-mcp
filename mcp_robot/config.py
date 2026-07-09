@@ -198,6 +198,12 @@ SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
 # cross-trigger timestamp, which resolved the race, so this defaults off again.
 SEGMENT_MOTION_LOG = bool(int(os.getenv("SEGMENT_MOTION_LOG", "0")))
 
+# ── Thought/planning segments ────────────────────────────────────────────────
+# SegmentRecorder.log_thought() synthesizes a frozen-frame segment (no real
+# motion) so a non-motion diagnostic moment still appears as a subtitled
+# scene in the merged video.
+THOUGHT_SEGMENT_DURATION_S = float(os.getenv("THOUGHT_SEGMENT_DURATION_S", "3.0"))
+
 # ── Merged (tiled) task video ─────────────────────────────────────────────────
 # compile_video.py --camera merged (or compile_video(camera="merged")) tiles
 # the two cameras plus a subtitle card into one video:

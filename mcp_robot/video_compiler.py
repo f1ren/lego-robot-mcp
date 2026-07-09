@@ -173,16 +173,40 @@ def _group_into_scenes(segments: list[dict], gap_s: float) -> list[list[dict]]:
     the scene's current end, else it starts a new scene. Cross-camera
     triggering keeps both cameras' segments for the same action close in
     time, so this reunites them without relying on tag text (which need not
-    be unique across actions)."""
+    be unique across actions).
+
+    A tool="thought" segment (recorder.SegmentRecorder.log_thought) never
+    joins a non-thought scene and vice versa. Within thought segments,
+    joining additionally requires a matching start_ts: two separate
+    log_thought() calls both carry tool="thought", and a thought's own 3s
+    span plus gap_s is easily enough for a second, distinct call to land
+    within range of the first — matching only on the boolean would merge
+    them into one scene and _scene_subtitle's first-segment-wins rule would
+    silently drop the second call's narration. A shared start_ts (to a small
+    float tolerance) is what actually identifies "the same log_thought()
+    call" (its per-camera segments are stamped from one shared timestamp)."""
     scenes: list[list[dict]] = []
-    scene_end = None
+    scene_end = scene_start_ts = None
+    scene_is_thought = False
     for seg in segments:
-        if scenes and seg["start_ts"] <= scene_end + gap_s:
+        is_thought = seg.get("tool") == "thought"
+        if scenes:
+            if is_thought or scene_is_thought:
+                joins = (is_thought and scene_is_thought
+                         and abs(seg["start_ts"] - scene_start_ts) < 1e-3)
+            else:
+                joins = seg["start_ts"] <= scene_end + gap_s
+        else:
+            joins = False
+
+        if joins:
             scenes[-1].append(seg)
             scene_end = max(scene_end, seg["end_ts"])
         else:
             scenes.append([seg])
             scene_end = seg["end_ts"]
+            scene_start_ts = seg["start_ts"]
+            scene_is_thought = is_thought
     return scenes
 
 

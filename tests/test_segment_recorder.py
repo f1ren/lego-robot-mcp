@@ -8,6 +8,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 import cv2
@@ -613,6 +614,118 @@ class TestSegmentRecorder(unittest.TestCase):
         top_left = frame[0:cell_h, 0:cell_w]
         bottom_left = frame[cell_h:2 * cell_h, 0:cell_w]
         self.assertLess(top_left.mean(), bottom_left.mean())
+
+
+    # ── 19: log_thought produces well-formed manifest entries per camera ────
+
+    def test_log_thought_produces_manifest_entries(self):
+        rec = self._make_recorder(fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0})
+        frame = _solid_b64(64, 64, 100)
+
+        ok = rec.log_thought("No cup found", "Consulting PDDL domain",
+                              {"droidcam": frame, "pi_camera": frame}, duration_s=0.5)
+        self.assertTrue(ok)
+
+        records = _read_manifest(rec.manifest_path)
+        self.assertEqual(len(records), 2)
+        by_camera = {r["camera"]: r for r in records}
+        self.assertAlmostEqual(by_camera["droidcam"]["start_ts"], by_camera["pi_camera"]["start_ts"], places=3)
+        for camera, row in by_camera.items():
+            self.assertEqual(row["tool"], "thought")
+            self.assertEqual(row["sub_observation"], "No cup found")
+            self.assertEqual(row["sub_action"], "Consulting PDDL domain")
+            self.assertIsNone(row["change_description"])
+            expected_frames = round(0.5 * rec.fps_by_camera[camera])
+            self.assertEqual(row["frame_count"], expected_frames)
+            self.assertTrue(os.path.isfile(row["path"]))
+            self.assertEqual(_frame_count(row["path"]), expected_frames)
+
+    # ── 20: log_thought returns promptly, not blocked for duration_s ────────
+
+    def test_log_thought_returns_promptly(self):
+        rec = self._make_recorder(fps_by_camera={"droidcam": 30.0, "pi_camera": 15.0})
+        frame = _solid_b64(64, 64, 100)
+
+        t_wall = time.time()
+        ok = rec.log_thought("Observation", "Action",
+                              {"droidcam": frame, "pi_camera": frame}, duration_s=3.0)
+        elapsed = time.time() - t_wall
+
+        self.assertTrue(ok)
+        self.assertLess(elapsed, 1.0, "log_thought must synthesize frames, not sleep for duration_s")
+
+    # ── 21: tag_range never overwrites a thought segment ────────────────────
+
+    def test_tag_range_does_not_overwrite_thought_segment(self):
+        rec = self._make_recorder()
+        frame = _solid_b64(64, 64, 100)
+        rec.log_thought("No cup found", "Consulting PDDL domain", {"droidcam": frame}, duration_s=0.5)
+
+        records_before = _read_manifest(rec.manifest_path)
+        self.assertEqual(len(records_before), 1)
+        seg_start, seg_end = records_before[0]["start_ts"], records_before[0]["end_ts"]
+
+        ok = rec.tag_range("droidcam", seg_start, seg_end,
+                            {"tool": "drive", "sub_observation": "x", "sub_action": "Driving forward"})
+        self.assertFalse(ok, "a thought segment must never be reported as tagged")
+
+        records_after = _read_manifest(rec.manifest_path)
+        self.assertEqual(records_after[0]["tool"], "thought")
+        self.assertEqual(records_after[0]["sub_observation"], "No cup found")
+        self.assertEqual(records_after[0]["sub_action"], "Consulting PDDL domain")
+
+    # ── 22: tag_range still tags a real segment sitting next to a thought ───
+
+    def test_tag_range_still_tags_real_segment_next_to_thought(self):
+        rec = self._make_recorder()
+        _, seg1 = self._build_closed_gripper_segment(rec, t0=1000.0)
+
+        frame = _solid_b64(64, 64, 100)
+        rec.log_thought("Note", "Thinking", {"droidcam": frame}, duration_s=0.5, now=seg1.start_ts)
+
+        state = rec._cameras["droidcam"]
+        self.assertEqual(len(state.recent_closed), 2, "real segment + thought segment")
+
+        ok = rec.tag_range("droidcam", seg1.start_ts, seg1.end_ts,
+                            {"tool": "control_gripper", "change_description": "gripper opened"})
+        self.assertTrue(ok)
+
+        records = _read_manifest(rec.manifest_path)
+        real_rec = next(r for r in records if r["path"] == seg1.path)
+        thought_rec = next(r for r in records if r["tool"] == "thought")
+        self.assertEqual(real_rec["tool"], "control_gripper")
+        self.assertEqual(real_rec["change_description"], "gripper opened")
+        self.assertEqual(thought_rec["sub_observation"], "Note")
+
+    # ── 23: two distinct log_thought calls produce two distinct scenes ──────
+
+    def test_two_log_thought_calls_produce_distinct_scenes(self):
+        rec = self._make_recorder(fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0})
+        frame = _solid_b64(64, 64, 100)
+
+        t0 = 1000.0
+        rec.log_thought("No cup found", "Consulting PDDL domain",
+                         {"droidcam": frame, "pi_camera": frame}, duration_s=0.5, now=t0)
+        # 1.0s later: within the old (buggy) gap_s(0.5) + duration_s(0.5) window
+        # of the first call's end, but a distinct log_thought() call.
+        t1 = t0 + 1.0
+        rec.log_thought("Still stuck", "Re-planning",
+                         {"droidcam": frame, "pi_camera": frame}, duration_s=0.5, now=t1)
+
+        records = _read_manifest(rec.manifest_path)
+        self.assertEqual(len(records), 4)  # 2 cameras x 2 calls
+        records.sort(key=lambda r: r["start_ts"])
+
+        from mcp_robot import config
+        from mcp_robot.video_compiler import _group_into_scenes, _scene_subtitle
+        scenes = _group_into_scenes(records, config.MERGE_SCENE_GAP_S)
+
+        self.assertEqual(len(scenes), 2, "two distinct log_thought() calls must not merge into one scene")
+        self.assertEqual(len(scenes[0]), 2, "both cameras from the same call must still share one scene")
+        self.assertEqual(len(scenes[1]), 2)
+        subs = [_scene_subtitle(s) for s in scenes]
+        self.assertEqual(subs[0], ("No cup found", "Consulting PDDL domain"))
+        self.assertEqual(subs[1], ("Still stuck", "Re-planning"))
 
 
 if __name__ == "__main__":
