@@ -762,6 +762,22 @@ def drive_to(
     there is no min/max clamp and no overtravel margin added — this aims to
     stop at the target, not push through it.
 
+    Long-range guard: a single blind drive accumulates dead-reckoning error
+    (wheel slip/drift) in proportion to distance, so if the measured distance
+    exceeds config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths
+    (default 2x ROBOT_BODY_LENGTH_MM), the first drive only covers
+    config.DRIVE_TO_PARTIAL_FRACTION of it (default 90%). drive_to() then
+    re-measures from that closer, more reliable range and automatically fires
+    one final drive to close the rest — capped at 2 physical drives total
+    (each independently VQA-verified), so this never turns into an unbounded
+    loop; that's what navigate_to() is for. The result carries
+    `driven_distance_mm`, and — when a second drive ran — `drives_executed: 2`
+    and `first_drive` (the first leg's own change_description/encoder
+    readings), plus a `message` summarizing what happened. If the second
+    measurement fails (target lost, or now out of near-target range), it
+    falls back to reporting the first drive alone and asks the caller to
+    re-invoke drive_to().
+
     The measured distance is the straight-line distance to the target as
     currently framed, so it only lands at the target if the robot is
     already facing it. If the target is off to one side, call turn_to()
@@ -832,8 +848,12 @@ def drive_to(
     if guard:
         return _err(guard)
 
-    drive_deg = int(round(nav_mod.mm_to_wheel_degrees(distance_mm)))
-    if drive_deg <= 0:
+    long_range_threshold_mm = config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
+    first_long_range = distance_mm > long_range_threshold_mm
+    first_drive_mm = distance_mm * config.DRIVE_TO_PARTIAL_FRACTION if first_long_range else distance_mm
+
+    first_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(first_drive_mm)))
+    if first_drive_deg <= 0:
         log.info("drive_to: already at target (measured distance=%.0fmm), no drive needed", distance_mm)
         return _ok({
             "message": f"already at target (measured distance={distance_mm:.0f}mm); no drive needed",
@@ -841,23 +861,141 @@ def drive_to(
             "measured_distance_mm": distance_mm,
         })
 
-    log.info("drive_to: measured distance=%.0fmm — drive_degrees=%d", distance_mm, drive_deg)
-    desc = f"drive_to speed={speed} drive_degrees={drive_deg} (measured {distance_mm:.0f}mm)"
-    expected_str = expected if expected else (
-        f"robot drives forward ~{drive_deg}° wheel rotation "
-        f"(~{distance_mm:.0f}mm) toward the target"
-    )
-    result = _with_change_analysis(
-        desc, expected_str,
-        lambda: robot_mod.drive_degrees(drive_deg, speed, speed),
+    if first_long_range:
+        log.info(
+            "drive_to: measured distance=%.0fmm exceeds long-range threshold=%.0fmm "
+            "(%.1fx body length) — driving %.0f%% = %.0fmm first, then auto-refining "
+            "with one final measured drive (drive_degrees=%d)",
+            distance_mm, long_range_threshold_mm, config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS,
+            config.DRIVE_TO_PARTIAL_FRACTION * 100, first_drive_mm, first_drive_deg,
+        )
+        first_desc = (
+            f"drive_to speed={speed} drive_degrees={first_drive_deg} (driving "
+            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured; 1st of up to "
+            "2 drives to avoid overshoot)"
+        )
+        first_expected = expected if expected else (
+            f"robot drives forward ~{first_drive_deg}° wheel rotation "
+            f"(~{first_drive_mm:.0f}mm) — an intentional partial approach, stopping "
+            f"short of the full {distance_mm:.0f}mm measured distance to avoid "
+            "overshoot; the robot will not yet be at the target"
+        )
+    else:
+        log.info("drive_to: measured distance=%.0fmm — drive_degrees=%d", distance_mm, first_drive_deg)
+        first_desc = f"drive_to speed={speed} drive_degrees={first_drive_deg} (measured {distance_mm:.0f}mm)"
+        first_expected = expected if expected else (
+            f"robot drives forward ~{first_drive_deg}° wheel rotation "
+            f"(~{first_drive_mm:.0f}mm) toward the target"
+        )
+
+    first_result = _with_change_analysis(
+        first_desc, first_expected,
+        lambda: robot_mod.drive_degrees(first_drive_deg, speed, speed),
         context=context or "drive_to: driving measured distance to target",
         vqa_cameras={"droidcam"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
-    result["measured_angle_deg"] = angle_deg
-    result["measured_distance_mm"] = distance_mm
-    return result
+    first_result["measured_angle_deg"] = angle_deg
+    first_result["measured_distance_mm"] = distance_mm
+
+    if not first_long_range:
+        return first_result
+
+    first_result["driven_distance_mm"] = first_drive_mm
+
+    def _stop_after_first(reason: str) -> dict:
+        first_result["partial_drive"] = True
+        first_result["message"] = (
+            f"First drive covered {first_drive_mm:.0f}mm of the {distance_mm:.0f}mm "
+            f"measured distance (long-range guard: over "
+            f"{config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS:.0f}x body length = "
+            f"{long_range_threshold_mm:.0f}mm). {reason}"
+        )
+        return first_result
+
+    if not first_result.get("ok"):
+        return first_result
+
+    # ── Auto-refine: re-measure from the closer range and drive the rest ──────
+    # Capped at one refinement (2 drives total) — auto-loop convenience, not
+    # an unbounded closed loop (that's navigate_to's job). If the second
+    # drive can't happen or can't fully close the gap, fall back to asking
+    # the caller to invoke drive_to() again.
+    try:
+        _, second_distance_mm = _measure_target(yolo, free)
+    except Exception as exc:
+        return _stop_after_first(
+            f"Could not re-measure for the second drive ({exc}) — call "
+            "drive_to() again toward the same target to close the remaining distance."
+        )
+
+    if second_distance_mm is None:
+        return _stop_after_first(
+            "Target not visible for a second measurement — call drive_to() "
+            "again toward the same target to close the remaining distance."
+        )
+
+    guard2 = _target_too_far()
+    if guard2:
+        return _stop_after_first(
+            f"{guard2} The remaining approach needs navigate_to() instead of "
+            "a second drive_to() drive."
+        )
+
+    second_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(second_distance_mm)))
+    if second_drive_deg <= 0:
+        first_result["message"] = (
+            f"First drive covered {first_drive_mm:.0f}mm; re-measured distance is "
+            f"now {second_distance_mm:.0f}mm — already at target, no second drive needed."
+        )
+        return first_result
+
+    second_long_range = second_distance_mm > long_range_threshold_mm
+    log.info(
+        "drive_to: second (final) drive — re-measured distance=%.0fmm, "
+        "drive_degrees=%d (drive 2 of 2, driven in full — no further auto-refine)",
+        second_distance_mm, second_drive_deg,
+    )
+    second_desc = (
+        f"drive_to speed={speed} drive_degrees={second_drive_deg} (2nd of 2 "
+        f"drives, closing remeasured {second_distance_mm:.0f}mm)"
+    )
+    second_expected = (
+        f"robot drives forward ~{second_drive_deg}° wheel rotation "
+        f"(~{second_distance_mm:.0f}mm) to reach the target, completing the "
+        "approach the first drive intentionally left short"
+    )
+    second_result = _with_change_analysis(
+        second_desc, second_expected,
+        lambda: robot_mod.drive_degrees(second_drive_deg, speed, speed),
+        context=context or "drive_to: second drive closing remaining measured distance",
+        vqa_cameras={"droidcam"},
+        sub_observation=sub_observation,
+        sub_action=sub_action,
+    )
+    second_result["measured_angle_deg"] = angle_deg
+    second_result["measured_distance_mm"] = distance_mm
+    second_result["driven_distance_mm"] = first_drive_mm + second_distance_mm
+    second_result["drives_executed"] = 2
+    second_result["first_drive"] = {
+        "driven_mm": first_drive_mm,
+        "change_description": first_result.get("change_description"),
+        "left": first_result.get("left"),
+        "right": first_result.get("right"),
+    }
+    second_result["message"] = (
+        f"Long-range drive ({distance_mm:.0f}mm measured, over "
+        f"{config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS:.0f}x body length) auto-refined "
+        f"in 2 drives: {first_drive_mm:.0f}mm, then a re-measured "
+        f"{second_distance_mm:.0f}mm."
+        + (
+            " The second drive was itself still long-range (2-drive cap reached) — "
+            "verify the result and call drive_to() again if it undershot."
+            if second_long_range else ""
+        )
+    )
+    return second_result
 
 
 def _square_up_to_target(
