@@ -21,6 +21,7 @@ NEARBY_BALL   = FIXTURES / "static_video" / "droidcam_000.jpg"
 CUP_IMG       = FIXTURES / "grasp_readiness" / "droidcam_cup.jpg"
 CUP_TOO_FAR_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_too_far.jpg"
 CUP_TOUCHING_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_touching.jpg"
+CUP_PARTIAL_OCCLUSION_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_partial_occlusion.jpg"
 ANNOTATED_DIR = FIXTURES / "grasp_readiness" / "annotated"
 
 
@@ -312,6 +313,107 @@ class TestGraspReadinessCupTouchingRegression(unittest.TestCase):
             self._result.ready,
             f"Expected READY (cup touching robot body), got: {self._result.reason}",
         )
+
+    def test_to_dict_schema(self):
+        d = self._result.to_dict()
+        for key in ("ready", "reason", "action", "object_detected", "checks", "metrics"):
+            self.assertIn(key, d, f"Missing key '{key}' in to_dict()")
+
+
+class TestGraspReadinessCupPartialOcclusionRegression(unittest.TestCase):
+    """
+    Regression for a real gap-exaggeration bug (output/logs/mcp_server.log,
+    2026-07-09 17:21:46,991): the blue cup sits right next to the robot's
+    gripper, but the gripper's own claws occlude the cup's lower half from the
+    external camera. Gemini's rough VLM box (356,253,398,322) already only
+    covered the visible upper rim, and cv_refine_location's HSV pass on top of
+    it shrank the box further to (373,258,415,311) — under-segmenting even the
+    visible part. That undersized box fed touches_body/arrow_well_over
+    directly, inflating the reported front-gap to 83mm and the alignment
+    offset past threshold — both checks failed by more than the true (still
+    imperfect, but much smaller) gap warranted.
+
+    _vlm_detect is stubbed with that exact logged DetectedObject — same bbox,
+    contact_px, outer_bbox all taken from locate_object_hybrid's real output
+    for this frame — so this test is deterministic/offline and exercises only
+    _compute_readiness's outer_bbox-union fix, without a live Gemini call.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        from mcp_robot.grasp_readiness import DetectedObject
+        grasp_mod._load_model()
+
+        cls._grasp_mod = grasp_mod
+        cls._bgr = _load(CUP_PARTIAL_OCCLUSION_IMG)
+
+        cls._with_union = DetectedObject(
+            class_name="blue cup",
+            confidence=0.95,
+            x1=373, y1=258, x2=415, y2=311,
+            note=(
+                "The blue cup is visible in the upper center-left portion of "
+                "the image, placed on the wooden floor near the white wall."
+            ),
+            contact_px=(392, 282),
+            outer_bbox=(356, 253, 398, 322),
+        )
+        # Same detection, but as it would look before the outer_bbox union fix
+        # (no coarser box to fall back on) — isolates the fix's effect on this
+        # exact real frame instead of comparing against a hardcoded number.
+        cls._without_union = DetectedObject(
+            class_name="blue cup",
+            confidence=0.95,
+            x1=373, y1=258, x2=415, y2=311,
+            note=cls._with_union.note,
+            contact_px=(392, 282),
+            outer_bbox=None,
+        )
+
+        with mock.patch.object(grasp_mod, "_vlm_detect", return_value=cls._with_union):
+            cls._result, cls._heading, cls._obj = grasp_mod._compute_readiness(
+                cls._bgr, target_class_yolo="cup", target_class_free_text="blue cup",
+            )
+        print(f"\n[cup-partial-occlusion regression] {cls._result.to_text()}")
+        _save_annotated(cls._bgr, cls._result, cls._heading, cls._obj,
+                         ANNOTATED_DIR / "droidcam_cup_partial_occlusion_grasp_readiness.jpg")
+
+    def test_front_gap_shrinks_relative_to_undersized_bbox(self):
+        """Without the union, this exact detection reproduces the logged
+        incident's front-gap (dist_to_front_px=73, ready=False). With the
+        union, the measured gap to the robot's front must shrink — the object
+        didn't move, only the box's known extent did."""
+        with mock.patch.object(self._grasp_mod, "_vlm_detect", return_value=self._without_union):
+            baseline, _, _ = self._grasp_mod._compute_readiness(
+                self._bgr, target_class_yolo="cup", target_class_free_text="blue cup",
+            )
+        self.assertEqual(baseline.dist_to_front_px, 73.0,
+                          "baseline (no union) should reproduce the exact logged incident")
+        self.assertLess(
+            self._result.dist_to_front_px, baseline.dist_to_front_px,
+            "outer_bbox union should shrink the measured front-gap, not grow it",
+        )
+
+    def test_missing_distance_much_smaller_than_logged_incident(self):
+        """Logged incident originally reported ~23mm missing to close the gap
+        (front-gap 83mm, threshold 60mm). The union must bring that down
+        noticeably, even though it doesn't need to close it entirely."""
+        self.assertIsNotNone(self._result.missing_distance_mm)
+        self.assertLess(
+            self._result.missing_distance_mm, 15.0,
+            f"Expected missing_distance_mm well below the originally-logged "
+            f"~23mm, got {self._result.missing_distance_mm:.1f}mm",
+        )
+
+    def test_still_not_ready_this_frame_needs_more_driving(self):
+        """The union corrects the *magnitude* of the gap — it doesn't fabricate
+        contact that isn't there. This exact frame is genuinely still a few mm
+        short of touching, so ready must stay False here."""
+        self.assertFalse(self._result.ready, f"got: {self._result.reason}")
+
+    def test_action_still_mentions_distance(self):
+        self.assertIn("mm", self._result.action)
 
     def test_to_dict_schema(self):
         d = self._result.to_dict()

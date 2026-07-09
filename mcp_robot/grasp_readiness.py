@@ -410,7 +410,24 @@ def _compute_readiness(
             note=objects[0].note,
         ), heading, None
 
-    ox, oy = obj.center
+    # Union with outer_bbox (the VLM's coarser pre-refine box) when set, for
+    # the geometry below only. cv_refine_location's colour segmentation — or
+    # the robot's own arm/gripper occluding part of the object from the
+    # external camera, as happens whenever the target sits right at the front
+    # body — can anchor obj.x1..y2 well inside the object's true silhouette,
+    # undershooting both its radius (arrow_well_over) and its near-robot edge
+    # (touches_body). Same union inpainting.py already uses for its removal
+    # mask, for the same reason (mcp_robot/inpainting.py:221-236). obj.center/
+    # contact_px/nav_point are left untouched — still the more accurate point
+    # for navigation aim, and YOLO detections never set outer_bbox anyway.
+    gx1, gy1, gx2, gy2 = obj.x1, obj.y1, obj.x2, obj.y2
+    if obj.outer_bbox is not None:
+        ox1, oy1, ox2, oy2 = obj.outer_bbox
+        gx1, gy1 = min(gx1, ox1), min(gy1, oy1)
+        gx2, gy2 = max(gx2, ox2), max(gy2, oy2)
+    g_radius = max(gx2 - gx1, gy2 - gy1) / 2.0
+
+    ox, oy = (gx1 + gx2) // 2, (gy1 + gy2) // 2
     bx, by = heading.body_center
     fw     = heading.forward
     ax, ay = heading.arrow_anchor
@@ -421,11 +438,11 @@ def _compute_readiness(
     perp_x = dx - t * fw[0]
     perp_y = dy - t * fw[1]
     perp_dist  = math.hypot(perp_x, perp_y)
-    arrow_over = t > 0 and perp_dist < obj.radius * _ARROW_OVER_FRAC
+    arrow_over = t > 0 and perp_dist < g_radius * _ARROW_OVER_FRAC
 
     # ── 5. Condition 1: object touching robot body ───────────────────────
-    near_x = float(max(obj.x1, min(ax, obj.x2)))
-    near_y = float(max(obj.y1, min(ay, obj.y2)))
+    near_x = float(max(gx1, min(ax, gx2)))
+    near_y = float(max(gy1, min(ay, gy2)))
     dist_to_front = math.hypot(ax - near_x, ay - near_y)
 
     # Real-world gap in mm, via the same body-plate px->mm calibration
@@ -452,7 +469,7 @@ def _compute_readiness(
         object_detected=True,
         object_class=obj.class_name,
         object_confidence=obj.confidence,
-        object_center=obj.center,
+        object_center=(ox, oy),
         touches_body=touches_body,
         arrow_well_over=arrow_over,
         perp_dist_px=perp_dist,
