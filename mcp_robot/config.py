@@ -85,6 +85,18 @@ ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "7"))
 # effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
 NAV_TURN_SPEED = int(os.getenv("NAV_TURN_SPEED", "8"))
 
+# navigate_to's post-loop "face the target" turn is a single open-loop
+# rotation computed from an obstacle-map estimate that can be several steps
+# stale (only robot_px is re-tracked each step, not target_px) — large
+# rotations also accumulate more encoder/floor-slip error than small ones.
+# A turn larger than this triggers one fresh camera re-measurement
+# (server._measure_target, the same helper turn_to() uses) plus a small
+# corrective turn if still off by more than TURN_TO_TOLERANCE_DEG. Example
+# that motivated this: a 122° final turn left the robot 10.5° off target.
+NAV_FINAL_TURN_REFINE_THRESHOLD_DEG = float(
+    os.getenv("NAV_FINAL_TURN_REFINE_THRESHOLD_DEG", "30.0")
+)
+
 # ── Button press (click_button pre-alignment + press distance) ───────────────
 # Max heading error (degrees) tolerated before click_button issues a turn
 # correction to square the robot up perpendicular to the switch/button.

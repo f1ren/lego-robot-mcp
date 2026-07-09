@@ -1488,6 +1488,48 @@ def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, 
     return bgr, heading.detect_heading(bgr)
 
 
+def _execute_final_turn(
+    face_deg: float | None,
+    target_class_yolo: str,
+    target_class_free_text: str,
+    label: str,
+) -> str | None:
+    """Execute navigate_to's post-loop "face the target" turn.
+
+    face_deg comes from a single obstacle-map estimate that can be several
+    steps stale (only robot_px is re-tracked each step, not target_px), and
+    large open-loop turns accumulate more encoder/floor-slip error than
+    small ones — so a big turn can leave a meaningful residual heading
+    error. When face_deg exceeds NAV_FINAL_TURN_REFINE_THRESHOLD_DEG,
+    re-measure the heading with a fresh camera capture (the same
+    _measure_target() helper turn_to() uses) and issue one small corrective
+    turn if still off by more than TURN_TO_TOLERANCE_DEG.
+
+    Returns a log-ready summary string, or None if face_deg is None
+    (already facing the target — nothing to do).
+    """
+    if face_deg is None:
+        return None
+    direction = "CW" if face_deg > 0 else "CCW"
+    log.info("[navigate_to] %s %+.0f° %s to face target", label, face_deg, direction)
+    robot_mod.turn(float(face_deg), config.NAV_TURN_SPEED)
+    msg = f"Final turn {face_deg:+.0f}° {direction} to face target"
+
+    if abs(face_deg) <= config.NAV_FINAL_TURN_REFINE_THRESHOLD_DEG:
+        return msg
+
+    angle_deg, _ = _measure_target(target_class_yolo, target_class_free_text)
+    if angle_deg is None or abs(angle_deg) <= config.TURN_TO_TOLERANCE_DEG:
+        return msg
+
+    refine_direction = "CW" if angle_deg > 0 else "CCW"
+    log.info("[navigate_to] %s refinement turn %+.1f° %s (residual after large turn)",
+             label, angle_deg, refine_direction)
+    robot_mod.turn(float(angle_deg), config.NAV_TURN_SPEED)
+    return msg + (f"; refinement turn {angle_deg:+.1f}° {refine_direction} "
+                  "(residual heading error after large turn)")
+
+
 @mcp.tool()
 def navigate_to(
     target_class_yolo: str,
@@ -1758,12 +1800,11 @@ def navigate_to(
             # ── 8. Termination checks ─────────────────────────────────────
             if nav_mod.near_target(obs_map):
                 face_deg = nav_mod.turn_to_face_target(obs_map, h_result)
-                if face_deg is not None:
-                    direction = "CW" if face_deg > 0 else "CCW"
-                    log.info("[navigate_to] final turn %+.0f° %s to face target",
-                             face_deg, direction)
-                    robot_mod.turn(float(face_deg), config.NAV_TURN_SPEED)
-                    parts.append(f"Final turn {face_deg:+.0f}° {direction} to face target")
+                turn_msg = _execute_final_turn(
+                    face_deg, target_class_yolo, target_class_free_text, "final turn"
+                )
+                if turn_msg is not None:
+                    parts.append(turn_msg)
                 parts.append("NEAR TARGET — within C-space buffer distance, "
                              "stopping to avoid collision — navigation complete")
                 step_logs.append("\n".join(parts))
@@ -1823,12 +1864,12 @@ def navigate_to(
                 nav_mod.turn_to_face_target(obs_map, h_result)
                 if h_result is not None else None
             )
-            if face_deg is not None:
-                direction = "CW" if face_deg > 0 else "CCW"
-                log.info("[navigate_to] max_steps reached — final turn %+.0f° %s to face target",
-                         face_deg, direction)
-                robot_mod.turn(float(face_deg), config.NAV_TURN_SPEED)
-                step_logs.append(f"Final turn {face_deg:+.0f}° {direction} to face target (max_steps reached)")
+            turn_msg = _execute_final_turn(
+                face_deg, target_class_yolo, target_class_free_text,
+                "max_steps reached — final turn",
+            )
+            if turn_msg is not None:
+                step_logs.append(f"{turn_msg} (max_steps reached)")
 
     except Exception as exc:
         log.error("[TOOL] navigate_to error: %s", exc, exc_info=True)
