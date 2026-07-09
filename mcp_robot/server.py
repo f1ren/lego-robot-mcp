@@ -2208,13 +2208,16 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     The robot domain (pddl/robot_domain.pddl, or pddl/robot_domain_fixed.pddl
     when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
-    defines six actions:
-      - navigate     ?from ?to         → navigate_to
-      - open-gripper                   → control_gripper(open)
-      - lower-arm                      → lower_arm
-      - lift-arm     ?object           → lift_arm  [requires holding ?object + arm-lowered]
-      - pick-up      ?object ?location → control_gripper(close)  [gripper+arm must be ready]
-      - place        ?object ?location → put  (opens gripper + raises arm)
+    defines seven actions:
+      - navigate         ?from ?to         → navigate_to  [requires arm-lowered + gripper-open —
+                                              this is the approach leg toward a pick-up target]
+      - navigate-holding ?from ?to ?object → navigate_to  [requires holding ?object — the
+                                              transport leg after pick-up, before place]
+      - open-gripper                       → control_gripper(open)  [requires arm-lowered]
+      - lower-arm                          → lower_arm
+      - lift-arm         ?object           → lift_arm  [requires holding ?object + arm-lowered]
+      - pick-up          ?object ?location → control_gripper(close)  [gripper+arm must be ready]
+      - place            ?object ?location → put  (opens gripper + raises arm)
 
     You supply only the *problem* as a PDDL string.  It must declare:
       - (:objects ...) — all location and object instances (untyped)
@@ -2223,8 +2226,12 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Convention — NEVER assert (arm-lowered) or (gripper-open) in (:init), even
     if the robot's physical state has them true.  Omitting them forces the planner
-    to always emit open-gripper and lower-arm before every pick-up, which matches
+    to always emit lower-arm and open-gripper before every pick-up, which matches
     the CLAUDE.md safety rules ("always open/lower regardless of observed state").
+    This is also structurally enforced: `navigate`'s precondition requires
+    arm-lowered + gripper-open, and `open-gripper`'s precondition requires
+    arm-lowered — so the planner cannot reach a pick-up target without first
+    lowering the arm and then opening the gripper, in that order.
 
     Example problem (move a cup from the table to the sink):
 
@@ -2244,16 +2251,17 @@ def plan_pddl(problem_pddl: str) -> dict:
         )
 
     Expected plan for the example above:
-        (navigate loc-start loc-table)
-        (open-gripper)
         (lower-arm)
+        (open-gripper)
+        (navigate loc-start loc-table)
         (pick-up cup loc-table)
-        (navigate loc-table loc-sink)
+        (navigate-holding loc-table loc-sink cup)
         (place cup loc-sink)
 
-    Returns {"plan": ["(navigate loc-start loc-table)", "(open-gripper)", ...]}
+    Returns {"plan": ["(lower-arm)", "(open-gripper)", "(navigate loc-start loc-table)", ...]}
     or {"plan": []} when no solution exists (check initial state / goal consistency).
-    After receiving the plan, execute each step with the corresponding MCP tool.
+    After receiving the plan, execute each step with the corresponding MCP tool —
+    both `navigate` and `navigate-holding` map to navigate_to.
 
     Raises an error if pyperplan is not installed or the domain file is missing.
 
