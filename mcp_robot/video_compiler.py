@@ -128,11 +128,13 @@ def compile_task_video(
 #   right       = external (DroidCam) camera, full column height
 #
 # The two cameras record independent, motion-triggered segments (see
-# recorder.py) that are only approximately aligned in time (cross-triggering
-# keeps them within SEGMENT_CROSS_TRIGGER_WINDOW of each other). To produce
-# one coherent video we first merge same-time segments from both cameras
-# into "scenes" (_group_into_scenes), then render each scene as a tile
-# composite of matched duration, then concatenate the scenes.
+# recorder.py) that are only approximately aligned in time (open/close is
+# driven by one shared cross-camera motion clock, but each camera only
+# evaluates it on its own frame arrivals, so boundaries can differ by about
+# a frame interval). To produce one coherent video we first merge same-time
+# segments from both cameras into "scenes" (_group_into_scenes), then render
+# each scene as a tile composite of matched duration, then concatenate the
+# scenes.
 
 
 def _probe_resolution(path: str) -> tuple[int, int] | None:

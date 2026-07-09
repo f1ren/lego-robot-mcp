@@ -405,7 +405,7 @@ class TestSegmentRecorder(unittest.TestCase):
         trigger_ts = t
         rec.on_frame("droidcam", gripper_b64, trigger_ts)
 
-        # +0.001 margin so `ts - last_motion_ts >= cooldown_s` holds despite
+        # +0.001 margin so `ts - _last_motion_ts >= cooldown_s` holds despite
         # float rounding; actual_fps ~= 1/0.101 ~= 9.9, within 5% of 10.0.
         close_ts = round(trigger_ts + rec.cooldown_s + 0.001, 3)
         rec.on_frame("droidcam", gripper_b64, close_ts)
@@ -455,11 +455,10 @@ class TestSegmentRecorder(unittest.TestCase):
     # ── 16: cross-trigger opens a segment on the second camera ───────────────
 
     def test_cross_trigger_opens_segment_on_second_camera(self):
-        """Motion on droidcam should open a segment on pi_camera within the
-        cross-trigger window even if pi_camera has no own motion."""
+        """Motion on droidcam should open a segment on pi_camera via the
+        shared motion clock even if pi_camera has no own motion."""
         rec = self._make_recorder(
             fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0},
-            cross_trigger_window=1.0,
         )
 
         static_b64 = [_load_b64(f) for f in sorted((FIXTURES / "static_video").glob("droidcam_*.jpg"))[:2]]
@@ -486,7 +485,63 @@ class TestSegmentRecorder(unittest.TestCase):
             "pi_camera should have an open segment due to cross-trigger from droidcam motion",
         )
 
-    # ── 17: compile_merged_video tiles both cameras + subtitle ──────────────
+    # ── 17: shared clock keeps all cameras' segments in sync ────────────────
+
+    def test_shared_clock_closes_all_cameras_together(self):
+        """Regression test for the 2026-07-08 segment misalignment: a camera
+        whose own motion has already stopped must stay open as long as *any*
+        camera keeps tripping its own detector, and once everything goes
+        quiet, every camera closes off the same shared instant instead of
+        racing on independent per-camera cooldowns (which previously let one
+        camera's segment end several seconds before its sibling's for the
+        same action)."""
+        rec = self._make_recorder(fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0})
+
+        lo, hi = _solid_b64(64, 64, 40), _solid_b64(64, 64, 220)
+
+        t = 1000.0
+        # Both cameras trip their own motion at ~the same time and open.
+        rec.on_frame("droidcam", lo, t)
+        rec.on_frame("pi_camera", lo, t)
+        t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", hi, t)
+        rec.on_frame("pi_camera", hi, t)
+
+        droid_state = rec._cameras["droidcam"]
+        pi_state = rec._cameras["pi_camera"]
+        self.assertIsNotNone(droid_state.open_segment)
+        self.assertIsNotNone(pi_state.open_segment)
+
+        # pi_camera goes still (repeats the same frame -> no own motion from
+        # here on); droidcam keeps alternating -> its own motion keeps
+        # tripping and should keep *both* cameras' segments open.
+        last_motion_ts = t
+        for droid_frame in (lo, hi, lo):
+            t = round(t + 0.05, 3)
+            rec.on_frame("pi_camera", hi, t)          # identical -> no own motion
+            rec.on_frame("droidcam", droid_frame, t)  # alternates -> own motion trips
+            last_motion_ts = t
+
+        self.assertIsNotNone(
+            pi_state.open_segment,
+            "pi_camera must stay open: droidcam's own motion refreshes the shared clock",
+        )
+
+        # Now both go quiet. A single frame past cooldown on each should
+        # close both, off the *same* shared last-motion instant.
+        close_ts = round(last_motion_ts + rec.cooldown_s + 0.001, 3)
+        rec.on_frame("droidcam", lo, close_ts)   # identical to last droidcam frame -> no own motion
+        rec.on_frame("pi_camera", hi, close_ts)  # identical to last pi_camera frame -> no own motion
+
+        self.assertIsNone(droid_state.open_segment)
+        self.assertIsNone(pi_state.open_segment)
+        self.assertEqual(
+            droid_state.recent_closed[-1].end_ts,
+            pi_state.recent_closed[-1].end_ts,
+            "both cameras must close off the same shared last-motion instant",
+        )
+
+    # ── 18: compile_merged_video tiles both cameras + subtitle ──────────────
 
     def test_compile_merged_video(self):
         if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:

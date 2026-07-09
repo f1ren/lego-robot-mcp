@@ -174,16 +174,15 @@ SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # Pi camera default AE/AWB hunting shifts whole-frame brightness more than
 # DroidCam's ISP does, so it needs a wider margin above its noise floor.
 SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
-# Cross-camera sync: a motion event on any camera triggers recording on all
-# cameras within this time window (seconds).
-SEGMENT_CROSS_TRIGGER_WINDOW = float(os.getenv("SEGMENT_CROSS_TRIGGER_WINDOW", "1.0"))
-# Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and every
-# cross-camera trigger it causes — mean_diff/pixel counts vs. thresholds, and
-# which camera triggered which. Root logger stays at INFO (server.py), so this
-# only bumps the recorder logger specifically; it won't flood the rest of the
-# log. Default on: this exists to diagnose which camera drives long/stale
-# segments (see 2026-07-08 investigation), set to 0 once that's resolved.
-SEGMENT_MOTION_LOG = bool(int(os.getenv("SEGMENT_MOTION_LOG", "1")))
+# Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and the
+# resulting shared-clock update — mean_diff/pixel counts vs. thresholds, and
+# which camera drove the update. Root logger stays at INFO (server.py), so
+# this only bumps the recorder logger specifically; it won't flood the rest
+# of the log. Was default-on to diagnose which camera drove long/stale
+# segments (see 2026-07-08 investigation); recorder.py now closes all
+# cameras' segments off one shared last-motion clock instead of a per-camera
+# cross-trigger timestamp, which resolved the race, so this defaults off again.
+SEGMENT_MOTION_LOG = bool(int(os.getenv("SEGMENT_MOTION_LOG", "0")))
 
 # ── Merged (tiled) task video ─────────────────────────────────────────────────
 # compile_video.py --camera merged (or compile_video(camera="merged")) tiles
@@ -201,11 +200,13 @@ MERGE_CELL_HEIGHT = int(os.getenv("MERGE_CELL_HEIGHT", "360"))
 MERGE_FPS = float(os.getenv("MERGE_FPS", "30.0"))
 # Segments from either camera within this many seconds of each other are
 # treated as one "scene" (tiled together into one clip) rather than being
-# sequential scenes. Derived from the recorder's own pre-roll/cooldown/
-# cross-trigger knobs so both cameras' segments for the same action reunite.
+# sequential scenes. Derived from the recorder's own pre-roll/cooldown knobs
+# so both cameras' segments for the same action reunite even though the
+# shared-motion-clock in recorder.py only guarantees they start/end within
+# about one frame interval of each other, not exactly.
 MERGE_SCENE_GAP_S = float(os.getenv(
     "MERGE_SCENE_GAP_S",
-    str(SEGMENT_CROSS_TRIGGER_WINDOW + SEGMENT_PREROLL_S + SEGMENT_COOLDOWN_S),
+    str(SEGMENT_PREROLL_S + SEGMENT_COOLDOWN_S),
 ))
 
 # ── Logging ───────────────────────────────────────────────────────────────────

@@ -21,9 +21,19 @@ calibration and use the fixed global threshold for all cameras.
 
 Cross-camera sync
 ─────────────────
-When any camera detects its own motion, every other registered camera is
-cross-triggered within SEGMENT_CROSS_TRIGGER_WINDOW seconds.  This keeps both
-streams recording together so VQA always has a matched pair of clips.
+Segment open/close decisions are driven by a single recorder-wide "last
+motion" timestamp instead of a per-camera clock: any camera's own motion
+refreshes it, and every camera (including the one that tripped) keeps
+recording only while `now - last_motion < SEGMENT_COOLDOWN_S`. Previously
+each camera tracked its own cross-trigger timestamp with its own, longer
+cross-trigger window layered on top of the shorter per-camera cooldown —
+two cameras watching the same physical action could each measure "last
+motion" a frame or two apart, so one side's cooldown could lapse before the
+other's cross-trigger refreshed it, closing one camera's segment early and
+splitting an action that the other camera recorded as a single clip (see
+2026-07-08 investigation). A single shared clock removes that race: both
+streams open and close together, within about one frame interval, so VQA
+always has a matched pair of clips.
 """
 from __future__ import annotations
 
@@ -55,7 +65,6 @@ class _Segment:
     width: int = 0
     height: int = 0
     frame_count: int = 0
-    last_motion_ts: float = 0.0
     first_written_ts: float | None = None
     last_written_ts: float = 0.0
     end_ts: float | None = None
@@ -78,10 +87,6 @@ class _CameraState:
     calib_done: bool = False
     motion_threshold: float = _CAPTURE_MOTION_THRESHOLD
     motion_pixel_count: int = _MOTION_PIXEL_COUNT
-    # Cross-camera sync: epoch when another camera last detected its own motion,
-    # and which camera that was (for diagnostics — see SEGMENT_MOTION_LOG).
-    cross_trigger_ts: float = 0.0
-    cross_trigger_source: str | None = None
 
 
 def _is_motion(
@@ -129,7 +134,6 @@ class SegmentRecorder:
         calib_frames: int = config.SEGMENT_CALIB_FRAMES,
         calib_sigma: float = config.SEGMENT_CALIB_SIGMA,
         calib_sigma_by_camera: dict | None = None,
-        cross_trigger_window: float = config.SEGMENT_CROSS_TRIGGER_WINDOW,
     ) -> None:
         self.segment_dir = segment_dir
         self.manifest_path = manifest_path
@@ -144,8 +148,12 @@ class SegmentRecorder:
         self.calib_frames = calib_frames
         self.calib_sigma = calib_sigma
         self.calib_sigma_by_camera = calib_sigma_by_camera or {"pi_camera": config.SEGMENT_CALIB_SIGMA_PI}
-        self.cross_trigger_window = cross_trigger_window
         self._cameras: dict[str, _CameraState] = {}
+        # Shared cross-camera clock (see module docstring): any camera's own
+        # motion sets this, and every camera's open/close decision reads it —
+        # not a per-camera timestamp — so all cameras agree on "how long ago
+        # was the last motion anywhere" to the same value.
+        self._last_motion_ts: float = 0.0
         self._lock = threading.Lock()
         os.makedirs(self.segment_dir, exist_ok=True)
 
@@ -214,34 +222,27 @@ class SegmentRecorder:
                 else _is_motion(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count, camera=camera)
             )
 
-            # Cross-trigger: another camera fired its own motion recently.
-            cross_motion = ts - state.cross_trigger_ts < self.cross_trigger_window
-
-            motion = own_motion or cross_motion
-
-            # Propagate own motion to all other registered cameras.
+            # Shared clock: own motion on *any* camera refreshes one
+            # recorder-wide timestamp. Every camera's motion/no-motion
+            # decision below reads that same value, so all cameras agree on
+            # "how long ago was the last motion anywhere" instead of each
+            # tracking its own, independently-timed view of it.
             if own_motion:
-                others = [c for c in self._cameras if c != camera]
-                if others:
-                    log.debug("recorder: %s own_motion cross-triggers %s", camera, others)
-                for other_cam, other_state in self._cameras.items():
-                    if other_cam != camera:
-                        other_state.cross_trigger_ts = ts
-                        other_state.cross_trigger_source = camera
+                self._last_motion_ts = ts
+                log.debug("recorder: %s own_motion updates shared clock (ts=%.3f)", camera, ts)
+
+            motion = ts - self._last_motion_ts < self.cooldown_s
 
             # ── segment logic ───────────────────────────────────────────────
             if state.open_segment is None:
                 if motion:
                     seg = self._open_segment(camera, state, ts, cache)
                     self._write_frame(seg, frame_b64, ts)
-                    seg.last_motion_ts = ts
                     state.open_segment = seg
             else:
                 seg = state.open_segment
                 self._write_frame(seg, frame_b64, ts)
-                if motion:
-                    seg.last_motion_ts = ts
-                elif ts - seg.last_motion_ts >= self.cooldown_s:
+                if not motion:
                     self._close_segment(camera, state)
                     closed_seg = seg
 
