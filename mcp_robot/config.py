@@ -188,6 +188,19 @@ SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # Pi camera default AE/AWB hunting shifts whole-frame brightness more than
 # DroidCam's ISP does, so it needs a wider margin above its noise floor.
 SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
+# Frames received in the first SEGMENT_CALIB_WARMUP_S seconds after a camera's
+# very first frame keep the frame-diff reference fresh but are NOT accumulated
+# into the noise sample. Both cameras' auto-exposure/white-balance loops are
+# still converging right after stream start, so calibrating immediately can
+# measure an artificially quiet moment (2026-07-09: both cameras calibrated in
+# under 2s with std_diff of ~0.01-0.02 — so tiny that sigma*std_diff barely
+# moved the threshold off the global floor — then a genuine post-settling
+# brightness step opened a real-looking-but-empty ~0.5s segment on both
+# cameras a few seconds later, twice, ~4s apart). Delaying the start of
+# accumulation gives the sensor time to get well into its startup convergence
+# so calibration measures steady-state noise instead. Raise this further if
+# false-positive segments keep appearing shortly after "calibrated" log lines.
+SEGMENT_CALIB_WARMUP_S = float(os.getenv("SEGMENT_CALIB_WARMUP_S", "3.0"))
 # Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and the
 # resulting shared-clock update — mean_diff/pixel counts vs. thresholds, and
 # which camera drove the update. Root logger stays at INFO (server.py), so

@@ -19,6 +19,17 @@ Camera from triggering false-positive segments while the quieter DroidCam
 keeps its baseline sensitivity.  Set SEGMENT_CALIB_ENABLED=0 to skip
 calibration and use the fixed global threshold for all cameras.
 
+Frames are only accumulated into the noise sample after SEGMENT_CALIB_WARMUP_S
+seconds have passed since the camera's first frame (they still keep the
+frame-diff reference fresh in the meantime). Both cameras' auto-exposure/
+white-balance loops are still converging right after stream start, and
+sampling during that window can measure an artificially quiet moment — see
+the 2026-07-09 investigation, where both cameras calibrated in under two
+seconds with a near-zero std_diff, then a genuine post-settling brightness
+step opened a real-looking-but-empty ~0.5s segment on both cameras a few
+seconds later. The warm-up delay lets the sensor get further into its
+startup convergence before calibration starts measuring.
+
 Cross-camera sync
 ─────────────────
 Segment open/close decisions are driven by a single recorder-wide "last
@@ -85,28 +96,31 @@ class _CameraState:
     calib_diffs: list = field(default_factory=list)
     calib_pixel_counts: list = field(default_factory=list)
     calib_done: bool = False
+    calib_warmup_start_ts: "float | None" = None
     motion_threshold: float = _CAPTURE_MOTION_THRESHOLD
     motion_pixel_count: int = _MOTION_PIXEL_COUNT
 
 
-def _is_motion(
+@dataclass
+class _MotionStats:
+    motion: bool
+    mean_diff: float
+    n_changed: int
+    tripped: "str | None"  # "mean" | "pixel_count" | None, whichever threshold fired
+
+
+def _motion_stats(
     prev_gray: np.ndarray,
     cur_gray: np.ndarray,
     mean_threshold: float = _CAPTURE_MOTION_THRESHOLD,
     pixel_count: int = _MOTION_PIXEL_COUNT,
-    camera: str | None = None,
-) -> bool:
+) -> _MotionStats:
     diff = np.abs(prev_gray.astype(np.float32) - cur_gray.astype(np.float32))
     mean_diff = float(diff.mean())
     n_changed = int(np.sum(diff > _MOTION_PIXEL_THRESH))
     motion = mean_diff > mean_threshold or n_changed > pixel_count
-    if motion and camera is not None:
-        tripped = "mean" if mean_diff > mean_threshold else "pixel_count"
-        log.debug(
-            "recorder: %s own_motion tripped=%s mean_diff=%.3f(thr=%.2f) changed_px=%d(thr=%d)",
-            camera, tripped, mean_diff, mean_threshold, n_changed, pixel_count,
-        )
-    return motion
+    tripped = ("mean" if mean_diff > mean_threshold else "pixel_count") if motion else None
+    return _MotionStats(motion=motion, mean_diff=mean_diff, n_changed=n_changed, tripped=tripped)
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -142,6 +156,7 @@ class SegmentRecorder:
         calib_frames: int = config.SEGMENT_CALIB_FRAMES,
         calib_sigma: float = config.SEGMENT_CALIB_SIGMA,
         calib_sigma_by_camera: dict | None = None,
+        calib_warmup_s: float = config.SEGMENT_CALIB_WARMUP_S,
     ) -> None:
         self.segment_dir = segment_dir
         self.manifest_path = manifest_path
@@ -156,12 +171,17 @@ class SegmentRecorder:
         self.calib_frames = calib_frames
         self.calib_sigma = calib_sigma
         self.calib_sigma_by_camera = calib_sigma_by_camera or {"pi_camera": config.SEGMENT_CALIB_SIGMA_PI}
+        self.calib_warmup_s = calib_warmup_s
         self._cameras: dict[str, _CameraState] = {}
         # Shared cross-camera clock (see module docstring): any camera's own
         # motion sets this, and every camera's open/close decision reads it —
         # not a per-camera timestamp — so all cameras agree on "how long ago
         # was the last motion anywhere" to the same value.
         self._last_motion_ts: float = 0.0
+        # Which camera last drove _last_motion_ts — logged when a segment
+        # opens so it's clear whether *this* camera tripped its own motion or
+        # merely rode another camera's cooldown window (see on_frame).
+        self._last_motion_camera: "str | None" = None
         self._lock = threading.Lock()
         os.makedirs(self.segment_dir, exist_ok=True)
 
@@ -219,16 +239,24 @@ class SegmentRecorder:
 
             # ── calibration phase ───────────────────────────────────────────
             if self.calib_enabled and not state.calib_done:
-                if state.prev_gray is not None:
+                if state.calib_warmup_start_ts is None:
+                    state.calib_warmup_start_ts = ts
+                    log.debug(
+                        "recorder: %s calibration warm-up started (ts=%.3f, warmup=%.1fs)",
+                        camera, ts, self.calib_warmup_s,
+                    )
+                warmed_up = ts - state.calib_warmup_start_ts >= self.calib_warmup_s
+                if warmed_up and state.prev_gray is not None:
                     self._accumulate_calib(camera, state, gray)
                 state.prev_gray = gray
                 return  # hold off recording until the noise floor is measured
 
             # ── motion detection ────────────────────────────────────────────
-            own_motion = (
-                False if state.prev_gray is None
-                else _is_motion(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count, camera=camera)
+            own_stats = (
+                None if state.prev_gray is None
+                else _motion_stats(state.prev_gray, gray, state.motion_threshold, state.motion_pixel_count)
             )
+            own_motion = own_stats.motion if own_stats is not None else False
 
             # Shared clock: own motion on *any* camera refreshes one
             # recorder-wide timestamp. Every camera's motion/no-motion
@@ -237,7 +265,12 @@ class SegmentRecorder:
             # tracking its own, independently-timed view of it.
             if own_motion:
                 self._last_motion_ts = ts
-                log.debug("recorder: %s own_motion updates shared clock (ts=%.3f)", camera, ts)
+                self._last_motion_camera = camera
+                log.debug(
+                    "recorder: %s own_motion tripped=%s mean_diff=%.3f(thr=%.2f) changed_px=%d(thr=%d)",
+                    camera, own_stats.tripped, own_stats.mean_diff, state.motion_threshold,
+                    own_stats.n_changed, state.motion_pixel_count,
+                )
 
             motion = ts - self._last_motion_ts < self.cooldown_s
 
@@ -247,6 +280,24 @@ class SegmentRecorder:
                     seg = self._open_segment(camera, state, ts, cache)
                     self._write_frame(seg, frame_b64, ts)
                     state.open_segment = seg
+                    # Which camera triggered this recording, and why — the
+                    # only place this decision is made, so it's the only
+                    # place that can log it (see 2026-07-09: calibration and
+                    # remux lines were visible but nothing said what opened
+                    # the segments in between).
+                    if own_motion:
+                        log.info(
+                            "recorder: %s opening segment %s — own motion tripped=%s "
+                            "mean_diff=%.3f(thr=%.2f) changed_px=%d(thr=%d)",
+                            camera, os.path.basename(seg.path), own_stats.tripped, own_stats.mean_diff,
+                            state.motion_threshold, own_stats.n_changed, state.motion_pixel_count,
+                        )
+                    else:
+                        log.info(
+                            "recorder: %s opening segment %s — cross-camera trigger from %s (%.3fs ago)",
+                            camera, os.path.basename(seg.path), self._last_motion_camera,
+                            ts - self._last_motion_ts,
+                        )
             else:
                 seg = state.open_segment
                 self._write_frame(seg, frame_b64, ts)
@@ -323,6 +374,11 @@ class SegmentRecorder:
             seg.writer = None
         seg.end_ts = seg.last_written_ts
         seg.closed = True
+        duration = (seg.last_written_ts - seg.first_written_ts) if seg.first_written_ts is not None else 0.0
+        log.info(
+            "recorder: %s closing segment %s (%d frames over %.2fs)",
+            camera, os.path.basename(seg.path), seg.frame_count, duration,
+        )
         self._append_manifest(seg)
         state.recent_closed.append(seg)
         state.open_segment = None
