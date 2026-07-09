@@ -902,6 +902,11 @@ def drive_to(
     if not first_long_range:
         return first_result
 
+    if not first_result.get("ok"):
+        # Drive failed (action_fn raised) — don't claim a driven distance we
+        # don't actually know, and don't attempt a second drive on top of it.
+        return first_result
+
     first_result["driven_distance_mm"] = first_drive_mm
 
     def _stop_after_first(reason: str) -> dict:
@@ -912,9 +917,6 @@ def drive_to(
             f"{config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS:.0f}x body length = "
             f"{long_range_threshold_mm:.0f}mm). {reason}"
         )
-        return first_result
-
-    if not first_result.get("ok"):
         return first_result
 
     # ── Auto-refine: re-measure from the closer range and drive the rest ──────
