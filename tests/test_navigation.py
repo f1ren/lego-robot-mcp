@@ -74,9 +74,20 @@ class TestNavigation(unittest.TestCase):
                            f"Free-space fraction too low: {free_frac:.1%}")
 
     def test_obstacle_mask_has_obstacles(self):
-        """Some pixels should be classified as obstacles."""
+        """Some pixels should be classified as obstacles.
+
+        Threshold is 2%, not the "some" the fixture's genuine obstacle (a
+        wooden cabinet edge, ~2 thin vertical strips) would suggest a higher
+        bar could catch: estimate_depth() used to read the HF pipeline's
+        quantised-to-256-levels "depth" image instead of the raw
+        "predicted_depth" tensor, and the resulting staircase artifacts
+        inflated obstacle_frac with false-positive floor "wave" noise on top
+        of the real cabinet edge (see TestNavigationFloorWaveArtifact). Fixed,
+        this fixture's true obstacle_frac is ~3.5%; 5% was only ever clearing
+        because of the noise.
+        """
         obstacle_frac = (self._obs_map.free_mask == 0).mean()
-        self.assertGreater(obstacle_frac, 0.05,
+        self.assertGreater(obstacle_frac, 0.02,
                            f"Obstacle fraction too low: {obstacle_frac:.1%}")
 
     def test_grid_has_navigable_cells(self):
@@ -340,6 +351,222 @@ class TestNavigationRobotHidingSwitch(unittest.TestCase):
 
     def test_debug_images_written(self):
         for key in ("raw", "obstacle_mask", "depth", "cspace", "nav_overlay"):
+            self.assertIn(key, self._saved, f"Missing key '{key}'")
+            path = pathlib.Path(self._saved[key])
+            self.assertTrue(path.exists(), f"File not written: {path}")
+            self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
+
+
+class TestNavigationFloorWaveArtifact(unittest.TestCase):
+    """Regression test for a depth-quantisation bug that fabricated periodic
+    "wave" bands of false obstacles across plain, drivable floor.
+
+    Fixture: tests/fixtures/navigation/droidcam_cup_near_door_corner.jpg
+    (robot facing a door/cabinet edge, blue cup target near the far wall
+    corner — the exact frame from a live navigate_to run on 2026-07-09 whose
+    debug images showed the bug).
+
+    Root cause: estimate_depth() was reading the HF depth-estimation
+    pipeline's "depth" output — a uint8 PIL image quantised to 256 levels for
+    human-viewable heat-maps — instead of "predicted_depth", the model's raw
+    float tensor. On a floor plane spanning much of the frame, 256 levels is
+    too coarse: the depth profile becomes a staircase (flat quantisation
+    plateaus separated by sharp one-step cliffs) instead of a smooth
+    perspective gradient. Both the plateaus (near-zero local gradient) and
+    the cliffs (huge local gradient) deviate from the true floor gradient
+    enough to trip _depth_gradient_floor_mask's n_sigma gate, so plain floor
+    got flagged as an obstacle in periodic bands roughly parallel to the
+    floorboards. Those bands then survived the C-space Minkowski-sum
+    inflation and merged into solid-looking obstacle blobs cutting across
+    navigable floor — including under/around the robot itself, which is what
+    forced navigate_to into its degraded buffer-exit fallback instead of a
+    direct path.
+
+    A second, independent bug is exercised here too: the target (cup) was
+    not visibly inpainted out of the depth-estimation input even though the
+    robot was. cv_refine_location's colour-segmentation refinement under-
+    segmented the cup (its shaded interior vs. bright rim split the contour),
+    returning a bbox anchored well inside the cup's true silhouette. LaMa,
+    asked to fill a hole entirely surrounded by the object's own pixels,
+    just reconstructed more of that object — so the cup was "inpainted" in
+    the sense that pixels changed, but never visibly removed, and kept
+    showing up as its own false obstacle blob in the free mask. Fixed by
+    unioning the removal-mask region with DetectedObject.outer_bbox (the
+    VLM's coarser, pre-refine box) so the mask always reaches real floor
+    context on every side.
+
+    A near-miss in the fix itself, caught by user review of the "after"
+    images rather than by these tests (they didn't check for it — see
+    test_wall_and_cabinet_still_detected_as_obstacles below, added after the
+    fact): the first version of the depth-precision fix returned
+    predicted_depth in its native ~0-10 units instead of rescaling it to
+    [0, 255] like the discarded uint8 "depth" image had been. That silently
+    broke _depth_gradient_floor_mask's `max(sigma, 1.0)` minimum-sigma floor
+    — an absolute constant tuned for the 0-255 range — which at the ~25x
+    smaller native scale dwarfed the real (much smaller) gradient spread and
+    let almost every pixel's z-score collapse toward zero. Net effect: the
+    real wall and cabinet edge, not just the false floor waves, stopped
+    being detected as obstacles. Fixed by rescaling predicted_depth to
+    [0, 255] (min-max, continuous — not quantised) so every tunable
+    downstream stays calibrated to the range it was written against.
+
+    Outputs: tests/fixtures/navigation/annotated/floor_wave_artifact/
+    """
+
+    FIXTURE_IMG = FIXTURES / "navigation" / "droidcam_cup_near_door_corner.jpg"
+    ANNOTATED_DIR = FIXTURES / "navigation" / "annotated" / "floor_wave_artifact"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import DetectedObject, _yolo_detect, _pick_target, _load_model
+        from mcp_robot.navigation import detect_obstacles, plan_path, save_debug_images
+
+        _load_model()
+        cls.ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+
+        bgr = _load(cls.FIXTURE_IMG)
+        h_result = detect_heading(bgr)
+
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else None
+        )
+        if target is None:
+            # Matches production: YOLO misses this small/distant cup, so
+            # navigate_to falls back to the VLM+CV hybrid detector.
+            target = DetectedObject(
+                class_name="blue cup on wooden floor near wall corner",
+                confidence=0.98,
+                x1=390, y1=327, x2=430, y2=382,
+                note="Hardcoded from live run log (2026-07-09 10:10:47).",
+                contact_px=(412, 353),
+                outer_bbox=(356, 327, 433, 427),
+            )
+
+        obs_map = detect_obstacles(bgr, h_result, target)
+        nav_plan = plan_path(obs_map, h_result)
+        saved = save_debug_images(bgr, obs_map, nav_plan, str(cls.ANNOTATED_DIR), step=0)
+
+        print(f"\n[floor_wave_artifact] Heading detected: {h_result is not None}")
+        print(f"[floor_wave_artifact] Robot px: {obs_map.robot_px}  Target px: {obs_map.target_px}")
+        print(f"[floor_wave_artifact] free_frac: {(obs_map.free_mask > 0).mean():.1%}")
+        print(f"[floor_wave_artifact] Plan: {nav_plan.reason}")
+        print(f"[floor_wave_artifact] Images: {list(saved.values())}")
+
+        cls._bgr     = bgr
+        cls._heading = h_result
+        cls._target  = target
+        cls._obs_map = obs_map
+        cls._plan    = nav_plan
+        cls._saved   = saved
+
+    def test_robot_body_detected(self):
+        self.assertIsNotNone(self._heading, "Heading not detected — robot body not visible?")
+
+    def test_free_mask_covers_floor(self):
+        """At least 20% of the frame should be navigable floor."""
+        frac = (self._obs_map.free_mask > 0).mean()
+        self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
+
+    def test_lower_floor_bands_mostly_free(self):
+        """Two specific regions that were bisected by false-obstacle "wave"
+        streaks in the original (buggy) run — before the depth-precision fix,
+        free fraction there was ~89%/86%; plain floor should read as ~99%+
+        free. Columns 50:400 for the upper band deliberately stay clear of
+        the door/cabinet edge, which is real and genuinely extends down to
+        about row 650 at columns >=460 — including those columns here would
+        conflate "the wave bug" with "a real obstacle", which is exactly the
+        distinction a first version of this fix got wrong (see class
+        docstring). The lower band sits entirely below the cabinet edge, so
+        its wider column range is unambiguous.
+        """
+        fm = self._obs_map.free_mask
+        for r0, r1, c0, c1, label in [
+            (560, 680, 50, 400, "upper band"),
+            (1050, 1200, 50, 650, "lower band"),
+        ]:
+            frac = float((fm[r0:r1, c0:c1] > 0).mean())
+            self.assertGreater(
+                frac, 0.95,
+                f"{label} (rows {r0}:{r1}, cols {c0}:{c1}) free fraction too low: "
+                f"{frac:.1%} — plain floor is being misclassified as obstacle waves",
+            )
+
+    def test_wall_and_cabinet_still_detected_as_obstacles(self):
+        """The genuine vertical obstacles in this frame — the room wall
+        (upper-left, above its baseboard) and the door/cabinet edge — must
+        stay classified as obstacle. Regression test for a near-miss in the
+        depth-precision fix that silently also erased these real obstacles
+        (see class docstring) while fixing the false floor waves; a fix for
+        false positives is worthless if it trades them for false negatives.
+        """
+        fm = self._obs_map.free_mask
+        wall_obstacle_frac = float((fm[0:280, 0:400] == 0).mean())
+        self.assertGreater(
+            wall_obstacle_frac, 0.95,
+            f"Wall region obstacle fraction too low: {wall_obstacle_frac:.1%} "
+            "— the room wall is being misclassified as navigable floor",
+        )
+        cabinet_obstacle_frac = float((fm[0:600, 460:720] == 0).mean())
+        self.assertGreater(
+            cabinet_obstacle_frac, 0.5,
+            f"Cabinet-edge region obstacle fraction too low: {cabinet_obstacle_frac:.1%} "
+            "— the door/cabinet edge is being misclassified as navigable floor",
+        )
+
+    def test_robot_grid_cell_is_real_floor(self):
+        r, c = self._obs_map.robot_grid
+        self.assertTrue(self._obs_map.raw_grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not real floor")
+
+    def test_plan_reachable_without_pathological_buffer_exit(self):
+        """A path must be found, and not via the degraded "Buffer exit" BFS
+        fallback specifically — that fires only when the area immediately
+        around the robot is so densely (falsely) flagged as obstacle that
+        not even a controlled reverse can find safety, which is exactly the
+        failure mode the false-obstacle waves bug caused (see the live run's
+        log: "obstacle ahead but no C-space-free cell behind robot —
+        falling back to buffer-exit BFS").
+
+        This does NOT assert against "Reverse from obstacle ahead": in this
+        frame the robot legitimately sits almost directly beneath the
+        cabinet edge, so a controlled reverse-then-replan is the correct,
+        expected response to a real nearby obstacle, not a bug. An earlier
+        version of this test asserted that reason away too, which is what
+        let the wall/cabinet-detection regression above slip past review —
+        the fix looked "cleaner" (a plain direct path) partly because it had
+        also erased the real obstacle that should have triggered the
+        reverse.
+        """
+        self.assertTrue(self._plan.reachable, f"Plan not reachable: {self._plan.reason}")
+        self.assertNotIn("Buffer exit", self._plan.reason)
+
+    def test_target_removed_from_cleaned_frame(self):
+        """The cup must be visibly gone from cleaned_bgr (the inpainted frame
+        handed to the depth model) — checked by blue-pixel coverage in its
+        outer_bbox region, not just "some pixels changed", since a too-tight
+        removal mask can leave LaMa reconstructing more of the same object
+        (see class docstring)."""
+        self.assertIsNotNone(self._obs_map.cleaned_bgr)
+        x1, y1, x2, y2 = self._target.outer_bbox
+        hsv_lo, hsv_hi = (95, 80, 50), (135, 255, 255)
+
+        def blue_frac(bgr):
+            hsv = cv2.cvtColor(bgr[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+            return float((cv2.inRange(hsv, hsv_lo, hsv_hi) > 0).mean())
+
+        raw_frac = blue_frac(self._bgr)
+        cleaned_frac = blue_frac(self._obs_map.cleaned_bgr)
+        self.assertGreater(raw_frac, 0.3, f"Sanity check failed — raw frame not blue there ({raw_frac:.1%})")
+        self.assertLess(cleaned_frac, 0.15,
+                        f"Cup still visible after inpainting: {cleaned_frac:.1%} blue "
+                        f"(raw was {raw_frac:.1%}) — target removal mask likely too small")
+
+    def test_debug_images_written(self):
+        for key in ("raw", "cleaned", "obstacle_mask", "depth", "cspace", "nav_overlay"):
             self.assertIn(key, self._saved, f"Missing key '{key}'")
             path = pathlib.Path(self._saved[key])
             self.assertTrue(path.exists(), f"File not written: {path}")

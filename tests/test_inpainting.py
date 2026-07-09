@@ -295,6 +295,79 @@ class TestInpaintingRobotHidingSwitch(unittest.TestCase):
                                f"Too small ({p.stat().st_size} B): {p}")
 
 
+class TestInpaintingTargetOuterBboxUnion(unittest.TestCase):
+    """build_removal_mask: an undersized target bbox must still produce a mask
+    that reaches the object's full extent via DetectedObject.outer_bbox.
+
+    Regression for a live run (2026-07-09 10:10, droidcam_cup_near_door_corner.jpg
+    — see tests/test_navigation.py::TestNavigationFloorWaveArtifact for the
+    end-to-end version) where cv_refine_location's colour segmentation
+    under-segmented a cup with a shadowed interior vs. bright rim, returning a
+    bbox anchored well inside the cup's true silhouette. A removal mask built
+    from that bbox alone punches a hole entirely surrounded by the object's
+    own pixels — LaMa's context-aware fill then just reconstructs more of the
+    same object instead of erasing it, so the cup never visibly disappeared
+    from the frame handed to the depth model. Only the mask-construction step
+    is tested here (no LaMa/depth inference needed, so this stays fast).
+    """
+
+    FIXTURE_IMG = FIXTURES / "navigation" / "droidcam_cup_near_door_corner.jpg"
+
+    # Real (undersized) refined bbox and (complete) VLM rough bbox for the cup
+    # in this fixture, from the live run's log.
+    _UNDERSIZED_BBOX = (390, 327, 430, 382)
+    _OUTER_BBOX = (356, 327, 433, 427)
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        cls._bgr = _load(cls.FIXTURE_IMG)
+        cls._heading = detect_heading(cls._bgr)
+
+    def test_mask_reaches_outer_bbox_when_set(self):
+        from mcp_robot.grasp_readiness import DetectedObject
+        from mcp_robot.inpainting import build_removal_mask
+
+        target = DetectedObject(
+            class_name="cup", confidence=0.98,
+            x1=self._UNDERSIZED_BBOX[0], y1=self._UNDERSIZED_BBOX[1],
+            x2=self._UNDERSIZED_BBOX[2], y2=self._UNDERSIZED_BBOX[3],
+            outer_bbox=self._OUTER_BBOX,
+        )
+        mask = build_removal_mask(self._bgr, self._heading, target, target_padding_px=10)
+
+        ox1, oy1, ox2, oy2 = self._OUTER_BBOX
+        coverage = (mask[oy1:oy2, ox1:ox2] > 0).mean()
+        self.assertGreater(
+            coverage, 0.95,
+            f"Mask should fully cover outer_bbox {self._OUTER_BBOX}, "
+            f"covers only {coverage:.1%} — target under-segmentation would "
+            "leave a LaMa hole entirely inside the object",
+        )
+
+    def test_mask_stays_tight_when_outer_bbox_unset(self):
+        """Without outer_bbox (e.g. a plain YOLO detection, already a full
+        bbox), the mask must not balloon out to where outer_bbox would be —
+        confirms the union is additive, not an unconditional widening."""
+        from mcp_robot.grasp_readiness import DetectedObject
+        from mcp_robot.inpainting import build_removal_mask
+
+        target = DetectedObject(
+            class_name="cup", confidence=0.98,
+            x1=self._UNDERSIZED_BBOX[0], y1=self._UNDERSIZED_BBOX[1],
+            x2=self._UNDERSIZED_BBOX[2], y2=self._UNDERSIZED_BBOX[3],
+        )
+        mask = build_removal_mask(self._bgr, self._heading, target, target_padding_px=10)
+
+        # A region inside outer_bbox but outside the padded undersized bbox
+        # (left of x1-padding=380) — must NOT be masked when outer_bbox unset.
+        region = mask[340:360, 358:375]
+        self.assertEqual(
+            int((region > 0).sum()), 0,
+            "Mask should not extend toward outer_bbox territory when outer_bbox is None",
+        )
+
+
 class TestInpaintingRobotNearSwitchCorner(unittest.TestCase):
     """Robot parked near a wall switch in a corner (droidcam_robot_near_switch_corner.jpg).
 

@@ -75,6 +75,7 @@ class DetectedObject:
     y2: int
     note: str = ""
     contact_px: tuple[int, int] | None = None  # floor-contact point from VLM; None → use center
+    outer_bbox: tuple[int, int, int, int] | None = None  # coarser VLM rough bbox; None → x1..y2 is already the full extent
 
     @property
     def center(self) -> tuple[int, int]:
@@ -234,13 +235,14 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
         result = _vision.locate_object_hybrid(bgr, description)
         if result is None:
             return None
-        (x1, y1, x2, y2), centroid, confidence, note = result
+        (x1, y1, x2, y2), centroid, confidence, note, rough_bbox = result
         return DetectedObject(
             class_name=description,
             confidence=confidence,
             x1=x1, y1=y1, x2=x2, y2=y2,
             note=note,
             contact_px=centroid,
+            outer_bbox=rough_bbox,
         )
     except _vision.LowConfidenceDetection:
         raise

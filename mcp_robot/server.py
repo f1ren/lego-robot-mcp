@@ -1912,7 +1912,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
                 TextContent(type="text", text=text),
             ]
 
-        (x1, y1, x2, y2), obj_center, confidence, note = vlm_result
+        (x1, y1, x2, y2), obj_center, confidence, note, _rough_bbox = vlm_result
 
         # Compute heading angle to object
         h_result = heading.detect_heading(bgr)

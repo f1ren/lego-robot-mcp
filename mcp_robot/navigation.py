@@ -3,7 +3,7 @@ CV-based navigation: obstacle detection, A* path planning, overlay drawing,
 and per-step command synthesis.
 
 Public API:
-    estimate_depth(bgr) -> np.ndarray          (float32 depth map, larger = farther)
+    estimate_depth(bgr) -> np.ndarray          (float32 depth map, larger = nearer)
     detect_obstacles(bgr, heading, target) -> ObstacleMap
     plan_path(obs_map, heading=None) -> NavPlan
     draw_nav_overlay(bgr, obs_map, plan, step) -> np.ndarray
@@ -235,14 +235,49 @@ def _load_depth_model():
 def estimate_depth(bgr: np.ndarray) -> np.ndarray:
     """Run Depth Anything V2 Small on a BGR frame.
 
-    Returns a float32 depth map with the same (H, W) as the input where
-    larger values indicate greater distance from the camera.
+    Returns a float32 depth map, scaled to [0, 255], with the same (H, W) as
+    the input, where larger values indicate a nearer point (this model
+    predicts inverse depth / disparity, not metric distance).
+
+    Starts from the pipeline's "predicted_depth" tensor (the model's raw
+    float output), NOT "depth" (a uint8 PIL image the pipeline derives from
+    it by normalising to 0-1 and quantising to 256 levels purely for
+    human-viewable heat-maps). On a floor plane spanning much of the frame,
+    that 256-level quantisation turns the smooth depth gradient into a
+    staircase — long flat "plateaus" (zero local gradient) separated by
+    sharp one-step "cliffs" (huge local gradient) — and both deviate from
+    the true smooth floor gradient enough to trip
+    _depth_gradient_floor_mask's n_sigma gate, fooling it into flagging
+    plain floor as an obstacle in periodic bands.
+
+    Still rescaled to [0, 255] (min-max, like the discarded "depth" image),
+    NOT left in predicted_depth's native units: _depth_gradient_floor_mask's
+    minimum-sigma floor (see the `max(..., 1.0)` calls there) is an absolute
+    constant tuned against that 0-255 range. predicted_depth's native range
+    is roughly 25x smaller (~0-10 for this model/checkpoint) and not fixed
+    across scenes, so leaving it unscaled shrinks real gradients well below
+    that floor — the floor then dominates every z-score, and vertical
+    surfaces (walls, cabinet edges) that should read as obstacles instead
+    fall "within n_sigma" of the floor-gradient reference and get
+    misclassified as navigable. Rescaling keeps every tunable that assumes
+    this range (the sigma floor, _DEPTH_GRAD_N_SIGMA, the blur/Sobel kernel
+    sizes) correctly calibrated while still being continuous float32, not
+    quantised to 256 discrete integer levels.
     """
     from PIL import Image as _PIL
     pipe = _load_depth_model()
     rgb = _PIL.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     result = pipe(rgb)
-    return np.array(result["depth"], dtype=np.float32)
+    depth = result["predicted_depth"]
+    if hasattr(depth, "detach"):
+        depth = depth.detach().cpu().numpy()
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = depth[0]
+    dmin, dmax = float(depth.min()), float(depth.max())
+    if dmax > dmin:
+        depth = (depth - dmin) / (dmax - dmin) * 255.0
+    return depth
 
 
 # ── data classes ──────────────────────────────────────────────────────────────
