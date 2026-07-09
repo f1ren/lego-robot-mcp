@@ -1,0 +1,240 @@
+"""
+Unit tests for mcp_robot.server.drive_to's long-range overshoot guard.
+
+Mocks the hardware/vision boundary directly on mcp_robot.server so drive_to's
+branching logic (single drive vs. 2-drive auto-refine) can be exercised
+offline and deterministically, without a camera, VQA, or the robot:
+
+  _measure_target         -> canned (angle_deg, distance_mm) readings, in
+                              call order (or a raised exception)
+  _target_too_far         -> canned guard string-or-None, in call order
+  robot_mod.drive_degrees -> records (degrees, left_speed, right_speed)
+                              calls, returns a canned encoder-position dict
+  _with_change_analysis   -> runs action_fn() (so the drive_degrees mock
+                              above still records its call) then returns a
+                              canned ok/change_description dict, skipping
+                              camera capture, VQA, and the recorder entirely
+"""
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+import pytest
+
+from mcp_robot import config
+from mcp_robot import navigation as nav_mod
+from mcp_robot import server
+
+# Derived from the live config so these tests track DRIVE_TO_LONG_RANGE_BODY_LENGTHS/
+# DRIVE_TO_PARTIAL_FRACTION if they're ever retuned (as they already have been once).
+_THRESHOLD_MM = config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
+_SHORT_MM = _THRESHOLD_MM * 0.5
+_LONG_MM = _THRESHOLD_MM * 1.5
+
+
+def _wheel_deg(mm: float) -> int:
+    return int(round(nav_mod.mm_to_wheel_degrees(mm)))
+
+
+def _patch_measure_and_guard(monkeypatch, measurements, guards):
+    """measurements: list of (angle_deg, distance_mm) tuples (or exceptions),
+    consumed in call order by _measure_target. guards: list of str|None (or
+    exceptions), consumed in call order by _target_too_far."""
+    monkeypatch.setattr(server, "_measure_target", Mock(side_effect=measurements))
+    monkeypatch.setattr(server, "_target_too_far", Mock(side_effect=guards))
+
+
+def _patch_change_analysis(monkeypatch, results):
+    """results: list of dicts, each either {"ok": False, "error": "..."} or
+    {"change_description": "..."} (ok defaults True), consumed in call order.
+    Returns the list of captured call kwargs for assertions."""
+    calls = []
+    queue = list(results)
+
+    def _fake(action_desc, expected, action_fn, **kwargs):
+        calls.append({"action_desc": action_desc, "expected": expected, **kwargs})
+        action_result = action_fn()
+        if not queue:
+            raise AssertionError("_with_change_analysis called more times than the test expected")
+        canned = queue.pop(0)
+        if canned.get("ok", True) is False:
+            return {"ok": False, "error": canned.get("error", "mock failure")}
+        return {"ok": True, **action_result, "change_description": canned.get("change_description", "moved")}
+
+    monkeypatch.setattr(server, "_with_change_analysis", _fake)
+    return calls
+
+
+def _patch_drive_degrees(monkeypatch, returns=None):
+    mock_drive = Mock(side_effect=returns) if returns else Mock(return_value={"left": 111, "right": 222})
+    monkeypatch.setattr(server.robot_mod, "drive_degrees", mock_drive)
+    return mock_drive
+
+
+def _drive_to(**overrides):
+    kwargs = {"target_class_yolo": "cup", "target_class_free_text": "a red cup", "speed": 20}
+    kwargs.update(overrides)
+    return server.drive_to(**kwargs)
+
+
+# ── Case 1: short range — single drive, no auto-refine ───────────────────────
+
+def test_short_range_single_drive(monkeypatch):
+    _patch_measure_and_guard(monkeypatch, measurements=[(5.0, _SHORT_MM)], guards=[None])
+    drive_mock = _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"change_description": "drove to cup"}])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert result["measured_angle_deg"] == 5.0
+    assert result["measured_distance_mm"] == _SHORT_MM
+    assert result["change_description"] == "drove to cup"
+    assert "drives_executed" not in result
+    assert "first_drive" not in result
+    assert "partial_drive" not in result
+    assert "driven_distance_mm" not in result
+    assert len(calls) == 1
+    drive_mock.assert_called_once_with(_wheel_deg(_SHORT_MM), 20, 20)
+
+
+# ── Case 2: long range — auto-refines in exactly 2 drives ────────────────────
+
+def test_long_range_auto_refines_in_two_drives(monkeypatch):
+    second_distance_mm = 50.0
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(5.0, _LONG_MM), (2.0, second_distance_mm)],
+        guards=[None, None],
+    )
+    drive_mock = _patch_drive_degrees(
+        monkeypatch, returns=[{"left": 100, "right": 100}, {"left": 460, "right": 460}]
+    )
+    calls = _patch_change_analysis(monkeypatch, [
+        {"change_description": "drove most of the way"},
+        {"change_description": "arrived at cup"},
+    ])
+
+    result = _drive_to()
+
+    first_leg_mm = _LONG_MM * config.DRIVE_TO_PARTIAL_FRACTION
+
+    assert result["ok"] is True
+    assert result["measured_angle_deg"] == 5.0            # from the *first* measurement
+    assert result["measured_distance_mm"] == _LONG_MM     # original full distance, not the remainder
+    assert result["driven_distance_mm"] == pytest.approx(first_leg_mm + second_distance_mm)
+    assert result["drives_executed"] == 2
+    assert result["change_description"] == "arrived at cup"   # final leg's own verification
+    assert result["left"] == 460 and result["right"] == 460   # final leg's encoder readings
+    assert result["first_drive"]["driven_mm"] == pytest.approx(first_leg_mm)
+    assert result["first_drive"]["change_description"] == "drove most of the way"
+    assert result["first_drive"]["left"] == 100 and result["first_drive"]["right"] == 100
+    assert "auto-refined in 2 drives" in result["message"]
+    assert len(calls) == 2
+
+    assert drive_mock.call_args_list[0].args[0] == _wheel_deg(first_leg_mm)
+    assert drive_mock.call_args_list[1].args[0] == _wheel_deg(second_distance_mm)
+
+
+# ── Edge cases around the auto-refine step ────────────────────────────────────
+
+def test_first_drive_failure_skips_second_drive(monkeypatch):
+    _patch_measure_and_guard(monkeypatch, measurements=[(5.0, _LONG_MM)], guards=[None])
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"ok": False, "error": "ssh timeout"}])
+
+    result = _drive_to()
+
+    assert result == {
+        "ok": False,
+        "error": "ssh timeout",
+        "measured_angle_deg": 5.0,
+        "measured_distance_mm": _LONG_MM,
+    }
+    assert "driven_distance_mm" not in result  # unknown how far a failed drive actually got
+    assert len(calls) == 1  # no second drive attempted after a hardware failure
+
+
+def test_second_measurement_unavailable_falls_back_to_first_drive(monkeypatch):
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(5.0, _LONG_MM), (None, None)],  # target lost after first drive
+        guards=[None],
+    )
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"change_description": "drove most of the way"}])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert result["partial_drive"] is True
+    assert result["driven_distance_mm"] == pytest.approx(_LONG_MM * config.DRIVE_TO_PARTIAL_FRACTION)
+    assert "Target not visible for a second measurement" in result["message"]
+    assert "call drive_to() again" in result["message"]
+    assert len(calls) == 1
+
+
+def test_second_measurement_error_falls_back_to_first_drive(monkeypatch):
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(5.0, _LONG_MM), RuntimeError("camera disconnected")],
+        guards=[None],
+    )
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"change_description": "drove most of the way"}])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert result["partial_drive"] is True
+    assert "camera disconnected" in result["message"]
+    assert len(calls) == 1
+
+
+def test_second_guard_falls_back_to_first_drive(monkeypatch):
+    guard_msg = "ERROR: Target is too far for manual drive/turn (distance=999px, threshold=100px)."
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(5.0, _LONG_MM), (2.0, 50.0)],
+        guards=[None, guard_msg],
+    )
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"change_description": "drove most of the way"}])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert result["partial_drive"] is True
+    assert "too far for manual drive/turn" in result["message"]
+    assert "needs navigate_to()" in result["message"]
+    assert len(calls) == 1  # second drive never physically attempted
+
+
+def test_already_at_target_before_first_drive(monkeypatch):
+    _patch_measure_and_guard(monkeypatch, measurements=[(0.0, 0.1)], guards=[None])
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert "already at target" in result["message"]
+    assert len(calls) == 0  # no physical drive at all
+
+
+def test_already_at_target_after_remeasure(monkeypatch):
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(5.0, _LONG_MM), (1.0, 0.1)],
+        guards=[None, None],
+    )
+    _patch_drive_degrees(monkeypatch)
+    calls = _patch_change_analysis(monkeypatch, [{"change_description": "drove most of the way"}])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert "no second drive needed" in result["message"]
+    assert "drives_executed" not in result
+    assert "partial_drive" not in result
+    assert len(calls) == 1  # only the first physical drive happened

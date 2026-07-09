@@ -120,6 +120,18 @@ CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 # release distance is this fraction of press_degrees.
 CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 
+# ── Long-range drive guard (drive_to overshoot protection) ────────────────────
+# drive_to() drives the exact measured distance in one uncorrected blind move
+# — no clamp, no overtravel margin (contrast CLICK_PRESS_MARGIN_MM above).
+# That's fine at close range, but dead-reckoning error (wheel slip, drift)
+# compounds with distance, so a single long blind drive risks a bad overshoot.
+# Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths, drive_to() only
+# covers DRIVE_TO_PARTIAL_FRACTION of the measured distance and tells the
+# caller to re-invoke it — each re-invocation re-measures from a shorter,
+# more reliable range.
+DRIVE_TO_LONG_RANGE_BODY_LENGTHS = float(os.getenv("DRIVE_TO_LONG_RANGE_BODY_LENGTHS", "2.0"))
+DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.9"))
+
 # ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
 # Real-world gap (mm) between the target object's nearest point and the
 # robot's front anchor for check_grasp_readiness() to consider it "touching"
