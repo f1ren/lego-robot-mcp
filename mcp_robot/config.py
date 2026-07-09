@@ -131,8 +131,15 @@ CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 # real-world distance, so a fixed px threshold under-detects real gaps. A
 # ~112mm real gap (object clearly not touching) measured at only ~112px
 # against a ~117px diagonal-fraction threshold — a false "ready" — is what
-# exposed this.
-GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "40.0"))
+# exposed this. The mm-calibrated check must sit strictly between the known
+# touching and not-touching cases logged so far: a cup resting against the
+# gripper (output/logs/mcp_server.log, 2026-07-09 16:51:35,477) measures
+# ~51mm from arrow_anchor — which sits at the yellow body's front-hull edge,
+# not the gripper jaws themselves, so real contact still reads as a nonzero
+# gap — while not-touching cups measure ~110-112mm. 40mm sat below the real
+# touching case (a false "not ready"); 60mm keeps ~9mm margin above the
+# touching case and ~50mm margin below the not-touching cases.
+GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "60.0"))
 
 # ── turn_to (target-aware heading correction) ─────────────────────────────────
 # Max heading error (degrees) tolerated before turn_to() issues a turn
@@ -200,6 +207,26 @@ SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # Pi camera default AE/AWB hunting shifts whole-frame brightness more than
 # DroidCam's ISP does, so it needs a wider margin above its noise floor.
 SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
+# The changed-pixel-count metric is far more heavy-tailed/bursty than the
+# whole-frame mean-diff metric, on both cameras, in every calibration run
+# logged so far (2026-07-09, 4 server restarts): mean_diff's std stays tiny
+# and consistent (0.010-0.164), but pixel-count's std is comparable to or
+# larger than its own mean every single time (droidcam: mean_px=28 σ=75,
+# mean_px=18 σ=31, mean_px=28 σ=67, mean_px=20 σ=38). A single outlier frame
+# in the 40-frame calibration sample already inflates σ, but
+# mean_px + SEGMENT_CALIB_SIGMA * σ still isn't enough margin above a
+# similarly-sized future spike (one run computed 403, floor-clipped up to
+# 500, then a genuine noise frame hit 537 four seconds after calibration
+# finished, opening an empty segment on both cameras) — three of the four
+# runs sat idle for 14-20s post-calibration with zero false triggers, so this
+# isn't an AE-still-converging problem needing a longer SEGMENT_CALIB_WARMUP_S,
+# it's this metric's formula not carrying enough margin for its own
+# demonstrated burstiness. Give it its own, considerably larger sigma instead
+# of reusing SEGMENT_CALIB_SIGMA(_PI) — real motion trips this metric in the
+# thousands (every genuine drive/arm/gripper motion logged so far is
+# 1200-41000 changed px), so raising this multiplier well past what
+# mean-diff needs costs no real sensitivity.
+SEGMENT_CALIB_SIGMA_PIXEL_COUNT = float(os.getenv("SEGMENT_CALIB_SIGMA_PIXEL_COUNT", "12.0"))
 # Frames received in the first SEGMENT_CALIB_WARMUP_S seconds after a camera's
 # very first frame keep the frame-diff reference fresh but are NOT accumulated
 # into the noise sample. Both cameras' auto-exposure/white-balance loops are

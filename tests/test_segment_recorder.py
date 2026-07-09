@@ -482,6 +482,37 @@ class TestSegmentRecorder(unittest.TestCase):
 
         self.assertTrue(state.calib_done, "calibration should complete once warm-up has elapsed and calib_frames diffs are collected")
 
+    # ── 15c: pixel-count calibration uses its own sigma, decoupled from mean-diff ──
+
+    def test_calibration_pixel_count_uses_its_own_sigma(self):
+        """The changed-pixel-count threshold must scale with
+        calib_sigma_pixel_count independently of calib_sigma (the mean-diff
+        multiplier) — the two metrics have very different noise shapes (see
+        module docstring), so a single shared sigma under-covers pixel-count's
+        heavier tail."""
+        def _run(sigma_px):
+            rec = self._make_recorder(
+                calib_enabled=True, calib_frames=6, calib_sigma=1.0,
+                calib_sigma_pixel_count=sigma_px, calib_warmup_s=0,
+            )
+            t = 1000.0
+            for _ in range(6):
+                rec.on_frame("droidcam", _solid_b64(64, 64, 128), t)
+                t = round(t + 0.1, 3)
+            rec.on_frame("droidcam", _solid_b64(64, 64, 200), t)  # one burst frame
+            return rec._cameras["droidcam"]
+
+        low = _run(1.0)
+        high = _run(20.0)
+
+        self.assertTrue(low.calib_done)
+        self.assertTrue(high.calib_done)
+        # calib_sigma unchanged between runs -> identical mean-diff threshold.
+        self.assertAlmostEqual(low.motion_threshold, high.motion_threshold, places=6)
+        # calib_sigma_pixel_count differs -> the higher-sigma run must demand
+        # more changed pixels before declaring motion.
+        self.assertGreater(high.motion_pixel_count, low.motion_pixel_count)
+
     # ── 16: cross-trigger opens a segment on the second camera ───────────────
 
     def test_cross_trigger_opens_segment_on_second_camera(self):
