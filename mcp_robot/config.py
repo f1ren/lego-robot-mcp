@@ -108,6 +108,20 @@ CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 # release distance is this fraction of press_degrees.
 CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 
+# ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
+# Real-world gap (mm) between the target object's nearest point and the
+# robot's front anchor for check_grasp_readiness() to consider it "touching"
+# the body and safe to close the gripper on. Calibrated in mm — via the same
+# body-plate px->mm scale drive_to()/click_button() use (navigation.mm_per_px)
+# — rather than a fixed fraction of the image diagonal, because that pixel
+# heuristic is not perspective-invariant: an object higher in frame (farther
+# from the external camera) projects a smaller pixel gap for the same
+# real-world distance, so a fixed px threshold under-detects real gaps. A
+# ~112mm real gap (object clearly not touching) measured at only ~112px
+# against a ~117px diagonal-fraction threshold — a false "ready" — is what
+# exposed this.
+GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "40.0"))
+
 # ── turn_to (target-aware heading correction) ─────────────────────────────────
 # Max heading error (degrees) tolerated before turn_to() issues a turn
 # correction; below this it treats the robot as already facing the target and
