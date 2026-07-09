@@ -1467,6 +1467,27 @@ def scan_for_target(
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
+def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, heading.Heading | None]:
+    """Capture the current external (DroidCam) frame and detect robot heading.
+
+    Shared by navigate_to's per-step preamble and its post-loop final-turn
+    check — each applies its own handling when capture/decode/detection
+    fails, so this only does the mechanical part and lets exceptions from
+    the capture call itself propagate to the caller.
+
+    Returns (bgr, h_result). bgr is None if the frame couldn't be decoded
+    (h_result is then always None too); h_result is None if heading
+    detection failed on an otherwise-valid frame.
+    """
+    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+    raw_bytes = base64.b64decode(frame_result["frame"])
+    arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        return None, None
+    return bgr, heading.detect_heading(bgr)
+
+
 @mcp.tool()
 def navigate_to(
     target_class_yolo: str,
@@ -1544,18 +1565,15 @@ def navigate_to(
         for step in range(max_steps):
             parts: list[str] = [f"=== Step {step + 1}/{max_steps} ==="]
 
-            # ── 1. Capture external frame ─────────────────────────────────
+            # ── 1. Capture external frame + heading ───────────────────────
             try:
-                frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+                bgr, h_result = _capture_external_frame(target_class_yolo)
             except Exception as exc:
                 parts.append(f"Camera capture failed: {exc}")
                 step_logs.append("\n".join(parts))
                 outcome = "camera_error"
                 break
 
-            raw_bytes = base64.b64decode(frame_result["frame"])
-            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if bgr is None:
                 parts.append("Could not decode camera frame")
                 step_logs.append("\n".join(parts))
@@ -1563,7 +1581,6 @@ def navigate_to(
                 break
 
             # ── 2. Detect robot heading (cheap, every step) ───────────────
-            h_result = heading.detect_heading(bgr)
             if h_result is None:
                 log.error("[navigate_to] step %d — robot heading not detected; aborting navigation", step + 1)
                 parts.append("ERROR: robot heading not detected — navigation aborted")
@@ -1798,11 +1815,7 @@ def navigate_to(
 
             # ── Bonus final step: face the target even though we didn't ──
             # arrive, so the caller isn't left staring at a random heading.
-            frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
-            raw_bytes = base64.b64decode(frame_result["frame"])
-            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            h_result = heading.detect_heading(bgr) if bgr is not None else None
+            bgr, h_result = _capture_external_frame(target_class_yolo)
             robot_px = nav_mod.detect_robot_px(bgr) if bgr is not None else None
             if robot_px is not None:
                 nav_mod.update_robot_position(obs_map, robot_px)
