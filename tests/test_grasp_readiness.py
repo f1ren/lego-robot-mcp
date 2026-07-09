@@ -20,6 +20,7 @@ FAR_BALL      = FIXTURES / "grasp_readiness" / "grasp_not_ready_far.jpg"
 NEARBY_BALL   = FIXTURES / "static_video" / "droidcam_000.jpg"
 CUP_IMG       = FIXTURES / "grasp_readiness" / "droidcam_cup.jpg"
 CUP_TOO_FAR_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_too_far.jpg"
+CUP_TOUCHING_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_touching.jpg"
 ANNOTATED_DIR = FIXTURES / "grasp_readiness" / "annotated"
 
 
@@ -256,6 +257,66 @@ class TestGraspReadinessCupTooFarRegression(unittest.TestCase):
         d = self._result.to_dict()
         self.assertIn("missing_distance_mm", d["metrics"])
         self.assertIsNotNone(d["metrics"]["missing_distance_mm"])
+
+
+class TestGraspReadinessCupTouchingRegression(unittest.TestCase):
+    """
+    Regression for a real false negative (output/logs/mcp_server.log,
+    2026-07-09 16:51:35,477): the blue cup sits directly against the
+    robot's front, right next to the gripper — visibly in grasp position —
+    yet the mm-calibrated touch-distance check reported ready=False
+    (front-gap=51mm, ~11mm past the GRASP_TOUCH_THRESHOLD_MM cutoff that
+    was 40mm at the time). This case is what raised the threshold to 60mm
+    — see config.GRASP_TOUCH_THRESHOLD_MM.
+
+    _vlm_detect is stubbed with that exact logged detection (same bbox,
+    centroid, confidence, note — from locate_object_hybrid's CV-refined
+    result, not a live Gemini call) so this test is deterministic/offline
+    and exercises only _compute_readiness's distance/alignment logic.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        from mcp_robot.grasp_readiness import DetectedObject
+        grasp_mod._load_model()
+
+        bgr = _load(CUP_TOUCHING_IMG)
+        cls._bgr = bgr
+
+        logged_detection = DetectedObject(
+            class_name="blue cup",
+            confidence=0.95,
+            x1=408, y1=249, x2=480, y2=326,
+            note=(
+                "A blue cup is visible on the floor next to a piece of "
+                "furniture and a small robot-like device."
+            ),
+            contact_px=(441, 283),
+            outer_bbox=(396, 254, 471, 413),
+        )
+        with mock.patch.object(grasp_mod, "_vlm_detect", return_value=logged_detection):
+            cls._result, cls._heading, cls._obj = grasp_mod._compute_readiness(
+                bgr, target_class_yolo="cup", target_class_free_text="blue cup",
+            )
+        print(f"\n[cup-touching regression] {cls._result.to_text()}")
+        _save_annotated(bgr, cls._result, cls._heading, cls._obj,
+                         ANNOTATED_DIR / "droidcam_cup_touching_grasp_readiness.jpg")
+
+    def test_ready_cup_touching_body(self):
+        """Cup is resting against the robot's front — must be ready.
+
+        This is the exact case that used to report ready=False.
+        """
+        self.assertTrue(
+            self._result.ready,
+            f"Expected READY (cup touching robot body), got: {self._result.reason}",
+        )
+
+    def test_to_dict_schema(self):
+        d = self._result.to_dict()
+        for key in ("ready", "reason", "action", "object_detected", "checks", "metrics"):
+            self.assertIn(key, d, f"Missing key '{key}' in to_dict()")
 
 
 if __name__ == "__main__":
