@@ -46,6 +46,23 @@ _GRID_ROWS = 60
 # are classified as navigable floor.
 _DEPTH_GRAD_N_SIGMA = 4
 
+# Per-row widening of the vertical-gradient (gy) sigma for pixels below the
+# floor reference sample's row, in sigma-units per pixel row of distance.
+# The floor reference is a single spot-sample (the robot's own footprint), so
+# it carries one gy value calibrated for that row band. Under this camera's
+# viewing angle a flat floor's vertical depth-gradient is not row-invariant:
+# it grows the closer a row is to the camera (i.e. the further below the
+# robot, toward the bottom frame edge), a real perspective-foreshortening
+# effect, not sensor noise. A single global sigma_gy tuned at the reference
+# row is too tight for that near-field growth, so rows well below the robot
+# get flagged as obstacles even though they're plain floor (see
+# TestNavigationBottomBandFalseObstacle). Only widening *below* the
+# reference row (never above it) keeps this a no-op for genuine obstacles,
+# which in this domain sit above/at the robot's row (walls, cabinets, target
+# objects) — verified against TestNavigationFloorWaveArtifact's wall/cabinet
+# assertions, which are unaffected by this constant at any tested value.
+_DEPTH_GRAD_ROW_SLACK = 0.02
+
 # Minimum obstacle inflation in grid cells — used when the robot body cannot
 # be detected.  Normally the inflation radius is derived from the yellow body
 # bounding box so the path stays at least one robot-width from obstacles.
@@ -411,6 +428,12 @@ def _depth_gradient_floor_mask(
     the same gradient even though their absolute depth values are wrong.  Depth
     models reliably get the gradient right even when absolute depth is off.
 
+    *floor_sample* is a single spot-sample, so its gradient is only strictly
+    valid at its own row band. The vertical gradient (gy) grows for rows
+    below it (nearer the camera — perspective foreshortening), so the gy
+    tolerance widens with row distance below *floor_sample* — see
+    _DEPTH_GRAD_ROW_SLACK. Rows at/above the sample are unaffected.
+
     Returns None when there are not enough samples.
     """
     if floor_sample is None or (floor_sample > 0).sum() < 50:
@@ -426,6 +449,7 @@ def _depth_gradient_floor_mask(
     # Sample floor gradient from the reference region (guaranteed floor pixels).
     ref_gx = gx[floor_sample > 0].astype(np.float64)
     ref_gy = gy[floor_sample > 0].astype(np.float64)
+    ref_row = float(np.median(np.where(floor_sample > 0)[0]))
 
     floor_gx = float(np.median(ref_gx))
     floor_gy = float(np.median(ref_gy))
@@ -436,12 +460,19 @@ def _depth_gradient_floor_mask(
     sigma_gx = max(float((q3x - q1x) / 1.35), 1.0)
     sigma_gy = max(float((q3y - q1y) / 1.35), 1.0)
 
-    log.debug("Depth gradient floor: gx=%.1f±%.1f  gy=%.1f±%.1f",
-              floor_gx, sigma_gx, floor_gy, sigma_gy)
+    log.debug("Depth gradient floor: gx=%.1f±%.1f  gy=%.1f±%.1f  ref_row=%.0f",
+              floor_gx, sigma_gx, floor_gy, sigma_gy, ref_row)
+
+    # Widen the gy tolerance for rows below the reference sample (nearer the
+    # camera), never above it — see _DEPTH_GRAD_ROW_SLACK. rows_below is 0 at
+    # and above ref_row, so this is an exact no-op there.
+    h = depth.shape[0]
+    rows_below = np.clip(np.arange(h, dtype=np.float32) - ref_row, 0, None).reshape(-1, 1)
+    sigma_gy_map = sigma_gy + _DEPTH_GRAD_ROW_SLACK * rows_below
 
     # Mahalanobis-like distance in gradient space.
     z_gx = ((gx - floor_gx) / sigma_gx).astype(np.float32)
-    z_gy = ((gy - floor_gy) / sigma_gy).astype(np.float32)
+    z_gy = ((gy - floor_gy) / sigma_gy_map).astype(np.float32)
     dist = np.sqrt(z_gx ** 2 + z_gy ** 2)
 
     return (dist <= n_sigma).astype(np.uint8) * 255
