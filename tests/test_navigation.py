@@ -583,19 +583,18 @@ class TestNavigationBottomBandFalseObstacle(unittest.TestCase):
     debug image showed plain floor in the last ~100px of the frame almost
     entirely flagged as obstacle).
 
-    Root cause: _depth_gradient_floor_mask compares every pixel's depth
-    gradient to ONE reference (floor_gx/floor_gy/sigma_gx/sigma_gy) sampled
-    from a single row band — the robot's own footprint on the inpainted
-    depth map. That reference is only strictly valid at its own row: under
-    this camera's viewing angle, a flat floor's vertical depth-gradient (gy)
-    is not row-invariant — it grows the closer a row is to the camera, i.e.
-    the further below the robot toward the bottom frame edge (perspective
-    foreshortening, not noise). On this fixture gy at the reference row
-    (~933) is ~8, but climbs to a median of ~14 (max ~18) in the bottom
-    band (rows 1180-1260) — a real, physically-driven shift the single
-    global sigma_gy (clamped to a minimum of 1.0) has no way to absorb, so
-    that whole band reads as "too different from floor" and gets flagged
-    obstacle.
+    Root cause: _depth_gradient_floor_mask (now surface-normal-based — see
+    below) compares every pixel to ONE reference sampled from a single row
+    band — the robot's own footprint on the inpainted depth map. That
+    reference is only strictly valid at its own row: under this camera's
+    viewing angle, a flat floor's apparent vertical slope is not row-
+    invariant — it grows the closer a row is to the camera, i.e. the
+    further below the robot toward the bottom frame edge (perspective
+    foreshortening, not noise). Originally found via the raw Sobel gradient
+    (gy at the reference row ~933 is ~8, climbing to a median of ~14, max
+    ~18, in the bottom band rows 1180-1260) — a real, physically-driven
+    shift a single global sigma has no way to absorb, so that whole band
+    read as "too different from floor" and got flagged obstacle.
 
     This is a distinct bug from TestNavigationFloorWaveArtifact's depth-
     quantisation staircase (periodic bands tied to the 256-level "depth"
@@ -603,22 +602,33 @@ class TestNavigationBottomBandFalseObstacle(unittest.TestCase):
     tensor correctly. This is a geometric blind spot in the comparison
     itself, not a numerical-precision artifact.
 
-    Fix: _depth_gradient_floor_mask now widens sigma_gy for rows below the
-    reference sample's row, proportional to row distance
-    (_DEPTH_GRAD_ROW_SLACK), and leaves rows at/above it untouched. Widening
-    n_sigma (or sigma) globally instead was tried and rejected: it is a
-    single uniform knob with no positional awareness, so any value large
-    enough to clear the bottom band (n_sigma >= ~10 on this fixture) also
-    thins the tolerance margin on every real obstacle in the frame,
-    including ones right next to the robot where collision risk matters
-    most (see test_wall_and_cabinet_still_detected_as_obstacles docstring
-    precedent) — measured on TestNavigationFloorWaveArtifact's fixture,
-    wall_obstacle_frac and cabinet_obstacle_frac both drift downward as
-    n_sigma rises (100%->96.3%, 99.1%->97.4% by n_sigma=20), where the
-    row-aware fix leaves both fixtures' wall/cabinet regions unchanged
-    because the widening is a structural no-op above the reference row.
-    Lowering n_sigma makes this fixture's bottom band strictly worse (it is
-    already failing at the default n_sigma=4).
+    Fix, part 1 (row-aware widening): _depth_gradient_floor_mask widens its
+    sigma(s) for rows below the reference sample's row, proportional to row
+    distance, and leaves rows at/above it untouched — structurally a no-op
+    for genuine obstacles, which in this domain sit above/at the robot's
+    row (walls, cabinets, target objects). Widening n_sigma globally
+    instead was tried and rejected at the time: on the original raw-
+    gradient metric it was a single uniform knob with no positional
+    awareness, and any value large enough to clear the bottom band also
+    measurably thinned the tolerance margin on every real obstacle in the
+    frame (wall/cabinet obstacle_frac drifted 100%->96.3%, 99.1%->97.4% by
+    n_sigma=20 on TestNavigationFloorWaveArtifact's fixture).
+
+    Fix, part 2 (gradient -> surface normal, then a wider n_sigma): the
+    comparison metric was later swapped from the raw (gx, gy) gradient to
+    the unit surface normal n = normalize(-gx, -gy, 1) — see
+    _SURFACE_NORMAL_SIGMA_FLOOR_NX/NY and _DEPTH_GRAD_ROW_SLACK_NX/NY.
+    Bounding the metric to the unit disk changed the *global* n_sigma
+    tradeoff from part 1: genuine obstacles now saturate hard near the disk
+    edge (dist ~97 on the wall/cabinet fixture) while ordinary floor-
+    texture noise sits close to the threshold (2.7-5.2 on a residual
+    false-positive patch), leaving a wide, nearly-empty gap between them.
+    Swept n_sigma 4->20 on this (normal-based) pipeline: the noise patch
+    cleared entirely by 6, while wall/cabinet drifted only
+    99.8%->99.5%/98.6%->98.1% across the *whole* range — an order of
+    magnitude less erosion than the same sweep produced on the raw
+    gradient. n_sigma=10 was adopted for the margin. Lowering n_sigma
+    remains strictly worse regardless of metric.
 
     Outputs: tests/fixtures/navigation/annotated/bottom_band_false_obstacle/
     """
