@@ -573,6 +573,175 @@ class TestNavigationFloorWaveArtifact(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
 
 
+class TestNavigationBottomBandFalseObstacle(unittest.TestCase):
+    """Regression test for false-obstacle floor misclassification concentrated
+    in the bottom (near-field) band of the frame.
+
+    Fixture: tests/fixtures/navigation/droidcam_bottom_band_false_obstacle.jpg
+    (robot facing NNW next to a cabinet, blue cup target near the wall corner
+    — the frame from a live navigate_to run on 2026-07-10 whose obstacle-mask
+    debug image showed plain floor in the last ~100px of the frame almost
+    entirely flagged as obstacle).
+
+    Root cause: _depth_gradient_floor_mask (now surface-normal-based — see
+    below) compares every pixel to ONE reference sampled from a single row
+    band — the robot's own footprint on the inpainted depth map. That
+    reference is only strictly valid at its own row: under this camera's
+    viewing angle, a flat floor's apparent vertical slope is not row-
+    invariant — it grows the closer a row is to the camera, i.e. the
+    further below the robot toward the bottom frame edge (perspective
+    foreshortening, not noise). Originally found via the raw Sobel gradient
+    (gy at the reference row ~933 is ~8, climbing to a median of ~14, max
+    ~18, in the bottom band rows 1180-1260) — a real, physically-driven
+    shift a single global sigma has no way to absorb, so that whole band
+    read as "too different from floor" and got flagged obstacle.
+
+    This is a distinct bug from TestNavigationFloorWaveArtifact's depth-
+    quantisation staircase (periodic bands tied to the 256-level "depth"
+    image): estimate_depth() here already reads the raw predicted_depth
+    tensor correctly. This is a geometric blind spot in the comparison
+    itself, not a numerical-precision artifact.
+
+    Fix, part 1 (row-aware widening): _depth_gradient_floor_mask widens its
+    sigma(s) for rows below the reference sample's row, proportional to row
+    distance, and leaves rows at/above it untouched — structurally a no-op
+    for genuine obstacles, which in this domain sit above/at the robot's
+    row (walls, cabinets, target objects). Widening n_sigma globally
+    instead was tried and rejected at the time: on the original raw-
+    gradient metric it was a single uniform knob with no positional
+    awareness, and any value large enough to clear the bottom band also
+    measurably thinned the tolerance margin on every real obstacle in the
+    frame (wall/cabinet obstacle_frac drifted 100%->96.3%, 99.1%->97.4% by
+    n_sigma=20 on TestNavigationFloorWaveArtifact's fixture).
+
+    Fix, part 2 (gradient -> surface normal, then a wider n_sigma): the
+    comparison metric was later swapped from the raw (gx, gy) gradient to
+    the unit surface normal n = normalize(-gx, -gy, 1) — see
+    _SURFACE_NORMAL_SIGMA_FLOOR_NX/NY and _DEPTH_GRAD_ROW_SLACK_NX/NY.
+    Bounding the metric to the unit disk changed the *global* n_sigma
+    tradeoff from part 1: genuine obstacles now saturate hard near the disk
+    edge (dist ~97 on the wall/cabinet fixture) while ordinary floor-
+    texture noise sits close to the threshold (2.7-5.2 on a residual
+    false-positive patch), leaving a wide, nearly-empty gap between them.
+    Swept n_sigma 4->20 on this (normal-based) pipeline: the noise patch
+    cleared entirely by 6, while wall/cabinet drifted only
+    99.8%->99.5%/98.6%->98.1% across the *whole* range — an order of
+    magnitude less erosion than the same sweep produced on the raw
+    gradient. n_sigma=10 was adopted for the margin. Lowering n_sigma
+    remains strictly worse regardless of metric.
+
+    Outputs: tests/fixtures/navigation/annotated/bottom_band_false_obstacle/
+    """
+
+    FIXTURE_IMG = FIXTURES / "navigation" / "droidcam_bottom_band_false_obstacle.jpg"
+    ANNOTATED_DIR = FIXTURES / "navigation" / "annotated" / "bottom_band_false_obstacle"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        from mcp_robot.grasp_readiness import _yolo_detect, _pick_target, _load_model
+        from mcp_robot.navigation import detect_obstacles, plan_path, save_debug_images
+
+        _load_model()
+        cls.ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+
+        bgr = _load(cls.FIXTURE_IMG)
+        h_result = detect_heading(bgr)
+        objects = _yolo_detect(bgr, target_class="cup")
+        target = (
+            _pick_target(objects, h_result)
+            if (objects and h_result)
+            else (max(objects, key=lambda o: o.confidence) if objects else None)
+        )
+
+        obs_map = detect_obstacles(bgr, h_result, target)
+        nav_plan = plan_path(obs_map, h_result)
+        saved = save_debug_images(bgr, obs_map, nav_plan, str(cls.ANNOTATED_DIR), step=0)
+
+        print(f"\n[bottom_band] Heading:  {h_result.forward if h_result else 'not detected'}")
+        print(f"[bottom_band] Objects:  {[f'{o.class_name}@{o.confidence:.2f}' for o in objects]}")
+        print(f"[bottom_band] Robot px: {obs_map.robot_px},  Target px: {obs_map.target_px}")
+        print(f"[bottom_band] Plan:     {nav_plan.reason}")
+        print(f"[bottom_band] Images:   {list(saved.values())}")
+
+        cls._bgr     = bgr
+        cls._heading = h_result
+        cls._objects = objects
+        cls._target  = target
+        cls._obs_map = obs_map
+        cls._plan    = nav_plan
+        cls._saved   = saved
+
+    def test_robot_body_detected(self):
+        self.assertIsNotNone(self._heading, "Heading not detected — robot body not visible?")
+
+    def test_free_mask_covers_floor(self):
+        """At least 20% of the frame should be navigable floor."""
+        frac = (self._obs_map.free_mask > 0).mean()
+        self.assertGreater(frac, 0.20, f"Free-space fraction too low: {frac:.1%}")
+
+    def test_bottom_band_mostly_free(self):
+        """The near-field floor strip at the bottom of the frame — plain,
+        unobstructed wood floor in the raw image — must read mostly free.
+
+        Before the fix this band was ~35-55% free (most of it misclassified
+        as obstacle); the fix brings it to ~90%+. The 0.85 bar sits well
+        above the buggy baseline and below the fix's plateau (~92%, the
+        residual being ordinary texture/shadow noise, not the row-dependent
+        bug), so this won't flap on minor pipeline noise in either
+        direction.
+        """
+        fm = self._obs_map.free_mask
+        frac = float((fm[1180:1260, 0:450] > 0).mean())
+        self.assertGreater(
+            frac, 0.85,
+            f"Bottom-band free fraction too low: {frac:.1%} — plain near-field "
+            "floor is being misclassified as obstacle",
+        )
+
+    def test_cabinet_and_wall_still_detected_as_obstacles(self):
+        """The genuine vertical obstacles in this frame — the cabinet edge
+        (right side) and the room wall (upper-left, above its baseboard) —
+        must stay classified as obstacle. Guards against the rejected
+        alternative fix (raising n_sigma globally): a big enough n_sigma
+        also clears the bottom band, but only by eroding margin everywhere
+        else in the frame, this region included (see class docstring).
+        """
+        fm = self._obs_map.free_mask
+        cabinet_obstacle_frac = float((fm[0:650, 490:720] == 0).mean())
+        self.assertGreater(
+            cabinet_obstacle_frac, 0.90,
+            f"Cabinet-edge region obstacle fraction too low: {cabinet_obstacle_frac:.1%} "
+            "— the cabinet edge is being misclassified as navigable floor",
+        )
+        wall_obstacle_frac = float((fm[0:280, 0:470] == 0).mean())
+        self.assertGreater(
+            wall_obstacle_frac, 0.90,
+            f"Wall region obstacle fraction too low: {wall_obstacle_frac:.1%} "
+            "— the room wall is being misclassified as navigable floor",
+        )
+
+    def test_robot_grid_cell_is_real_floor(self):
+        """The robot's grid cell is real floor (raw_grid). It may still fall
+        inside the Minkowski-sum buffer (grid=False) when close to an
+        obstacle -- plan_path's buffer-exit branch handles that case."""
+        r, c = self._obs_map.robot_grid
+        self.assertTrue(self._obs_map.raw_grid[r, c],
+                        f"Robot grid cell ({r},{c}) is not real floor")
+
+    def test_plan_generated(self):
+        from mcp_robot.navigation import NavPlan
+        self.assertIsInstance(self._plan, NavPlan)
+        print(f"\n  plan reachable={self._plan.reachable}  reason={self._plan.reason}")
+
+    def test_debug_images_written(self):
+        for key in ("raw", "cleaned", "obstacle_mask", "depth", "cspace", "nav_overlay"):
+            self.assertIn(key, self._saved, f"Missing key '{key}'")
+            path = pathlib.Path(self._saved[key])
+            self.assertTrue(path.exists(), f"File not written: {path}")
+            self.assertGreater(path.stat().st_size, 1000, f"File suspiciously small: {path}")
+
+
 class TestNavigationNoPath(unittest.TestCase):
     def test_plan_path_no_path_returns_unreachable_navplan(self):
         """plan_path should return a NavPlan with reachable=False when no path is found."""

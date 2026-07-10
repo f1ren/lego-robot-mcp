@@ -41,10 +41,57 @@ log = logging.getLogger(__name__)
 _GRID_COLS = 80
 _GRID_ROWS = 60
 
-# Mahalanobis-distance threshold for depth-gradient floor classification.
-# Pixels within this many IQR-derived sigmas of the robot-ring floor gradient
+# Mahalanobis-distance threshold for surface-normal floor classification.
+# Pixels within this many IQR-derived sigmas of the robot-ring floor normal
 # are classified as navigable floor.
-_DEPTH_GRAD_N_SIGMA = 4
+#
+# 4 was carried over from the pre-normal raw-gradient version, where it was
+# load-bearing: raising it measurably eroded wall/cabinet obstacle detection
+# (100%->96.3%, 99.1%->97.4% obstacle_frac over 4->20, see the row-dependent-
+# bug fix's PR). It is not load-bearing the same way here. The unit-disk
+# normal saturates hard for genuine obstacles -- on the wall/cabinet fixture
+# their dist sits around ~97, two orders of magnitude past any reasonable
+# cutoff -- while ordinary floor-texture noise sits close to the threshold
+# (2.7-5.2 on a residual false-positive patch investigated directly). Swept
+# 4->20 on the current (normal + both-axis row-widened) pipeline: the noise
+# patch clears entirely by 6, wall/cabinet drift only 99.8%->99.5% and
+# 98.6%->98.1% across the whole range. 10 leaves comfortable margin below
+# where any real erosion starts to show and well above where the noise clears.
+_DEPTH_GRAD_N_SIGMA = 10
+
+# Per-row widening of the surface-normal sigmas for pixels below the floor
+# reference sample's row, in sigma-units per pixel row of distance. Same
+# mechanism as the pre-normal gradient version, rescaled: see
+# _SURFACE_NORMAL_SIGMA_FLOOR_NX/NY for why normal-space sigmas run ~30-50x
+# smaller than the old raw-gradient ones. Only widens *below* the reference
+# row (never above it) so it stays a no-op for genuine obstacles, which in
+# this domain sit above/at the robot's row (walls, cabinets, target objects).
+#
+# Unlike the raw-gradient version, BOTH components need widening here, not
+# just the vertical one: nx and ny share one normalizing denominator
+# (1/sqrt(gx^2+gy^2+1)), so as |gy| grows near the camera (perspective
+# foreshortening) it drags nx down with it even though the raw gx barely
+# moves with row — measured on the bottom band, nx drifts from -0.33 at the
+# reference row to -0.18, alone enough to fail n_sigma even with ny fully
+# forgiven. This is a genuine side effect of unit-normalizing the gradient,
+# not present in the raw (gx, gy) version.
+_DEPTH_GRAD_ROW_SLACK_NX = 0.0008
+_DEPTH_GRAD_ROW_SLACK_NY = 0.0004
+
+# Minimum IQR-derived sigma for the surface normal's in-plane components
+# (nx, ny) — the normal-space analogue of the old single sigma_floor=1.0
+# (which was calibrated for the *raw* Sobel gradient's 0-255-scaled depth
+# units). The unit normal n = normalize(-gx, -gy, 1) bounds (nx, ny) to the
+# unit disk, so that floor no longer applies: nx has ~30x the working range
+# and IQR-sigma of ny (which saturates toward the disk edge once |gy| >> 1,
+# i.e. any non-trivial floor slope), because it stays closer to the
+# unsaturated center of the disk. Calibrated from a real (non-inpainted)
+# floor patch's IQR-sigma (~0.086, ~0.018), the same way the old floor was
+# meant to approximate natural floor-texture variance where the inpainted
+# reference sample's own IQR-sigma is artificially tight (LaMa smooths the
+# fill more than genuine floor texture varies).
+_SURFACE_NORMAL_SIGMA_FLOOR_NX = 0.08
+_SURFACE_NORMAL_SIGMA_FLOOR_NY = 0.02
 
 # Minimum obstacle inflation in grid cells — used when the robot body cannot
 # be detected.  Normally the inflation radius is derived from the yellow body
@@ -395,11 +442,12 @@ def _depth_gradient_floor_mask(
     floor_sample: np.ndarray,
     n_sigma: float = _DEPTH_GRAD_N_SIGMA,
 ) -> np.ndarray | None:
-    """Floor mask from depth-gradient direction similarity to a floor reference.
+    """Floor mask from surface-normal similarity to a floor reference.
 
-    The floor is a planar surface with a characteristic depth gradient (surface
-    orientation).  Any pixel whose Sobel gradient vector falls within n_sigma
-    IQR-derived standard deviations of the floor-gradient sample is classified
+    The floor is a planar surface with a characteristic orientation. Each
+    pixel's depth gradient is converted to a unit surface normal
+    n = normalize(-gx, -gy, 1); any pixel whose (nx, ny) falls within n_sigma
+    IQR-derived standard deviations of the floor-normal sample is classified
     as navigable.
 
     *floor_sample* is a mask of pixels guaranteed to be floor — typically the
@@ -408,8 +456,22 @@ def _depth_gradient_floor_mask(
 
     Key advantage over depth-value thresholding: shadow areas have the same
     surface orientation as the lit floor (same physical plane), so they produce
-    the same gradient even though their absolute depth values are wrong.  Depth
+    the same normal even though their absolute depth values are wrong.  Depth
     models reliably get the gradient right even when absolute depth is off.
+
+    Note this normal is *not* a calibrated geometric quantity — normalize(-gx,
+    -gy, 1) needs camera intrinsics (focal length) to properly unproject into
+    a position-invariant surface normal, and this codebase has none. It is a
+    bounded (unit-disk) reparametrisation of the same Sobel gradient the
+    unbounded version used, nothing more; it inherits the same row-dependent
+    perspective bias (see below), it does not correct for it.
+
+    *floor_sample* is a single spot-sample, so its normal is only strictly
+    valid at its own row band. Both nx and ny drift for rows below it (nearer
+    the camera — perspective foreshortening: they share one normalizing
+    denominator, so nx drifts too even though the raw gx does not), so both
+    tolerances widen with row distance below *floor_sample* — see
+    _DEPTH_GRAD_ROW_SLACK_NX/NY. Rows at/above the sample are unaffected.
 
     Returns None when there are not enough samples.
     """
@@ -423,26 +485,43 @@ def _depth_gradient_floor_mask(
     gx = cv2.Sobel(depth_smooth, cv2.CV_32F, 1, 0, ksize=5)
     gy = cv2.Sobel(depth_smooth, cv2.CV_32F, 0, 1, ksize=5)
 
-    # Sample floor gradient from the reference region (guaranteed floor pixels).
-    ref_gx = gx[floor_sample > 0].astype(np.float64)
-    ref_gy = gy[floor_sample > 0].astype(np.float64)
+    # Unit surface normal from the gradient: n = normalize(-gx, -gy, 1).
+    # Bounds (nx, ny) to the unit disk instead of the unbounded gradient --
+    # steep gradients saturate toward the disk edge rather than growing
+    # without bound.
+    inv_len = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
+    nx = (-gx * inv_len).astype(np.float32)
+    ny = (-gy * inv_len).astype(np.float32)
 
-    floor_gx = float(np.median(ref_gx))
-    floor_gy = float(np.median(ref_gy))
+    # Sample floor normal from the reference region (guaranteed floor pixels).
+    ref_nx = nx[floor_sample > 0].astype(np.float64)
+    ref_ny = ny[floor_sample > 0].astype(np.float64)
+    ref_row = float(np.median(np.where(floor_sample > 0)[0]))
+
+    floor_nx = float(np.median(ref_nx))
+    floor_ny = float(np.median(ref_ny))
 
     # Robust σ from IQR (÷1.35 converts IQR → σ for a normal distribution).
-    q1x, q3x = np.percentile(ref_gx, [25, 75])
-    q1y, q3y = np.percentile(ref_gy, [25, 75])
-    sigma_gx = max(float((q3x - q1x) / 1.35), 1.0)
-    sigma_gy = max(float((q3y - q1y) / 1.35), 1.0)
+    q1x, q3x = np.percentile(ref_nx, [25, 75])
+    q1y, q3y = np.percentile(ref_ny, [25, 75])
+    sigma_nx = max(float((q3x - q1x) / 1.35), _SURFACE_NORMAL_SIGMA_FLOOR_NX)
+    sigma_ny = max(float((q3y - q1y) / 1.35), _SURFACE_NORMAL_SIGMA_FLOOR_NY)
 
-    log.debug("Depth gradient floor: gx=%.1f±%.1f  gy=%.1f±%.1f",
-              floor_gx, sigma_gx, floor_gy, sigma_gy)
+    log.debug("Surface normal floor: nx=%.3f±%.3f  ny=%.3f±%.3f  ref_row=%.0f",
+              floor_nx, sigma_nx, floor_ny, sigma_ny, ref_row)
 
-    # Mahalanobis-like distance in gradient space.
-    z_gx = ((gx - floor_gx) / sigma_gx).astype(np.float32)
-    z_gy = ((gy - floor_gy) / sigma_gy).astype(np.float32)
-    dist = np.sqrt(z_gx ** 2 + z_gy ** 2)
+    # Widen both tolerances for rows below the reference sample (nearer the
+    # camera), never above it — see _DEPTH_GRAD_ROW_SLACK_NX/NY. rows_below is
+    # 0 at and above ref_row, so this is an exact no-op there.
+    h = depth.shape[0]
+    rows_below = np.clip(np.arange(h, dtype=np.float32) - ref_row, 0, None).reshape(-1, 1)
+    sigma_nx_map = sigma_nx + _DEPTH_GRAD_ROW_SLACK_NX * rows_below
+    sigma_ny_map = sigma_ny + _DEPTH_GRAD_ROW_SLACK_NY * rows_below
+
+    # Mahalanobis-like distance in surface-normal space.
+    z_nx = ((nx - floor_nx) / sigma_nx_map).astype(np.float32)
+    z_ny = ((ny - floor_ny) / sigma_ny_map).astype(np.float32)
+    dist = np.sqrt(z_nx ** 2 + z_ny ** 2)
 
     return (dist <= n_sigma).astype(np.uint8) * 255
 
