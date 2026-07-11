@@ -795,10 +795,18 @@ def locate_object_vlm(
     try:
         # Gemini occasionally emits "x"/"y" instead of the requested "x1"/"y1"
         # for the top-left corner — fall back to those before giving up.
-        x1 = int(data.get("x1", data.get("x")) * w)
-        y1 = int(data.get("y1", data.get("y")) * h)
-        x2 = int(data["x2"] * w)
-        y2 = int(data["y2"] * h)
+        raw_x1 = data.get("x1", data.get("x"))
+        raw_y1 = data.get("y1", data.get("y"))
+        raw_x2 = data["x2"]
+        raw_y2 = data["y2"]
+        # Gemini normally normalizes coords to [0,1], but occasionally emits
+        # one axis already in pixel space (e.g. x1=0.49 alongside y1=194) — a
+        # value > 1 can't be a normalized fraction, so treat it as already
+        # being in pixel space instead of scaling it again.
+        x1 = int(raw_x1) if raw_x1 > 1 else int(raw_x1 * w)
+        y1 = int(raw_y1) if raw_y1 > 1 else int(raw_y1 * h)
+        x2 = int(raw_x2) if raw_x2 > 1 else int(raw_x2 * w)
+        y2 = int(raw_y2) if raw_y2 > 1 else int(raw_y2 * h)
     except (KeyError, TypeError) as exc:
         log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
         raise RuntimeError(f"locate_object_vlm: missing bbox fields in response: {data}") from exc

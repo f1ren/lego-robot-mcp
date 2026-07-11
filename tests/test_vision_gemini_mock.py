@@ -133,3 +133,25 @@ def test_locate_object_vlm_parses_valid_response(fake_gemini_client, monkeypatch
     assert list(hsv_lo) == [100, 50, 60]
     assert list(hsv_hi) == [130, 255, 255]
     assert area_frac == pytest.approx(0.08)
+
+
+def test_locate_object_vlm_handles_mixed_normalized_and_pixel_coords(fake_gemini_client, monkeypatch):
+    """Regression test: Gemini sometimes returns x1/x2 normalized to [0,1] but
+    y1/y2 already in pixel space (seen in production: x1=0.493, y1=194).
+    Scaling every axis by w/h unconditionally sent y1/y2 far past the frame
+    bounds, where clamping collapsed them to the same value — a "degenerate
+    bbox" RuntimeError even though Gemini found the object. Values > 1 should
+    be treated as already-pixel instead of re-scaled."""
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    payload = json.dumps({
+        "found": True, "x1": 0.1, "y1": 20, "x2": 0.5, "y2": 60,
+        "hsv_hue_lo": 100, "hsv_hue_hi": 130, "hsv_sat_min": 50, "hsv_val_min": 60,
+        "approx_area_frac": 0.08, "confidence": 0.97, "note": "blue cup on floor",
+    })
+    fake_gemini_client([payload])
+
+    result = vision.locate_object_vlm(_tiny_bgr_image(w=200, h=100), "blue cup")
+
+    assert result is not None
+    bbox, *_ = result
+    assert bbox == (20, 20, 100, 60)  # x scaled by w=200, y used as-is (already pixels)
