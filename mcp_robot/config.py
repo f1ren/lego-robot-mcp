@@ -121,16 +121,51 @@ CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 
 # ── Long-range drive guard (drive_to overshoot protection) ────────────────────
-# drive_to() drives the exact measured distance in one uncorrected blind move
-# — no clamp, no overtravel margin (contrast CLICK_PRESS_MARGIN_MM above).
-# That's fine at close range, but dead-reckoning error (wheel slip, drift)
-# compounds with distance, so a single long blind drive risks a bad overshoot.
-# Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths, drive_to() only
-# covers DRIVE_TO_PARTIAL_FRACTION of the measured distance and tells the
-# caller to re-invoke it — each re-invocation re-measures from a shorter,
-# more reliable range.
+# drive_to() drives the measured distance in one uncorrected blind move, minus
+# DRIVE_TO_TOUCH_OFFSET_MM (see below) — no clamp, no added overtravel margin
+# (contrast CLICK_PRESS_MARGIN_MM above). Dead-reckoning error (wheel slip,
+# drift) compounds with distance, so a single long blind drive risks a bad
+# overshoot. Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths,
+# drive_to() only covers DRIVE_TO_PARTIAL_FRACTION of the touch-adjusted
+# distance and tells the caller to re-invoke it — each re-invocation
+# re-measures from a shorter, more reliable range.
 DRIVE_TO_LONG_RANGE_BODY_LENGTHS = float(os.getenv("DRIVE_TO_LONG_RANGE_BODY_LENGTHS", "2.0"))
 DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.85"))
+
+# The distance drive_to() measures (object_distance_px in _measure_target,
+# scaled to mm) is centroid-to-centroid: robot body centroid -> target
+# centroid (grasp_readiness.annotate_frame_with_object: dist_px =
+# hypot(body_center - obj.center)). Driving that full distance would put the
+# robot's *centroid* where the target's centroid currently is — the gripper,
+# mounted well forward of the centroid, would already have driven through the
+# target well before that. DRIVE_TO_TOUCH_OFFSET_MM is subtracted from the
+# measured distance (floored at 0) *first*, on every leg — the short-range
+# single drive, and both legs of the long-range auto-refine — so the robot
+# always targets the touch point, never the centroid.
+#
+# On the long-range first leg, DRIVE_TO_PARTIAL_FRACTION is applied to that
+# already touch-adjusted distance (not to the raw measured distance) —
+# first_drive_mm = max(0, distance_mm - DRIVE_TO_TOUCH_OFFSET_MM) *
+# DRIVE_TO_PARTIAL_FRACTION. Applying the fraction before the subtraction
+# instead would let a distance only just over the long-range threshold
+# overshoot into the touch zone on the first leg alone: e.g. at 400mm with
+# the defaults below, 0.85 x 400mm = 340mm driven leaves only a 60mm
+# centroid-gap — already less than the 140mm touch offset — before the
+# second leg's touch-aware logic even runs. Subtracting first means the
+# fraction is always applied to the touch-relevant distance, so the first
+# leg can never land closer than the touch offset on its own.
+#
+# Default 140mm is a visual estimate (not yet independently measured) from a
+# real drive_to() run: output/logs/mcp_server.log 2026-07-11 21:39:04 logged a
+# "second (final) drive" commanded for the full re-measured 143mm although the
+# robot, per output/snapshots/droidcam_20260711_213904_969.jpg from that same
+# instant, looked already close to touching the target — implying the true
+# touching gap is close to that 143mm measured distance, not 0. Roughly
+# consistent with ROBOT_BODY_LENGTH_MM/2 (76mm, centroid to body-hull front
+# edge) plus the gripper's reach beyond the body hull and the target's own
+# radius. Refine this constant with more measurements if drive_to()
+# consistently stops short of or drives into targets.
+DRIVE_TO_TOUCH_OFFSET_MM = float(os.getenv("DRIVE_TO_TOUCH_OFFSET_MM", "140.0"))
 
 # ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
 # Real-world gap (mm) between the target object's nearest point and the
