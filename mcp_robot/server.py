@@ -2481,13 +2481,13 @@ def plan_pddl(problem_pddl: str) -> dict:
     when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
     defines seven actions:
       - navigate         ?from ?to         → navigate_to  [requires arm-lowered + gripper-open —
-                                              this is the approach leg toward a pick-up target]
+                                              this is the approach leg toward a grasp target]
       - navigate-holding ?from ?to ?object → navigate_to  [requires holding ?object — the
-                                              transport leg after pick-up, before place]
+                                              transport leg after grasp, before place]
       - open-gripper                       → control_gripper(open)  [requires arm-lowered]
       - lower-arm                          → lower_arm
       - lift-arm         ?object           → lift_arm  [requires holding ?object + arm-lowered]
-      - pick-up          ?object ?location → control_gripper(close)  [gripper+arm must be ready]
+      - grasp            ?object ?location → control_gripper(close)  [gripper+arm must be ready]
       - place            ?object ?location → put  (opens gripper + raises arm)
 
     You supply only the *problem* as a PDDL string.  It must declare:
@@ -2497,11 +2497,11 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Convention — NEVER assert (arm-lowered) or (gripper-open) in (:init), even
     if the robot's physical state has them true.  Omitting them forces the planner
-    to always emit lower-arm and open-gripper before every pick-up, which matches
+    to always emit lower-arm and open-gripper before every grasp, which matches
     the CLAUDE.md safety rules ("always open/lower regardless of observed state").
     This is also structurally enforced: `navigate`'s precondition requires
     arm-lowered + gripper-open, and `open-gripper`'s precondition requires
-    arm-lowered — so the planner cannot reach a pick-up target without first
+    arm-lowered — so the planner cannot reach a grasp target without first
     lowering the arm and then opening the gripper, in that order.
 
     Example problem (move a cup from the table to the sink):
@@ -2525,7 +2525,7 @@ def plan_pddl(problem_pddl: str) -> dict:
         (lower-arm)
         (open-gripper)
         (navigate loc-start loc-table)
-        (pick-up cup loc-table)
+        (grasp cup loc-table)
         (navigate-holding loc-table loc-sink cup)
         (place cup loc-sink)
 
