@@ -757,10 +757,18 @@ def drive_to(
 
     Measures the straight-line distance to the target via the external
     camera (same px->mm body-plate calibration navigate_to()/click_button()
-    use, then mm->wheel-encoder-degrees via navigation.mm_to_wheel_degrees),
-    and drives forward that far. Unlike click_button()'s press distance,
-    there is no min/max clamp and no overtravel margin added — this aims to
-    stop at the target, not push through it.
+    use, then mm->wheel-encoder-degrees via navigation.mm_to_wheel_degrees).
+    That measurement is robot-body-centroid to target-centroid, so driving
+    the full distance would put the robot's centroid where the target's
+    centroid currently is — the gripper, mounted forward of the centroid,
+    would already have driven through the target well before that. On the
+    final approach leg (the whole drive at short range, or the second leg at
+    long range — see below), drive_to() subtracts
+    config.DRIVE_TO_TOUCH_OFFSET_MM from the measured distance before
+    converting to drive_degrees, so the robot stops with its front at the
+    target instead of centering on it. Unlike click_button()'s press
+    distance, there is still no min/max clamp and no *added* overtravel
+    margin.
 
     Long-range guard: a single blind drive accumulates dead-reckoning error
     (wheel slip/drift) in proportion to distance, so if the measured distance
@@ -850,13 +858,26 @@ def drive_to(
 
     long_range_threshold_mm = config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
     first_long_range = distance_mm > long_range_threshold_mm
-    first_drive_mm = distance_mm * config.DRIVE_TO_PARTIAL_FRACTION if first_long_range else distance_mm
+    if first_long_range:
+        # Intentional partial approach — stops short for dead-reckoning-risk
+        # reasons unrelated to touch distance, so no touch offset here; the
+        # second/final leg below re-measures and applies the touch offset.
+        first_drive_mm = distance_mm * config.DRIVE_TO_PARTIAL_FRACTION
+    else:
+        first_drive_mm = max(0.0, distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
 
     first_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(first_drive_mm)))
     if first_drive_deg <= 0:
-        log.info("drive_to: already at target (measured distance=%.0fmm), no drive needed", distance_mm)
+        log.info(
+            "drive_to: already within touch offset (measured distance=%.0fmm, "
+            "touch offset=%.0fmm), no drive needed",
+            distance_mm, config.DRIVE_TO_TOUCH_OFFSET_MM,
+        )
         return _ok({
-            "message": f"already at target (measured distance={distance_mm:.0f}mm); no drive needed",
+            "message": (
+                f"already within touch offset (measured distance={distance_mm:.0f}mm, "
+                f"touch offset={config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm); no drive needed"
+            ),
             "measured_angle_deg": angle_deg,
             "measured_distance_mm": distance_mm,
         })
@@ -881,11 +902,21 @@ def drive_to(
             "overshoot; the robot will not yet be at the target"
         )
     else:
-        log.info("drive_to: measured distance=%.0fmm — drive_degrees=%d", distance_mm, first_drive_deg)
-        first_desc = f"drive_to speed={speed} drive_degrees={first_drive_deg} (measured {distance_mm:.0f}mm)"
+        log.info(
+            "drive_to: measured distance=%.0fmm — driving %.0fmm after %.0fmm touch "
+            "offset — drive_degrees=%d",
+            distance_mm, first_drive_mm, config.DRIVE_TO_TOUCH_OFFSET_MM, first_drive_deg,
+        )
+        first_desc = (
+            f"drive_to speed={speed} drive_degrees={first_drive_deg} (driving "
+            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured, stopping "
+            f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm short to touch rather than "
+            "center on the target)"
+        )
         first_expected = expected if expected else (
             f"robot drives forward ~{first_drive_deg}° wheel rotation "
-            f"(~{first_drive_mm:.0f}mm) toward the target"
+            f"(~{first_drive_mm:.0f}mm) toward the target, stopping with its front "
+            "at the target rather than driving its center onto it"
         )
 
     first_result = _with_change_analysis(
@@ -945,28 +976,34 @@ def drive_to(
             "a second drive_to() drive."
         )
 
-    second_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(second_distance_mm)))
+    second_drive_mm = max(0.0, second_distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
+    second_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(second_drive_mm)))
     if second_drive_deg <= 0:
         first_result["message"] = (
             f"First drive covered {first_drive_mm:.0f}mm; re-measured distance is "
-            f"now {second_distance_mm:.0f}mm — already at target, no second drive needed."
+            f"now {second_distance_mm:.0f}mm — within the "
+            f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm touch offset, no second drive needed."
         )
         return first_result
 
     second_long_range = second_distance_mm > long_range_threshold_mm
     log.info(
-        "drive_to: second (final) drive — re-measured distance=%.0fmm, "
-        "drive_degrees=%d (drive 2 of 2, driven in full — no further auto-refine)",
-        second_distance_mm, second_drive_deg,
+        "drive_to: second (final) drive — re-measured distance=%.0fmm, driving "
+        "%.0fmm after %.0fmm touch offset, drive_degrees=%d (drive 2 of 2, driven "
+        "in full — no further auto-refine)",
+        second_distance_mm, second_drive_mm, config.DRIVE_TO_TOUCH_OFFSET_MM, second_drive_deg,
     )
     second_desc = (
         f"drive_to speed={speed} drive_degrees={second_drive_deg} (2nd of 2 "
-        f"drives, closing remeasured {second_distance_mm:.0f}mm)"
+        f"drives, driving {second_drive_mm:.0f}mm of remeasured {second_distance_mm:.0f}mm, "
+        f"stopping {config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm short to touch rather "
+        "than center on the target)"
     )
     second_expected = (
         f"robot drives forward ~{second_drive_deg}° wheel rotation "
-        f"(~{second_distance_mm:.0f}mm) to reach the target, completing the "
-        "approach the first drive intentionally left short"
+        f"(~{second_drive_mm:.0f}mm) to reach the target, completing the "
+        "approach the first drive intentionally left short, stopping with its "
+        "front at the target rather than centered on it"
     )
     second_result = _with_change_analysis(
         second_desc, second_expected,
@@ -978,7 +1015,7 @@ def drive_to(
     )
     second_result["measured_angle_deg"] = angle_deg
     second_result["measured_distance_mm"] = distance_mm
-    second_result["driven_distance_mm"] = first_drive_mm + second_distance_mm
+    second_result["driven_distance_mm"] = first_drive_mm + second_drive_mm
     second_result["drives_executed"] = 2
     second_result["first_drive"] = {
         "driven_mm": first_drive_mm,
@@ -990,7 +1027,8 @@ def drive_to(
         f"Long-range drive ({distance_mm:.0f}mm measured, over "
         f"{config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS:.0f}x body length) auto-refined "
         f"in 2 drives: {first_drive_mm:.0f}mm, then a re-measured "
-        f"{second_distance_mm:.0f}mm."
+        f"{second_distance_mm:.0f}mm (drove {second_drive_mm:.0f}mm after "
+        f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm touch offset)."
         + (
             " The second drive was itself still long-range (2-drive cap reached) — "
             "verify the result and call drive_to() again if it undershot."
