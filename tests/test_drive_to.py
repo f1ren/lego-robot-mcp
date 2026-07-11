@@ -38,6 +38,12 @@ def _wheel_deg(mm: float) -> int:
     return int(round(nav_mod.mm_to_wheel_degrees(mm)))
 
 
+def _first_leg_mm(raw_mm: float) -> float:
+    """Mirrors drive_to()'s long-range first-leg formula: the partial
+    fraction applies to the touch-adjusted distance, not the raw one."""
+    return max(0.0, raw_mm - _OFFSET_MM) * config.DRIVE_TO_PARTIAL_FRACTION
+
+
 def _patch_measure_and_guard(monkeypatch, measurements, guards):
     """measurements: list of (angle_deg, distance_mm) tuples (or exceptions),
     consumed in call order by _measure_target. guards: list of str|None (or
@@ -166,7 +172,7 @@ def test_long_range_auto_refines_in_two_drives(monkeypatch):
 
     result = _drive_to()
 
-    first_leg_mm = _LONG_MM * config.DRIVE_TO_PARTIAL_FRACTION
+    first_leg_mm = _first_leg_mm(_LONG_MM)
 
     assert result["ok"] is True
     assert result["measured_angle_deg"] == 5.0            # from the *first* measurement
@@ -183,6 +189,42 @@ def test_long_range_auto_refines_in_two_drives(monkeypatch):
 
     assert drive_mock.call_args_list[0].args[0] == _wheel_deg(first_leg_mm)
     assert drive_mock.call_args_list[1].args[0] == _wheel_deg(second_driven_mm)
+
+
+def test_long_range_first_leg_never_overshoots_touch_offset(monkeypatch):
+    """Regression test for a distance just over the long-range threshold: the
+    85% fraction must apply to the touch-adjusted distance, not the raw one.
+    Applied to the raw distance, 400mm would drive 340mm (0.85 x 400) and
+    leave only a 60mm centroid-gap — already less than the 140mm touch
+    offset, i.e. leg 1 alone would overshoot into the touch zone before leg
+    2's touch-aware logic ever runs."""
+    raw_mm = 400.0
+    breakeven_mm = _OFFSET_MM / (1 - config.DRIVE_TO_PARTIAL_FRACTION)
+    assert _THRESHOLD_MM < raw_mm < breakeven_mm, (
+        "test fixture assumes raw_mm is in the danger zone where the naive "
+        "(pre-fix) formula would have overshot the touch offset on leg 1 alone"
+    )
+    first_leg_mm = _first_leg_mm(raw_mm)
+    remaining_centroid_gap = raw_mm - first_leg_mm
+
+    _patch_measure_and_guard(
+        monkeypatch,
+        measurements=[(0.0, raw_mm), (0.0, remaining_centroid_gap)],
+        guards=[None, None],
+    )
+    drive_mock = _patch_drive_degrees(monkeypatch)
+    _patch_change_analysis(monkeypatch, [
+        {"change_description": "drove most of the way"},
+        {"change_description": "arrived at cup"},
+    ])
+
+    result = _drive_to()
+
+    assert result["ok"] is True
+    assert remaining_centroid_gap >= _OFFSET_MM, (
+        "the first leg alone must never drive past the touch offset"
+    )
+    assert drive_mock.call_args_list[0].args[0] == _wheel_deg(first_leg_mm)
 
 
 # ── Edge cases around the auto-refine step ────────────────────────────────────
@@ -217,7 +259,7 @@ def test_second_measurement_unavailable_falls_back_to_first_drive(monkeypatch):
 
     assert result["ok"] is True
     assert result["partial_drive"] is True
-    assert result["driven_distance_mm"] == pytest.approx(_LONG_MM * config.DRIVE_TO_PARTIAL_FRACTION)
+    assert result["driven_distance_mm"] == pytest.approx(_first_leg_mm(_LONG_MM))
     assert "Target not visible for a second measurement" in result["message"]
     assert "call drive_to() again" in result["message"]
     assert len(calls) == 1

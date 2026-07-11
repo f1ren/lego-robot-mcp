@@ -126,9 +126,9 @@ CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 # (contrast CLICK_PRESS_MARGIN_MM above). Dead-reckoning error (wheel slip,
 # drift) compounds with distance, so a single long blind drive risks a bad
 # overshoot. Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths,
-# drive_to() only covers DRIVE_TO_PARTIAL_FRACTION of the measured distance
-# and tells the caller to re-invoke it — each re-invocation re-measures from a
-# shorter, more reliable range.
+# drive_to() only covers DRIVE_TO_PARTIAL_FRACTION of the touch-adjusted
+# distance and tells the caller to re-invoke it — each re-invocation
+# re-measures from a shorter, more reliable range.
 DRIVE_TO_LONG_RANGE_BODY_LENGTHS = float(os.getenv("DRIVE_TO_LONG_RANGE_BODY_LENGTHS", "2.0"))
 DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.85"))
 
@@ -139,12 +139,21 @@ DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION", 
 # robot's *centroid* where the target's centroid currently is — the gripper,
 # mounted well forward of the centroid, would already have driven through the
 # target well before that. DRIVE_TO_TOUCH_OFFSET_MM is subtracted from the
-# measured distance before converting to drive_degrees on the final approach
-# leg (the short-range single drive, and the second/final leg of the
-# long-range auto-refine) so the robot stops with its front at the target
-# instead of centering on it. Not applied to the long-range first leg — that
-# partial drive is already intentionally short (see DRIVE_TO_PARTIAL_FRACTION
-# above) for an unrelated reason (dead-reckoning risk, not touch distance).
+# measured distance (floored at 0) *first*, on every leg — the short-range
+# single drive, and both legs of the long-range auto-refine — so the robot
+# always targets the touch point, never the centroid.
+#
+# On the long-range first leg, DRIVE_TO_PARTIAL_FRACTION is applied to that
+# already touch-adjusted distance (not to the raw measured distance) —
+# first_drive_mm = max(0, distance_mm - DRIVE_TO_TOUCH_OFFSET_MM) *
+# DRIVE_TO_PARTIAL_FRACTION. Applying the fraction before the subtraction
+# instead would let a distance only just over the long-range threshold
+# overshoot into the touch zone on the first leg alone: e.g. at 400mm with
+# the defaults below, 0.85 x 400mm = 340mm driven leaves only a 60mm
+# centroid-gap — already less than the 140mm touch offset — before the
+# second leg's touch-aware logic even runs. Subtracting first means the
+# fraction is always applied to the touch-relevant distance, so the first
+# leg can never land closer than the touch offset on its own.
 #
 # Default 140mm is a visual estimate (not yet independently measured) from a
 # real drive_to() run: output/logs/mcp_server.log 2026-07-11 21:39:04 logged a

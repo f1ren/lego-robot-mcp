@@ -761,22 +761,24 @@ def drive_to(
     That measurement is robot-body-centroid to target-centroid, so driving
     the full distance would put the robot's centroid where the target's
     centroid currently is — the gripper, mounted forward of the centroid,
-    would already have driven through the target well before that. On the
-    final approach leg (the whole drive at short range, or the second leg at
-    long range — see below), drive_to() subtracts
-    config.DRIVE_TO_TOUCH_OFFSET_MM from the measured distance before
-    converting to drive_degrees, so the robot stops with its front at the
-    target instead of centering on it. Unlike click_button()'s press
-    distance, there is still no min/max clamp and no *added* overtravel
+    would already have driven through the target well before that.
+    drive_to() first subtracts config.DRIVE_TO_TOUCH_OFFSET_MM from the
+    measured distance (floored at 0), on every leg — the short-range single
+    drive, and both legs of the long-range auto-refine below — so the robot
+    always targets the touch point, not the centroid. Unlike click_button()'s
+    press distance, there is still no min/max clamp and no *added* overtravel
     margin.
 
     Long-range guard: a single blind drive accumulates dead-reckoning error
     (wheel slip/drift) in proportion to distance, so if the measured distance
     exceeds config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths
     (default 2x ROBOT_BODY_LENGTH_MM), the first drive only covers
-    config.DRIVE_TO_PARTIAL_FRACTION of it (default 85%). drive_to() then
-    re-measures from that closer, more reliable range and automatically fires
-    one final drive to close the rest — capped at 2 physical drives total
+    config.DRIVE_TO_PARTIAL_FRACTION of the touch-adjusted distance (default
+    85%) — the fraction is applied *after* the touch-offset subtraction, so
+    this leg can't itself land inside the touch offset on a distance that's
+    only just over the long-range threshold. drive_to() then re-measures from
+    that closer, more reliable range and automatically fires one final drive
+    to close the rest — capped at 2 physical drives total
     (each independently VQA-verified), so this never turns into an unbounded
     loop; that's what navigate_to() is for. The result carries
     `driven_distance_mm`, and — when a second drive ran — `drives_executed: 2`
@@ -858,13 +860,18 @@ def drive_to(
 
     long_range_threshold_mm = config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
     first_long_range = distance_mm > long_range_threshold_mm
+    touch_adjusted_mm = max(0.0, distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
     if first_long_range:
-        # Intentional partial approach — stops short for dead-reckoning-risk
-        # reasons unrelated to touch distance, so no touch offset here; the
-        # second/final leg below re-measures and applies the touch offset.
-        first_drive_mm = distance_mm * config.DRIVE_TO_PARTIAL_FRACTION
+        # Apply the dead-reckoning safety fraction to the touch-adjusted
+        # distance, not the raw centroid distance — otherwise a distance only
+        # just over the long-range threshold could have 85% of the *raw*
+        # distance itself land inside the touch offset (e.g. 400mm raw: 0.85x
+        # raw = 340mm driven, leaving only a 60mm centroid-gap — less than a
+        # 140mm touch offset — i.e. already overshooting on this leg alone,
+        # before the second leg's touch-aware logic even runs).
+        first_drive_mm = touch_adjusted_mm * config.DRIVE_TO_PARTIAL_FRACTION
     else:
-        first_drive_mm = max(0.0, distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
+        first_drive_mm = touch_adjusted_mm
 
     first_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(first_drive_mm)))
     if first_drive_deg <= 0:
@@ -885,20 +892,22 @@ def drive_to(
     if first_long_range:
         log.info(
             "drive_to: measured distance=%.0fmm exceeds long-range threshold=%.0fmm "
-            "(%.1fx body length) — driving %.0f%% = %.0fmm first, then auto-refining "
-            "with one final measured drive (drive_degrees=%d)",
+            "(%.1fx body length) — driving %.0f%% of the %.0fmm touch-adjusted "
+            "distance = %.0fmm first, then auto-refining with one final measured "
+            "drive (drive_degrees=%d)",
             distance_mm, long_range_threshold_mm, config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS,
-            config.DRIVE_TO_PARTIAL_FRACTION * 100, first_drive_mm, first_drive_deg,
+            config.DRIVE_TO_PARTIAL_FRACTION * 100, touch_adjusted_mm, first_drive_mm, first_drive_deg,
         )
         first_desc = (
             f"drive_to speed={speed} drive_degrees={first_drive_deg} (driving "
-            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured; 1st of up to "
-            "2 drives to avoid overshoot)"
+            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured "
+            f"({touch_adjusted_mm:.0f}mm after touch offset); 1st of up to 2 "
+            "drives to avoid overshoot)"
         )
         first_expected = expected if expected else (
             f"robot drives forward ~{first_drive_deg}° wheel rotation "
             f"(~{first_drive_mm:.0f}mm) — an intentional partial approach, stopping "
-            f"short of the full {distance_mm:.0f}mm measured distance to avoid "
+            f"well short of the full {distance_mm:.0f}mm measured distance to avoid "
             "overshoot; the robot will not yet be at the target"
         )
     else:
