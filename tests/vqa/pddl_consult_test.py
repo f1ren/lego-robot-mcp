@@ -26,7 +26,7 @@ Usage:
       --context "The gripper closed on empty air; the cup was 5cm to the left of center." \\
       --domain pddl/robot_domain.pddl.bak \\
       --plan "(navigate loc-start loc-table)" --plan "(open-gripper)" \\
-      --plan "(lower-arm)" --plan "(pick-up cup loc-table)"
+      --plan "(lower-arm)" --plan "(grasp cup loc-table)"
 
   # Write out the suggested domain and/or problem if the response contains them
   python3 tests/vqa/pddl_consult_test.py \\

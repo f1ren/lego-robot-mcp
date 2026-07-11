@@ -28,7 +28,7 @@ def solve(problem_pddl: str) -> list[str]:
     Uses DOMAIN_FIXED_PATH in place of DOMAIN_PATH when it exists.
 
     Returns a list of grounded action strings, e.g.
-        ["(pick-up cup loc-table)", "(navigate loc-table loc-sink)", ...]
+        ["(grasp cup loc-table)", "(navigate loc-table loc-sink)", ...]
     Returns an empty list when no plan exists.
 
     Raises ImportError if pyperplan is not installed.
