@@ -766,7 +766,7 @@ def drive_to(
     (wheel slip/drift) in proportion to distance, so if the measured distance
     exceeds config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths
     (default 2x ROBOT_BODY_LENGTH_MM), the first drive only covers
-    config.DRIVE_TO_PARTIAL_FRACTION of it (default 90%). drive_to() then
+    config.DRIVE_TO_PARTIAL_FRACTION of it (default 85%). drive_to() then
     re-measures from that closer, more reliable range and automatically fires
     one final drive to close the rest — capped at 2 physical drives total
     (each independently VQA-verified), so this never turns into an unbounded

@@ -130,7 +130,7 @@ CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 # caller to re-invoke it — each re-invocation re-measures from a shorter,
 # more reliable range.
 DRIVE_TO_LONG_RANGE_BODY_LENGTHS = float(os.getenv("DRIVE_TO_LONG_RANGE_BODY_LENGTHS", "2.0"))
-DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.9"))
+DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.85"))
 
 # ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
 # Real-world gap (mm) between the target object's nearest point and the
