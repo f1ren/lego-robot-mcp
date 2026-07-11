@@ -229,6 +229,13 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
     but below the confidence threshold required to act — callers should catch
     this specifically to report the achieved certainty rather than treating it
     like a plain miss.
+
+    Raises vision.VQAResponseParseError (also uncaught) if Gemini responded
+    but its reply couldn't be parsed — callers must catch this specifically
+    too and report it as a VQA failure, not fold it into a "not found"
+    result: unlike a genuine miss, this is not evidence the object is absent.
+    Any other failure (network, quota, config) is swallowed to None, same as
+    a plain miss, since those are not informative about object presence.
     """
     from mcp_robot import vision as _vision
     try:
@@ -244,7 +251,7 @@ def _vlm_detect(bgr: np.ndarray, description: str) -> DetectedObject | None:
             contact_px=centroid,
             outer_bbox=rough_bbox,
         )
-    except _vision.LowConfidenceDetection:
+    except (_vision.LowConfidenceDetection, _vision.VQAResponseParseError):
         raise
     except Exception as exc:
         log.warning("VLM detect fallback failed for '%s': %s", description, exc)
@@ -364,7 +371,7 @@ def _compute_readiness(
         )
         # VLM path: try Gemini Flash if a free-text description was provided
         if target_class_free_text:
-            from mcp_robot.vision import LowConfidenceDetection
+            from mcp_robot.vision import LowConfidenceDetection, VQAResponseParseError
             try:
                 vlm_obj = _vlm_detect(bgr, target_class_free_text)
             except LowConfidenceDetection as exc:
@@ -375,6 +382,18 @@ def _compute_readiness(
                         f"{exc}"
                     ),
                     action="Reposition for a clearer view of the target, then retry.",
+                ), heading, None
+            except VQAResponseParseError as exc:
+                return GraspReadiness(
+                    ready=False,
+                    reason=(
+                        f"No '{target_class_yolo}' detected by YOLO (looking for: {looking_for}). "
+                        f"{exc}"
+                    ),
+                    action=(
+                        "This is a VQA parsing failure, not a confirmed absence — recall "
+                        "this tool to retry, or inspect vision.py:locate_object_vlm if it recurs."
+                    ),
                 ), heading, None
             if vlm_obj is not None:
                 log.info("_compute_readiness: YOLO found nothing for %r; VLM found '%s' at %s (conf=%.2f)",

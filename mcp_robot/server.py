@@ -352,7 +352,11 @@ def _with_change_analysis(
               {"droidcam"}). None (default) means all cameras.
 
     On action error, returns _err(...) and skips vision.
-    On vision failure, the action result is returned without change_description.
+    On vision failure, the action result is returned without change_description
+    but with a `vqa_error` field explaining what went wrong — the caller must
+    not treat a missing change_description as "nothing to report"; it means
+    the action's outcome could not be verified and the tool call may be worth
+    recalling, or the failure worth investigating in code.
 
     Recorded motion segments (mcp_robot.recorder.SegmentRecorder) overlapping
     [t_start, t_end] are tagged with this action's tool name and
@@ -446,10 +450,14 @@ def _with_change_analysis(
 
     description = None
     if not skip_vqa:
-        description = vision.describe_action_video(
-            action_desc, expected, vqa_labeled, None, context=context,
-            raw_labeled_frames=vqa_raw,
-        )
+        try:
+            description = vision.describe_action_video(
+                action_desc, expected, vqa_labeled, None, context=context,
+                raw_labeled_frames=vqa_raw,
+            )
+        except vision.VQAFailure as exc:
+            log.error("[TOOL] %s VQA failed: %s", action_desc, exc)
+            out["vqa_error"] = str(exc)
     if description:
         out["change_description"] = description
 
@@ -983,6 +991,7 @@ def drive_to(
     second_result["first_drive"] = {
         "driven_mm": first_drive_mm,
         "change_description": first_result.get("change_description"),
+        "vqa_error": first_result.get("vqa_error"),
         "left": first_result.get("left"),
         "right": first_result.get("right"),
     }
@@ -2116,21 +2125,29 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
 
         # Locate the object with the VLM→CV hybrid pipeline
         low_confidence: vision.LowConfidenceDetection | None = None
+        parse_error: vision.VQAResponseParseError | None = None
         try:
             vlm_result = vision.locate_object_hybrid(bgr, description)
         except vision.LowConfidenceDetection as exc:
             vlm_result = None
             low_confidence = exc
+        except vision.VQAResponseParseError as exc:
+            vlm_result = None
+            parse_error = exc
 
         if vlm_result is None:
             annotated_bgr = heading.annotate_bgr(bgr)
             ok, buf = cv2.imencode(".jpg", annotated_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
             frame_b64 = base64.b64encode(buf.tobytes()).decode() if ok else frame_result["frame"]
-            text = (
-                str(low_confidence) if low_confidence is not None else
-                f"Object not found: '{description}' was not detected in the external "
-                "camera frame. Check that the object is visible and try again."
-            )
+            if parse_error is not None:
+                text = f"VQA failure while locating '{description}': {parse_error}"
+            elif low_confidence is not None:
+                text = str(low_confidence)
+            else:
+                text = (
+                    f"Object not found: '{description}' was not detected in the external "
+                    "camera frame. Check that the object is visible and try again."
+                )
             return [
                 _image_content(frame_b64),
                 TextContent(type="text", text=text),
