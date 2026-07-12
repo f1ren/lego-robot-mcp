@@ -358,7 +358,7 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     return move_arm(config.ARM_DOWN_DEG, speed)
 
 
-def lift_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
+def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
     """Lift arm fully to the home/retracted position. Named to match the
     PDDL domain's lift-arm action (pddl/robot_domain.pddl)."""
     arm_deg = config.ARM_DOWN_DEG - config.ARM_UP_DEG

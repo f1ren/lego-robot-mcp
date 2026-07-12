@@ -77,8 +77,14 @@ DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
 ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 # Arm-specific floor, decoupled from the shared SPEED_MIN (which stays 15 for
 # wheels/gripper, per the CV-detectability rule above) — DEFAULT_ARM_SPEED is
-# now below that shared floor, so arm moves need their own.
-ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "7"))
+# now below that shared floor, so arm moves need their own. Lowered to match
+# LIFT_ARM_SPEED below.
+ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
+
+# lift_arm's own default, 66% of DEFAULT_ARM_SPEED — lifting was still too
+# fast at the shared arm default, so it gets a slower speed of its own
+# (lower_arm/move_arm are unaffected and keep DEFAULT_ARM_SPEED).
+LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
 
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined

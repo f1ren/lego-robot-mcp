@@ -1313,7 +1313,7 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context
 
 
 @mcp.tool()
-def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
+def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Lift the robot arm fully to the home/retracted position (the same call
@@ -1321,9 +1321,9 @@ def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context:
     before/after images and returns a Gemini-generated `change_description`.
 
     Args:
-        speed:    Motor speed, 7-15 (default 7 — halved from the old default
-                  of 15 to slow the move down for diagnosing the raise-then-
-                  fall bug; max 15 still caps jitter).
+        speed:    Motor speed, 5-15 (default 5 — 66% of DEFAULT_ARM_SPEED,
+                  slowed further so the raise-then-fall is easier to observe;
+                  max 15 still caps jitter).
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
         sub_observation: ~4-word video subtitle: what was just observed or instructed
