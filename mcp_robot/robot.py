@@ -45,26 +45,6 @@ end = m.get_position()
 print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
 """
 
-# release=False stops buildhat's default post-move behaviour of coasting the
-# motor ~0.2s after run_for_degrees finishes (see Motor._run_positional_ramp
-# in the buildhat library). Coasting drops all holding torque, so a gripper
-# closed on an object goes limp almost immediately and the object's weight/
-# vibration can back-drive the gear train open. With release=False the HAT
-# firmware keeps applying corrective torque toward the last commanded
-# position (a genuine stall against the grasped object counts as position
-# error), which is BuildHAT's native mechanism for continuous holding force.
-_MOVE_SINGLE_MOTOR_HOLD = """
-import json
-from buildhat import Motor
-
-m = Motor({port!r})
-m.release = False
-start = m.get_position()
-m.run_for_degrees({degrees}, speed={speed})
-end = m.get_position()
-print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
-"""
-
 _DRIVE_WHEELS = """
 import json
 from buildhat import MotorPair
@@ -82,6 +62,48 @@ from buildhat import MotorPair
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.run_for_seconds({duration}, {left_speed}, {right_speed})
 print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
+"""
+
+# release=False stops buildhat's default post-move behaviour of coasting the
+# motor ~0.2s after run_for_degrees finishes (see Motor._run_positional_ramp
+# in the buildhat library). Coasting drops all holding torque, so a gripper
+# closed on an object goes limp almost immediately and the object's weight/
+# vibration can back-drive the gear train open. Closing the gripper, raising
+# the arm, holding, and releasing all run inside a single RPi script (one
+# SSH round-trip, one process) so the HAT firmware is guaranteed to still be
+# actively applying hold torque for the entire arm-raise + settle window —
+# splitting this across multiple run_python calls would risk a gap between
+# calls where nothing is driving the gripper motor at all.
+_GRASP_HOLD_AND_LIFT = """
+import json
+import time
+from buildhat import Motor
+
+gripper = Motor({gripper_port!r})
+gripper.release = False
+gripper_start = gripper.get_position()
+gripper.run_for_degrees({gripper_degrees}, speed={gripper_speed})
+gripper_closed = gripper.get_position()
+
+arm = Motor({arm_port!r})
+arm_start = arm.get_position()
+arm.run_for_degrees({arm_degrees}, speed={arm_speed})
+arm_end = arm.get_position()
+
+time.sleep({hold_seconds})
+
+gripper.coast()
+gripper_end = gripper.get_position()
+
+print(json.dumps({{
+    "gripper_start": gripper_start,
+    "gripper_closed": gripper_closed,
+    "gripper_end": gripper_end,
+    "gripper_delta": gripper_closed - gripper_start,
+    "arm_start": arm_start,
+    "arm_end": arm_end,
+    "arm_delta": arm_end - arm_start,
+}}))
 """
 
 _STOP_WHEELS = """
@@ -189,16 +211,10 @@ _PORT_TO_NAME = {
 }
 
 
-def move_motor(port: str, degrees: int, speed: int, hold: bool = False) -> dict:
-    """Move a single motor by *degrees* at *speed*. Returns start/end positions.
-
-    hold: if True, the motor keeps applying holding torque toward the target
-    position after the move finishes instead of coasting (see
-    _MOVE_SINGLE_MOTOR_HOLD). Use for grasp-critical closes, not routine moves.
-    """
-    template = _MOVE_SINGLE_MOTOR_HOLD if hold else _MOVE_SINGLE_MOTOR
+def move_motor(port: str, degrees: int, speed: int) -> dict:
+    """Move a single motor by *degrees* at *speed*. Returns start/end positions."""
     result = get_client().run_python(
-        template.format(port=port, degrees=degrees, speed=speed),
+        _MOVE_SINGLE_MOTOR.format(port=port, degrees=degrees, speed=speed),
         timeout=max(30, abs(degrees) // 10 + 5),
     )
     return result
@@ -385,10 +401,40 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
 
 
 def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
-    """Lift arm fully to the home/retracted position. Named to match the
-    PDDL domain's lift-arm action (pddl/robot_domain.pddl)."""
+    """Close the gripper with holding torque, lift the arm fully to the
+    home/retracted position, hold for config.LIFT_ARM_HOLD_SECONDS, then
+    release the gripper's hold torque. Runs as a single RPi script (see
+    _GRASP_HOLD_AND_LIFT) so the gripper stays under active hold for the
+    whole arm-raise + settle window instead of coasting the instant the
+    close finishes. Named to match the PDDL domain's lift-arm action
+    (pddl/robot_domain.pddl), whose precondition already requires
+    (holding ?o) — re-closing here re-affirms the grip immediately before
+    the lift rather than trusting the earlier grasp to have held.
+
+    Gripper close speed is fixed at config.DEFAULT_GRIPPER_SPEED; *speed*
+    only controls the arm.
+    """
+    global _gripper_state
     arm_deg = config.ARM_DOWN_DEG - config.ARM_UP_DEG
-    return move_arm(-arm_deg, speed)
+    gripper_deg = config.GRIPPER_CLOSED_DEG
+    result = get_client().run_python(
+        _GRASP_HOLD_AND_LIFT.format(
+            gripper_port=config.PORT_GRIPPER,
+            gripper_degrees=gripper_deg,
+            gripper_speed=config.DEFAULT_GRIPPER_SPEED,
+            arm_port=config.PORT_ARM,
+            arm_degrees=arm_deg,
+            arm_speed=speed,
+            hold_seconds=config.LIFT_ARM_HOLD_SECONDS,
+        ),
+        timeout=max(30, gripper_deg // 10 + arm_deg // 10 + int(config.LIFT_ARM_HOLD_SECONDS) + 15),
+    )
+    _gripper_state = "close"  # fingers stay at the closed position even though hold torque was released
+    log.info(
+        "lift_arm: closed gripper (delta=%s), held %ss while raising arm (delta=%s), released gripper hold",
+        result.get("gripper_delta"), config.LIFT_ARM_HOLD_SECONDS, result.get("arm_delta"),
+    )
+    return result
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
@@ -425,10 +471,7 @@ def control_gripper(
     # Negative = opening direction, positive = closing direction (matches the
     # existing motor wiring convention used when the absolute approach worked).
     degrees = -config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
-    # hold=True on close: keep torque applied against the grasped object
-    # (see _MOVE_SINGLE_MOTOR_HOLD) instead of coasting, so the cup doesn't
-    # slip once the arm starts moving.
-    result = move_motor(config.PORT_GRIPPER, degrees, speed, hold=(action == "close"))
+    result = move_motor(config.PORT_GRIPPER, degrees, speed)
     if action == "open":
         move_motor(config.PORT_GRIPPER, 17, speed)  # close 17° to release pressure from wheels
     result["action"] = action
@@ -453,8 +496,16 @@ def put(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
 
 
 def prep_for_press(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
-    """Lift arm fully then close gripper — prep for a button/switch press."""
-    arm_result     = lift_arm(speed=config.DEFAULT_ARM_SPEED)
+    """Lift arm fully then close gripper — prep for a button/switch press.
+
+    Raises the arm directly via move_arm rather than lift_arm: lift_arm now
+    closes and holds the gripper *before* raising the arm (for carrying a
+    grasped object), which is the opposite order this action needs (raise
+    bare arm, then close into a fist for pressing) and would also add a
+    pointless config.LIFT_ARM_HOLD_SECONDS wait.
+    """
+    arm_deg        = config.ARM_DOWN_DEG - config.ARM_UP_DEG
+    arm_result     = move_arm(-arm_deg, speed=config.DEFAULT_ARM_SPEED)
     gripper_result = control_gripper("close", speed=speed)
     return {
         "action":  "prep_for_press",

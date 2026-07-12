@@ -86,6 +86,13 @@ ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
 # (lower_arm/move_arm are unaffected and keep DEFAULT_ARM_SPEED).
 LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
 
+# lift_arm closes the gripper (holding torque) before raising the arm, then
+# releases the hold torque after this many seconds — long enough to observe
+# whether a grasped object stays put through the lift and a brief settle
+# before the fingers are allowed to coast. See
+# mcp_robot.robot._GRASP_HOLD_AND_LIFT.
+LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
+
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined
 # effort is 2×NAV_TURN_SPEED. Lower values reduce overshoot and jitter.
