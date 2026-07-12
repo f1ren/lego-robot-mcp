@@ -45,6 +45,26 @@ end = m.get_position()
 print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
 """
 
+# release=False stops buildhat's default post-move behaviour of coasting the
+# motor ~0.2s after run_for_degrees finishes (see Motor._run_positional_ramp
+# in the buildhat library). Coasting drops all holding torque, so a gripper
+# closed on an object goes limp almost immediately and the object's weight/
+# vibration can back-drive the gear train open. With release=False the HAT
+# firmware keeps applying corrective torque toward the last commanded
+# position (a genuine stall against the grasped object counts as position
+# error), which is BuildHAT's native mechanism for continuous holding force.
+_MOVE_SINGLE_MOTOR_HOLD = """
+import json
+from buildhat import Motor
+
+m = Motor({port!r})
+m.release = False
+start = m.get_position()
+m.run_for_degrees({degrees}, speed={speed})
+end = m.get_position()
+print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
+"""
+
 _DRIVE_WHEELS = """
 import json
 from buildhat import MotorPair
@@ -169,10 +189,16 @@ _PORT_TO_NAME = {
 }
 
 
-def move_motor(port: str, degrees: int, speed: int) -> dict:
-    """Move a single motor by *degrees* at *speed*. Returns start/end positions."""
+def move_motor(port: str, degrees: int, speed: int, hold: bool = False) -> dict:
+    """Move a single motor by *degrees* at *speed*. Returns start/end positions.
+
+    hold: if True, the motor keeps applying holding torque toward the target
+    position after the move finishes instead of coasting (see
+    _MOVE_SINGLE_MOTOR_HOLD). Use for grasp-critical closes, not routine moves.
+    """
+    template = _MOVE_SINGLE_MOTOR_HOLD if hold else _MOVE_SINGLE_MOTOR
     result = get_client().run_python(
-        _MOVE_SINGLE_MOTOR.format(port=port, degrees=degrees, speed=speed),
+        template.format(port=port, degrees=degrees, speed=speed),
         timeout=max(30, abs(degrees) // 10 + 5),
     )
     return result
@@ -399,7 +425,10 @@ def control_gripper(
     # Negative = opening direction, positive = closing direction (matches the
     # existing motor wiring convention used when the absolute approach worked).
     degrees = -config.GRIPPER_OPEN_DEG if action == "open" else config.GRIPPER_CLOSED_DEG
-    result = move_motor(config.PORT_GRIPPER, degrees, speed)
+    # hold=True on close: keep torque applied against the grasped object
+    # (see _MOVE_SINGLE_MOTOR_HOLD) instead of coasting, so the cup doesn't
+    # slip once the arm starts moving.
+    result = move_motor(config.PORT_GRIPPER, degrees, speed, hold=(action == "close"))
     if action == "open":
         move_motor(config.PORT_GRIPPER, 17, speed)  # close 17° to release pressure from wheels
     result["action"] = action
