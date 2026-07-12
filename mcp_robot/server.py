@@ -17,7 +17,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
-  lift_arm               Lift arm fully to home/retracted position
+  lift_arm               Close gripper (hold torque), lift arm to home/retracted position, hold, release gripper
   control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
@@ -1316,14 +1316,20 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context
 def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
-    Lift the robot arm fully to the home/retracted position (the same call
-    click_button's prep_for_press and put() use internally). Captures
-    before/after images and returns a Gemini-generated `change_description`.
+    Grasp-safe arm lift: closes the gripper with holding torque, raises the
+    arm fully to the home/retracted position, holds briefly, then releases
+    the gripper's hold torque. All four steps run inside a single script on
+    the RPi (see mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque
+    stays actively applied by the BuildHAT firmware for the whole raise +
+    settle window — this is what stops a grasped object (e.g. a cup) from
+    slipping out while the arm moves. Captures before/after images and
+    returns a Gemini-generated `change_description`.
 
     Args:
-        speed:    Motor speed, 5-15 (default 5 — 66% of DEFAULT_ARM_SPEED,
+        speed:    Arm motor speed, 5-15 (default 5 — 66% of DEFAULT_ARM_SPEED,
                   slowed further so the raise-then-fall is easier to observe;
-                  max 15 still caps jitter).
+                  max 15 still caps jitter). Gripper close speed is fixed at
+                  config.DEFAULT_GRIPPER_SPEED, not controlled by this arg.
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
         sub_observation: ~4-word video subtitle: what was just observed or instructed
@@ -1335,11 +1341,14 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
     if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
         return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     expected_str = expected if expected else (
-        f"arm raises fully to home position (~{config.ARM_UP_DEG}°, i.e. ~"
-        f"{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° up from fully lowered)"
+        "gripper jaws close fully (grasps anything between them), arm raises fully to "
+        f"home position (~{config.ARM_UP_DEG}°, i.e. ~{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° "
+        "up from fully lowered) while the gripper holds, then the gripper releases its hold "
+        "torque — fingers remain at the closed position, they do not reopen"
     )
     return _with_change_analysis(
-        f"lift arm fully to home position at speed {speed}",
+        f"close gripper with hold, lift arm fully to home position at speed {speed}, "
+        "hold, then release gripper hold",
         expected_str,
         lambda: robot_mod.lift_arm(speed),
         context=context,
