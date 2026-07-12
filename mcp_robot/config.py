@@ -156,22 +156,23 @@ DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION", 
 # instead would let a distance only just over the long-range threshold
 # overshoot into the touch zone on the first leg alone: e.g. at 400mm with
 # the defaults below, 0.85 x 400mm = 340mm driven leaves only a 60mm
-# centroid-gap — already less than the 140mm touch offset — before the
+# centroid-gap — already less than the 130mm touch offset — before the
 # second leg's touch-aware logic even runs. Subtracting first means the
 # fraction is always applied to the touch-relevant distance, so the first
 # leg can never land closer than the touch offset on its own.
 #
-# Default 140mm is a visual estimate (not yet independently measured) from a
-# real drive_to() run: output/logs/mcp_server.log 2026-07-11 21:39:04 logged a
+# Was 140mm — a visual estimate (not independently measured) from a real
+# drive_to() run: output/logs/mcp_server.log 2026-07-11 21:39:04 logged a
 # "second (final) drive" commanded for the full re-measured 143mm although the
 # robot, per output/snapshots/droidcam_20260711_213904_969.jpg from that same
 # instant, looked already close to touching the target — implying the true
 # touching gap is close to that 143mm measured distance, not 0. Roughly
 # consistent with ROBOT_BODY_LENGTH_MM/2 (76mm, centroid to body-hull front
 # edge) plus the gripper's reach beyond the body hull and the target's own
-# radius. Refine this constant with more measurements if drive_to()
-# consistently stops short of or drives into targets.
-DRIVE_TO_TOUCH_OFFSET_MM = float(os.getenv("DRIVE_TO_TOUCH_OFFSET_MM", "140.0"))
+# radius. Shortened by 1cm to 130mm on 2026-07-12. Refine this constant with
+# more measurements if drive_to() consistently stops short of or drives into
+# targets.
+DRIVE_TO_TOUCH_OFFSET_MM = float(os.getenv("DRIVE_TO_TOUCH_OFFSET_MM", "130.0"))
 
 # ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
 # Real-world gap (mm) between the target object's nearest point and the
