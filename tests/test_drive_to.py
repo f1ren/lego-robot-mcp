@@ -195,7 +195,7 @@ def test_long_range_first_leg_never_overshoots_touch_offset(monkeypatch):
     """Regression test for a distance just over the long-range threshold: the
     85% fraction must apply to the touch-adjusted distance, not the raw one.
     Applied to the raw distance, 400mm would drive 340mm (0.85 x 400) and
-    leave only a 60mm centroid-gap — already less than the 140mm touch
+    leave only a 60mm centroid-gap — already less than the 130mm touch
     offset, i.e. leg 1 alone would overshoot into the touch zone before leg
     2's touch-aware logic ever runs."""
     raw_mm = 400.0

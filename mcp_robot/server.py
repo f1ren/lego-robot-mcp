@@ -867,7 +867,7 @@ def drive_to(
         # just over the long-range threshold could have 85% of the *raw*
         # distance itself land inside the touch offset (e.g. 400mm raw: 0.85x
         # raw = 340mm driven, leaving only a 60mm centroid-gap — less than a
-        # 140mm touch offset — i.e. already overshooting on this leg alone,
+        # 130mm touch offset — i.e. already overshooting on this leg alone,
         # before the second leg's touch-aware logic even runs).
         first_drive_mm = touch_adjusted_mm * config.DRIVE_TO_PARTIAL_FRACTION
     else:
