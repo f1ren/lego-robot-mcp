@@ -56,6 +56,28 @@ splitting an action that the other camera recorded as a single clip (see
 2026-07-08 investigation). A single shared clock removes that race: both
 streams open and close together, within about one frame interval, so VQA
 always has a matched pair of clips.
+
+Brightness-step recalibration
+──────────────────────────────
+The noise-floor calibration above runs once, so it freezes in whatever
+ambient lighting was present at stream start. If the lighting changes
+mid-session (e.g. a light switch is pressed), the calibrated threshold no
+longer reflects the camera's actual noise floor — see the 2026-07-12
+investigation, where post-switch flicker sat just under a threshold
+calibrated in the dimmer pre-light state and kept a segment open for 47.9s
+instead of the sub-second norm, because the shared cooldown clock (above)
+never got a quiet gap to close on.
+
+Each frame's whole-frame mean brightness is compared against the baseline
+measured at calibration time. Brightness is a much lower-noise signal than
+frame-to-frame diff for this purpose: flicker shows up as periodic diff
+spikes but barely moves the mean (measured <1 unit of drift across 48s of
+it), while an actual lighting change moves the mean sharply and holds. When
+the delta stays past SEGMENT_RECALIB_BRIGHTNESS_STEP, in one direction, for
+SEGMENT_RECALIB_SUSTAIN_S seconds — long enough to rule out a transient like
+the arm/gripper sweeping through frame — that camera's calibration is reset
+and re-runs exactly like it did at stream start, and whatever segment was
+open is force-closed so it doesn't straddle the old and new noise floors.
 """
 from __future__ import annotations
 
@@ -106,10 +128,15 @@ class _CameraState:
     # Per-camera noise calibration
     calib_diffs: list = field(default_factory=list)
     calib_pixel_counts: list = field(default_factory=list)
+    calib_brightness_samples: list = field(default_factory=list)
     calib_done: bool = False
     calib_warmup_start_ts: "float | None" = None
     motion_threshold: float = _CAPTURE_MOTION_THRESHOLD
     motion_pixel_count: int = _MOTION_PIXEL_COUNT
+    # Sustained-brightness-step recalibration (see _check_brightness_step)
+    calib_brightness: float = 0.0
+    brightness_step_start_ts: "float | None" = None
+    brightness_step_sign: int = 0
 
 
 @dataclass
@@ -169,6 +196,8 @@ class SegmentRecorder:
         calib_sigma_by_camera: dict | None = None,
         calib_sigma_pixel_count: float = config.SEGMENT_CALIB_SIGMA_PIXEL_COUNT,
         calib_warmup_s: float = config.SEGMENT_CALIB_WARMUP_S,
+        recalib_brightness_step: float = config.SEGMENT_RECALIB_BRIGHTNESS_STEP,
+        recalib_sustain_s: float = config.SEGMENT_RECALIB_SUSTAIN_S,
     ) -> None:
         self.segment_dir = segment_dir
         self.manifest_path = manifest_path
@@ -185,6 +214,8 @@ class SegmentRecorder:
         self.calib_sigma_by_camera = calib_sigma_by_camera or {"pi_camera": config.SEGMENT_CALIB_SIGMA_PI}
         self.calib_sigma_pixel_count = calib_sigma_pixel_count
         self.calib_warmup_s = calib_warmup_s
+        self.recalib_brightness_step = recalib_brightness_step
+        self.recalib_sustain_s = recalib_sustain_s
         self._cameras: dict[str, _CameraState] = {}
         # Shared cross-camera clock (see module docstring): any camera's own
         # motion sets this, and every camera's open/close decision reads it —
@@ -205,6 +236,7 @@ class SegmentRecorder:
         diff = np.abs(gray.astype(np.float32) - state.prev_gray.astype(np.float32))
         state.calib_diffs.append(float(diff.mean()))
         state.calib_pixel_counts.append(int(np.sum(diff > _MOTION_PIXEL_THRESH)))
+        state.calib_brightness_samples.append(float(gray.mean()))
 
         if len(state.calib_diffs) < self.calib_frames:
             return
@@ -222,16 +254,68 @@ class SegmentRecorder:
         # multiplier than mean_diff to get equivalent real-world margin.
         state.motion_threshold  = max(mean_d + sigma * std_d,  _CAPTURE_MOTION_THRESHOLD)
         state.motion_pixel_count = max(int(mean_p + sigma_px * std_p), _MOTION_PIXEL_COUNT)
+        # Baseline for _check_brightness_step — see module docstring
+        # ("Brightness-step recalibration").
+        state.calib_brightness = float(np.mean(state.calib_brightness_samples))
         state.calib_done = True
         state.calib_diffs.clear()
         state.calib_pixel_counts.clear()
+        state.calib_brightness_samples.clear()
 
         log.info(
             "recorder: %s calibrated (σ_diff=%.1f, σ_px=%.1f) — noise mean_diff=%.3f σ=%.3f → threshold=%.2f; "
-            "mean_px=%.0f σ=%.0f → pixel_count=%d",
+            "mean_px=%.0f σ=%.0f → pixel_count=%d; brightness baseline=%.1f",
             camera, sigma, sigma_px, mean_d, std_d, state.motion_threshold,
-            mean_p, std_p, state.motion_pixel_count,
+            mean_p, std_p, state.motion_pixel_count, state.calib_brightness,
         )
+
+    def _check_brightness_step(
+        self, camera: str, state: _CameraState, gray: np.ndarray, ts: float
+    ) -> "_Segment | None":
+        """Detect a sustained whole-frame brightness shift away from this
+        camera's calibrated baseline and reset calibration so the noise floor
+        re-measures against the new ambient level — see module docstring
+        ("Brightness-step recalibration"). Only called once calib_done is
+        already True (see on_frame), so state.calib_brightness is valid.
+
+        Returns the segment force-closed to make way for recalibration, if
+        any, so the caller can remux it outside the lock like every other
+        close path in on_frame().
+        """
+        brightness = float(gray.mean())
+        delta = brightness - state.calib_brightness
+
+        if abs(delta) <= self.recalib_brightness_step:
+            state.brightness_step_start_ts = None
+            state.brightness_step_sign = 0
+            return None
+
+        sign = 1 if delta > 0 else -1
+        if state.brightness_step_start_ts is None or state.brightness_step_sign != sign:
+            state.brightness_step_start_ts = ts
+            state.brightness_step_sign = sign
+            return None
+
+        if ts - state.brightness_step_start_ts < self.recalib_sustain_s:
+            return None
+
+        log.info(
+            "recorder: %s sustained brightness step (Δ=%+.1f over %.1fs, baseline=%.1f) — "
+            "recalibrating noise floor",
+            camera, delta, ts - state.brightness_step_start_ts, state.calib_brightness,
+        )
+        closing = state.open_segment
+        if closing is not None:
+            self._close_segment(camera, state)
+
+        state.calib_done = False
+        state.calib_diffs.clear()
+        state.calib_pixel_counts.clear()
+        state.calib_brightness_samples.clear()
+        state.calib_warmup_start_ts = None
+        state.brightness_step_start_ts = None
+        state.brightness_step_sign = 0
+        return closing
 
     # ── frame ingestion ─────────────────────────────────────────────────────
 
@@ -321,6 +405,15 @@ class SegmentRecorder:
                 if not motion:
                     self._close_segment(camera, state)
                     closed_seg = seg
+
+            # ── brightness-step recalibration ───────────────────────────────
+            # Only meaningful once there's a calibrated baseline to compare
+            # against; the calibration-phase branch above already returned
+            # early for this frame otherwise.
+            if self.calib_enabled:
+                recal_closed = self._check_brightness_step(camera, state, gray, ts)
+                if recal_closed is not None:
+                    closed_seg = recal_closed
 
             state.prev_gray = gray
 

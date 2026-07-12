@@ -293,6 +293,24 @@ SEGMENT_CALIB_SIGMA_PIXEL_COUNT = float(os.getenv("SEGMENT_CALIB_SIGMA_PIXEL_COU
 # so calibration measures steady-state noise instead. Raise this further if
 # false-positive segments keep appearing shortly after "calibrated" log lines.
 SEGMENT_CALIB_WARMUP_S = float(os.getenv("SEGMENT_CALIB_WARMUP_S", "3.0"))
+# Calibration above only ever runs once, early in the stream's life, so it
+# freezes in whatever ambient lighting was present at that moment. If the
+# room's lighting changes mid-session the calibrated threshold no longer
+# reflects the camera's real noise floor — see the 2026-07-12 investigation,
+# where pressing a wall light switch left a segment open for 47.9s (vs. a
+# sub-second norm) because post-switch flicker (mean_diff ~1.9-2.3, periodic
+# every ~11 frames — rolling-shutter banding beating against the frame rate)
+# sat just under a threshold calibrated in the dimmer pre-light state.
+# Whole-frame mean brightness is the detection signal: it moved <1 unit
+# across that same 48s of flicker, but jumped ~20 units and held the instant
+# the light switched — a much cleaner "the ambient level changed" signal
+# than frame-to-frame diff, which flicker also perturbs.
+SEGMENT_RECALIB_BRIGHTNESS_STEP = float(os.getenv("SEGMENT_RECALIB_BRIGHTNESS_STEP", "15.0"))
+# How long the brightness delta must hold past SEGMENT_RECALIB_BRIGHTNESS_STEP,
+# in one direction, before it's treated as a real ambient change rather than a
+# transient (e.g. the arm/gripper briefly sweeping through frame) — transients
+# shouldn't pay the ~4-6s recording gap a recalibration costs.
+SEGMENT_RECALIB_SUSTAIN_S = float(os.getenv("SEGMENT_RECALIB_SUSTAIN_S", "2.0"))
 # Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and the
 # resulting shared-clock update — mean_diff/pixel counts vs. thresholds, and
 # which camera drove the update. Root logger stays at INFO (server.py), so
