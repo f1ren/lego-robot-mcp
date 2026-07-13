@@ -86,6 +86,7 @@ gripper.run_for_degrees({gripper_degrees}, speed={gripper_speed})
 gripper_closed = gripper.get_position()
 
 arm = Motor({arm_port!r})
+arm.release = False
 arm_start = arm.get_position()
 arm.run_for_degrees({arm_degrees}, speed={arm_speed})
 arm_end = arm.get_position()
@@ -93,6 +94,7 @@ arm_end = arm.get_position()
 time.sleep({hold_seconds})
 
 gripper.coast()
+arm.coast()
 gripper_end = gripper.get_position()
 
 print(json.dumps({{
