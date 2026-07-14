@@ -1,5 +1,5 @@
 mcp[cli]>=1.0
-pyperplan>=0.3
+neurosymbolic-counselor @ git+ssh://git@github.com/f1ren/NAPC.git
 paramiko>=3.4
 google-genai>=1.0
 ollama>=0.3
