@@ -543,18 +543,38 @@ def _stream_live_ssh(fps: float, on_frame, stop_event: threading.Event | None) -
 
 
 def _droidcam_failure_reason() -> str:
+    """Best-effort diagnosis for why cv2.VideoCapture(config.DROIDCAM_URL) failed.
+
+    Queries mjpeg_bridge's /health endpoint instead of probing
+    config.DROIDCAM_URL directly — cap.isOpened()==False alone can't tell
+    apart "the bridge process isn't running" from "it's running but the
+    phone hasn't opened the capture page yet".
+    """
+    import json
+    import urllib.error
     import urllib.request
+
+    health_url = f"http://127.0.0.1:{config.MJPEG_BRIDGE_HTTP_PORT}/health"
     try:
-        with urllib.request.urlopen(config.DROIDCAM_URL, timeout=3) as resp:
-            if "text/html" in resp.headers.get("Content-Type", ""):
-                if "busy" in resp.read().decode(errors="replace").lower():
-                    return (
-                        f"DroidCam is busy (another client is connected). "
-                        f"Close the other viewer and retry. URL: {config.DROIDCAM_URL}"
-                    )
+        with urllib.request.urlopen(health_url, timeout=3) as resp:
+            info = json.loads(resp.read())
     except Exception as exc:
-        return f"Cannot reach DroidCam at {config.DROIDCAM_URL}: {exc}"
-    return f"Cannot open DroidCam stream at {config.DROIDCAM_URL}"
+        return (f"Cannot reach mjpeg_bridge's /health at {health_url} ({exc}). "
+                 f"Is it running? (.venv/bin/python3 -m mcp_robot.mjpeg_bridge)  "
+                 f"Raw capture URL: {config.DROIDCAM_URL}")
+
+    if not info.get("phone_connected", False):
+        return (f"mjpeg_bridge has no phone connected — open the capture page at "
+                 f"https://<this-host>:{config.MJPEG_BRIDGE_WSS_PORT}/ in Safari and tap "
+                 f"'Start publishing'. (DROIDCAM_URL={config.DROIDCAM_URL})")
+    age = info.get("last_frame_age_s")
+    if age is None or age > 5.0:
+        return (f"mjpeg_bridge has a connected phone but no recent frames "
+                 f"(last_frame_age_s={age}) — publishing may have stalled; check the "
+                 f"capture page is still in the foreground. (DROIDCAM_URL={config.DROIDCAM_URL})")
+    return (f"mjpeg_bridge reports a connected phone with recent frames "
+             f"(last_frame_age_s={age:.1f}), but cv2.VideoCapture still failed to open "
+             f"{config.DROIDCAM_URL} — check the mjpeg_bridge process's own logs.")
 
 
 def stream_droidcam(

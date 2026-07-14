@@ -223,14 +223,47 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.190:4747/video")
-DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
+# 2026-07: the physical DroidCam app was replaced by a self-hosted mediamtx
+# WHIP/RTSP bridge, then that was replaced again by mjpeg_bridge.py (below) —
+# mediamtx's WebRTC ingest turned out to inherit real WiFi packet loss as
+# corrupted H264 frames (a lost RTP packet corrupts a whole NAL via FU-A
+# fragmentation; mediamtx's own inboundFramesInError counter sat at ~37% over
+# a 16-minute session). DroidCam never had this problem because HTTP MJPEG is
+# TCP (transparent retransmission) with every frame an independent JPEG.
+# mjpeg_bridge.py restores exactly that: a capture page grabs getUserMedia
+# frames via <canvas>, JPEG-encodes them client-side, and pushes each one
+# over a WebSocket (TCP) to this process, which re-serves them as a standard
+# multipart/x-mixed-replace MJPEG stream — the same wire format DroidCam
+# used. Every cv2.VideoCapture(DROIDCAM_URL) call site is unchanged — only
+# the URL changed. The "droidcam" name is kept throughout this codebase as a
+# legacy internal label; not a rename in scope.
+DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://127.0.0.1:8080/video")
+# 0, not the old DroidCam-app value of 90: mobile browsers deliver getUserMedia
+# frames already orientation-corrected for how the phone is physically held,
+# unlike DroidCam's app which needed a manual 90 deg fix. Empirically confirmed
+# against a real captured frame (heading.annotate_bgr's arrow landed correctly
+# with rotation=0, no code change) — reconfirm if the phone's physical mount
+# angle changes.
+DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "0"))  # CW degrees: 0, 90, 180, 270
 # Target capture rate for DroidCam during action execution and video compilation.
 # Set to DroidCam's native ceiling (~30 fps) — the per-action VQA cost is unaffected
 # by this value (vision._subsample_frames always caps to 3 frames/camera before the
 # Gemini call regardless of how many were captured), so there's no downside to maxing
 # it out; this only affects recorded-segment/merged-video smoothness.
 DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "30.0"))
+
+# ── mjpeg_bridge (self-hosted DroidCam replacement) ──────────────────────────
+# See mcp_robot/mjpeg_bridge.py's module docstring for the full design. Two
+# listeners: HTTPS+WSS serves the phone-facing capture page and frame
+# ingest; plain HTTP re-serves the latest frame as MJPEG at DROIDCAM_URL
+# above, plus a /health endpoint camera._droidcam_failure_reason() queries.
+MJPEG_BRIDGE_WSS_PORT  = int(os.getenv("MJPEG_BRIDGE_WSS_PORT", "8443"))
+MJPEG_BRIDGE_HTTP_PORT = int(os.getenv("MJPEG_BRIDGE_HTTP_PORT", "8080"))
+# Reuses the cert already trusted on the phone from the mediamtx setup (same
+# CA — see mediamtx/certs/ in the main checkout, outside this repo) so no new
+# trust-profile step is needed on the phone.
+MJPEG_BRIDGE_TLS_CERT  = os.getenv("MJPEG_BRIDGE_TLS_CERT", "/home/navatm/Projects/lego-robot-mcp/mediamtx/certs/server.crt")
+MJPEG_BRIDGE_TLS_KEY   = os.getenv("MJPEG_BRIDGE_TLS_KEY", "/home/navatm/Projects/lego-robot-mcp/mediamtx/certs/server.key")
 
 # ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
 # stream_live() starts a picamera2 MJPEG server on the RPi and reads it via
