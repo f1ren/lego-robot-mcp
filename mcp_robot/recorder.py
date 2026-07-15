@@ -176,7 +176,17 @@ def _decode_frame(frame_b64: str) -> "np.ndarray | None":
 # Skip the remux when the measured rate is already this close to the declared
 # rate — avoids a pointless ffmpeg call for segments recorded near their
 # intended fps (e.g. the throttled per-action capture path).
-_FPS_REMUX_TOLERANCE = 0.05
+#
+# Was 0.05 (5%) until the 2026-07-14 investigation: a droidcam segment
+# measured at 30.25fps vs. declared 30fps (0.83% off) was skipped, leaving a
+# ~0.13s timing error baked into an 11.67s clip. When video_compiler.py later
+# concatenated it with a follow-on segment and hard-trimmed the scene to the
+# real wall-clock duration, that error surfaced as a brief freeze in the
+# external-camera tile at the splice while the Pi camera tile (recorded as
+# one continuous segment for the same action) kept playing smoothly. 0.83%
+# would have survived even a 1% tolerance, so this is set below that with
+# margin, not just "tighter."
+_FPS_REMUX_TOLERANCE = 0.005
 
 
 class SegmentRecorder:
