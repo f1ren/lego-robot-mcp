@@ -439,6 +439,14 @@ def stream_live(
         _stream_live_ssh(fps, on_frame, stop_event)
 
 
+# Kills any process still holding the camera's V4L2/media-controller device
+# nodes. Globs video*/media* rather than hardcoding node numbers because
+# libcamera assigns them per-pipeline — this camera's ISP output lands on
+# /dev/media2, not /dev/media0/1, so a fixed list can miss the device an
+# orphaned process is still holding.
+_CAMERA_DEVICE_KILL_CMD = "fuser -k -TERM /dev/video* /dev/media* 2>/dev/null; sleep 0.4"
+
+
 def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
     """Fast path: picamera2 MJPEG HTTP server read by OpenCV."""
     import cv2
@@ -464,9 +472,7 @@ def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
             allow_agent=True,
         )
         ssh.get_transport().sock.settimeout(None)
-        _, _so, _ = ssh.exec_command(
-            "fuser -k -TERM /dev/video0 /dev/video1 /dev/media0 2>/dev/null; sleep 0.4"
-        )
+        _, _so, _ = ssh.exec_command(_CAMERA_DEVICE_KILL_CMD)
         _so.channel.recv_exit_status()
         stdin, stdout, stderr = ssh.exec_command("python3 -", timeout=None)
         stdin.write(script.encode())
@@ -479,6 +485,11 @@ def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
                     break
                 server_stop.wait(timeout=0.5)
         finally:
+            # Closing our end of the channel does not signal the remote
+            # process (no pty => no SIGHUP) — it would otherwise leak and
+            # hold the camera for the next attempt, so kill it explicitly.
+            _, _so, _ = ssh.exec_command(_CAMERA_DEVICE_KILL_CMD)
+            _so.channel.recv_exit_status()
             stdin.channel.close()
             ssh.close()
 
