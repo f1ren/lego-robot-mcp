@@ -44,7 +44,7 @@ def _send_blueprint() -> None:
         rrb.Horizontal(
             rrb.Vertical(
                 rrb.Spatial2DView(name="Pi Camera", origin="camera/rpi"),
-                rrb.Spatial2DView(name="DroidCam", origin="camera/droidcam"),
+                rrb.Spatial2DView(name="SimpleIPCamera", origin="camera/simpleipcamera"),
             ),
             rrb.Vertical(
                 rrb.Spatial2DView(name="Annotated A", origin="action/image_a"),
@@ -123,11 +123,11 @@ def log_clip(clip_dict: dict) -> None:
         _log_camera(frame_b64, now - (count - 1 - i) * 0.5)
 
 
-def log_droidcam_frame(frame_b64: str, timestamp: float) -> None:
-    """Log a DroidCam frame."""
+def log_simpleipcamera_frame(frame_b64: str, timestamp: float) -> None:
+    """Log a SimpleIPCamera frame."""
     if not _ensure_init():
         return
-    _log_camera(frame_b64, timestamp, entity="camera/droidcam")
+    _log_camera(frame_b64, timestamp, entity="camera/simpleipcamera")
 
 
 

@@ -2,7 +2,7 @@
 Ground-truth unit tests for heading.compute_heading_to_object_angle.
 
 This is the pure-geometry function behind the "Heading analysis: ... object
-at X.Y deg CW/CCW from forward" log line emitted by capture_droidcam_still
+at X.Y deg CW/CCW from forward" log line emitted by capture_simpleipcamera_still
 (mcp_robot/camera.py) — the number `click_button` and friends use to decide
 how far to turn. It has no camera/YOLO dependency, so it's pinned here with
 synthetic Heading + object-center inputs instead of image fixtures, which

@@ -27,9 +27,9 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   Camera
   ──────
   get_front_camera_image      Capture one still from Pi Camera (front/robot-eye view)
-  get_external_camera_image   Capture one still from DroidCam (third-person view)
+  get_external_camera_image   Capture one still from SimpleIPCamera (third-person view)
   capture_front_video_clip    Capture N-second clip from Pi Camera
-  capture_external_video_clip Capture N-second clip from DroidCam
+  capture_external_video_clip Capture N-second clip from SimpleIPCamera
 
   Vision / localization
   ─────────────────────
@@ -93,7 +93,7 @@ _last_problem_pddl: str | None = None
 
 # ── initialization tracker ────────────────────────────────────────────────────
 
-_INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
+_INIT_COMPONENTS = ["motors", "picamera", "simpleipcamera"]
 _init_status: dict[str, str] = {c: "pending" for c in _INIT_COMPONENTS}
 _init_lock = threading.Lock()
 
@@ -174,7 +174,7 @@ def _resolve_target(target_class_yolo: str, target_class_free_text: str) -> tupl
 
 
 def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tuple[float | None, float | None]:
-    """Capture a fresh droidcam still and measure *target*'s angle off the
+    """Capture a fresh simpleipcamera still and measure *target*'s angle off the
     robot's forward heading and straight-line distance, converted to mm.
 
     Updates the _last_target_* globals as a side effect (same fields
@@ -187,7 +187,7 @@ def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tupl
     """
     global _last_target_distance_px, _last_target_robot_radius_px
     global _last_target_yolo, _last_target_free_text
-    frame_result = cam_mod.capture_droidcam_still(
+    frame_result = cam_mod.capture_simpleipcamera_still(
         target_class_yolo=target_class_yolo,
         target_class_free_text=target_class_free_text,
     )
@@ -260,23 +260,23 @@ def _thumbnail_image_content(frame_b64: str) -> ImageContent:
 
 
 
-def _capture_droidcam_background(stop_event: threading.Event) -> None:
-    """Background thread: poll DroidCam and feed frames into _droidcam_cache.
+def _capture_simpleipcamera_background(stop_event: threading.Event) -> None:
+    """Background thread: poll SimpleIPCamera and feed frames into _simpleipcamera_cache.
 
     Frames are stored raw (no heading arrow) so the VLM sees clean before/after
     comparisons without the arrow creating spurious motion detections. Feeding
-    _droidcam_cache also lets the SegmentRecorder observe these frames.
-    cap.read() blocks until the next frame arrives from DroidCam's MJPEG stream,
-    naturally capping at DroidCam's native rate; we add a sleep only when our
+    _simpleipcamera_cache also lets the SegmentRecorder observe these frames.
+    cap.read() blocks until the next frame arrives from SimpleIPCamera's MJPEG stream,
+    naturally capping at SimpleIPCamera's native rate; we add a sleep only when our
     target fps is lower than what the camera delivers.
     """
     try:
         import cv2
-        cap = cv2.VideoCapture(config.DROIDCAM_URL)
+        cap = cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
         if not cap.isOpened():
-            log.debug("Background DroidCam capture: could not open stream")
+            log.debug("Background SimpleIPCamera capture: could not open stream")
             return
-        target_fps = config.DROIDCAM_CAPTURE_FPS
+        target_fps = config.SIMPLEIPCAMERA_CAPTURE_FPS
         interval = 1.0 / target_fps
         try:
             while not stop_event.is_set():
@@ -285,14 +285,14 @@ def _capture_droidcam_background(stop_event: threading.Event) -> None:
                 if ok:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                     b64 = base64.b64encode(buf.tobytes()).decode()
-                    cam_mod._droidcam_cache.put(b64, time.time())
+                    cam_mod._simpleipcamera_cache.put(b64, time.time())
                 slack = interval - (time.time() - t0)
                 if slack > 0:
                     time.sleep(slack)
         finally:
             cap.release()
     except Exception as exc:
-        log.debug("Background DroidCam capture failed: %s", exc)
+        log.debug("Background SimpleIPCamera capture failed: %s", exc)
 
 
 def _apply_optical_flow_per_camera(
@@ -339,17 +339,17 @@ def _with_change_analysis(
 
     Strategy:
     - Pi camera: slice frames from the streaming cache (populated by stream_live).
-    - DroidCam: if streaming cache is active use it; otherwise spin up a
+    - SimpleIPCamera: if streaming cache is active use it; otherwise spin up a
       background cv2 capture thread for the duration of the action.
     - Fallback: if neither camera yields frames, capture before/after stills.
 
-    annotate: whether to overlay the heading arrow on DroidCam frames sent to
+    annotate: whether to overlay the heading arrow on SimpleIPCamera frames sent to
               the VQA model. Pass False for arm/gripper actions so the arrow
               does not cover the arm or gripper and confuse the model about
               their state. Pass True (default) for drive/turn actions where
               heading information is needed for evaluation.
     vqa_cameras: set of camera labels to include in the VQA call (e.g.
-              {"droidcam"}). None (default) means all cameras.
+              {"simpleipcamera"}). None (default) means all cameras.
 
     On action error, returns _err(...) and skips vision.
     On vision failure, the action result is returned without change_description.
@@ -360,13 +360,13 @@ def _with_change_analysis(
     """
     t_start = time.time()
 
-    # Start background DroidCam capture only when its cache is empty (no existing stream)
+    # Start background SimpleIPCamera capture only when its cache is empty (no existing stream)
     stop_event: threading.Event | None = None
     bg_thread: threading.Thread | None = None
-    if cam_mod._droidcam_cache.latest() is None:
+    if cam_mod._simpleipcamera_cache.latest() is None:
         stop_event = threading.Event()
         bg_thread = threading.Thread(
-            target=_capture_droidcam_background,
+            target=_capture_simpleipcamera_background,
             args=(stop_event,),
             daemon=True,
         )
@@ -399,11 +399,11 @@ def _with_change_analysis(
     def _maybe_annotate(b64: str) -> str:
         return heading.annotate_jpeg_b64(b64) if annotate else b64
 
-    droid_clip = cam_mod._droidcam_cache.clip_since(t_start, config.DROIDCAM_CAPTURE_FPS)
-    if droid_clip:
-        for f in droid_clip:
-            raw_video.append((f["ts"], "droidcam", f["frame"]))
-            annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
+    simpleipcam_clip = cam_mod._simpleipcamera_cache.clip_since(t_start, config.SIMPLEIPCAMERA_CAPTURE_FPS)
+    if simpleipcam_clip:
+        for f in simpleipcam_clip:
+            raw_video.append((f["ts"], "simpleipcamera", f["frame"]))
+            annotated_video.append((f["ts"], "simpleipcamera", _maybe_annotate(f["frame"])))
 
     pi_clip = cam_mod._pi_cache.clip_since(t_start, config.PICAMERA_CAPTURE_FPS)
     if pi_clip:
@@ -420,7 +420,7 @@ def _with_change_analysis(
     if not labeled:
         raise RuntimeError(
             f"No video frames captured during action {action_desc!r} — "
-            "at least one camera (DroidCam or Pi Camera) must be streaming."
+            "at least one camera (SimpleIPCamera or Pi Camera) must be streaming."
         )
 
     out = _ok(result)
@@ -525,7 +525,7 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
         lambda: robot_mod.move_motor(p, degrees, speed),
         context=context,
         annotate=is_wheel,
-        vqa_cameras={"droidcam"} if is_wheel else None,
+        vqa_cameras={"simpleipcamera"} if is_wheel else None,
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -573,11 +573,11 @@ def drive(
         if duration_s == 0
         else f"drive left={left_speed} right={right_speed} for {duration_s}s"
     )
-    expected_str = expected if expected else "robot moves or pivots; observe droidcam for direction and distance"
+    expected_str = expected if expected else "robot moves or pivots; observe simpleipcamera for direction and distance"
     return _with_change_analysis(
         desc, expected_str, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -631,7 +631,7 @@ def turn(
         desc, expected_str,
         lambda: robot_mod.turn(body_degrees, speed),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -932,7 +932,7 @@ def drive_to(
         first_desc, first_expected,
         lambda: robot_mod.drive_degrees(first_drive_deg, speed, speed),
         context=context or "drive_to: driving measured distance to target",
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -1018,7 +1018,7 @@ def drive_to(
         second_desc, second_expected,
         lambda: robot_mod.drive_degrees(second_drive_deg, speed, speed),
         context=context or "drive_to: second drive closing remaining measured distance",
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -1225,7 +1225,7 @@ def click_button(
         desc, expected_str,
         lambda: robot_mod.click_button(speed, press_degrees),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         skip_vqa=not config.CLICK_BUTTON_VQA,
     )
 
@@ -1414,7 +1414,7 @@ def control_gripper(
             return _err(str(exc))
 
     # Gate: check grasp readiness before closing.
-    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+    frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
     import numpy as _np, cv2 as _cv2
     raw = base64.b64decode(frame_result["frame"])
     arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1474,7 +1474,7 @@ def check_grasp_readiness(
     target_class_free_text: str,
 ) -> list[TextContent]:
     """
-    CV-based grasp readiness check using the external (DroidCam) camera.
+    CV-based grasp readiness check using the external (SimpleIPCamera) camera.
 
     Captures a live frame and verifies two conditions required before closing
     the gripper:
@@ -1499,7 +1499,7 @@ def check_grasp_readiness(
     if not target_class_yolo or not target_class_free_text:
         return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
     try:
-        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         import numpy as _np, cv2 as _cv2
         arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1523,7 +1523,7 @@ def _nav_track_motor(
     base_overlay: np.ndarray,
     stop_event: threading.Event,
 ) -> None:
-    """Background thread for navigate_to: stream DroidCam frames with CV
+    """Background thread for navigate_to: stream SimpleIPCamera frames with CV
     robot-position tracking overlaid on the planned path to Rerun.
 
     Called while motors are running; replaces VQA for step verification.
@@ -1539,7 +1539,7 @@ def _nav_track_motor(
         tracking = nav_mod.draw_tracking_overlay(base_overlay, trail)
         viz.log_nav_tracking(tracking, ts)
 
-    cam_mod.stream_droidcam_bgr(_on_frame, stop_event)
+    cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
 
 
 def _scan_for_target(
@@ -1664,7 +1664,7 @@ def scan_for_target(
 
 
 def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, heading.Heading | None]:
-    """Capture the current external (DroidCam) frame and detect robot heading.
+    """Capture the current external (SimpleIPCamera) frame and detect robot heading.
 
     Shared by navigate_to's per-step preamble and its post-loop final-turn
     check — each applies its own handling when capture/decode/detection
@@ -1675,7 +1675,7 @@ def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, 
     (h_result is then always None too); h_result is None if heading
     detection failed on an otherwise-valid frame.
     """
-    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+    frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
     raw_bytes = base64.b64decode(frame_result["frame"])
     arr = np.frombuffer(raw_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1744,7 +1744,7 @@ def navigate_to(
                          (e.g. "Navigating to cup").
 
     At every step the tool:
-      1. Captures an external (DroidCam) frame and detects robot + target.
+      1. Captures an external (SimpleIPCamera) frame and detects robot + target.
          If the target is not visible on the external camera, the robot
          lowers its arm and rotates up to 360° CW in 30° steps, capturing
          front-camera frames at each position and running YOLO + VLM
@@ -1880,7 +1880,7 @@ def navigate_to(
                     # re-detect the target — it may now be in frame from the
                     # new heading.
                     try:
-                        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+                        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
                         raw_bytes = base64.b64decode(frame_result["frame"])
                         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
                         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -2123,7 +2123,7 @@ def navigate_to(
         nav_meta = {"tool": f"navigate_to {target_class_yolo}",
                     "sub_observation": sub_observation or None,
                     "sub_action": sub_action or None}
-        for cam in ("droidcam", "pi_camera"):
+        for cam in ("simpleipcamera", "pi_camera"):
             rec.tag_range(cam, nav_t_start, time.time(), nav_meta)
 
     return content
@@ -2140,7 +2140,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     class set, such as "light switch", "door handle", "power outlet",
     "red cable connector", "white box on the shelf", etc.
 
-    Captures the external (DroidCam) camera, asks Gemini Flash to find the
+    Captures the external (SimpleIPCamera) camera, asks Gemini Flash to find the
     object described by *description*, and returns:
       • An annotated frame with the heading arrow, object bounding box, and
         angle label overlaid.
@@ -2163,7 +2163,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     log.info("[TOOL] locate_object description=%r", description)
     try:
         # Capture external camera (unannotated — VLM should see the raw scene)
-        frame_result = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
+        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo="", annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         arr = np.frombuffer(raw, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -2273,17 +2273,17 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
 @mcp.tool()
 def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
-    Capture a single still frame from the DroidCam (third-person/overhead view).
+    Capture a single still frame from the SimpleIPCamera (third-person/overhead view).
     Useful for observing the robot's position and surroundings from outside.
     """
     log.info("[TOOL] get_external_camera_image")
     try:
-        result = cam_mod.capture_droidcam_still(target_class_yolo="")
+        result = cam_mod.capture_simpleipcamera_still(target_class_yolo="")
         viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
-            TextContent(type="text", text=f"DroidCam — external/third-person view{path_info}"),
+            TextContent(type="text", text=f"SimpleIPCamera — external/third-person view{path_info}"),
         ]
     except Exception as exc:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
@@ -2326,7 +2326,7 @@ def capture_external_video_clip(
     fps: float = 2.0,
 ) -> list[ImageContent | TextContent]:
     """
-    Capture a short clip from the DroidCam (third-person/overhead view).
+    Capture a short clip from the SimpleIPCamera (third-person/overhead view).
 
     Args:
         duration_s: Clip length in seconds (1–10 recommended).
@@ -2334,17 +2334,17 @@ def capture_external_video_clip(
     """
     log.info("[TOOL] capture_external_video_clip duration_s=%r fps=%r", duration_s, fps)
     try:
-        result = cam_mod.capture_droidcam_clip(duration_s, fps)
+        result = cam_mod.capture_simpleipcamera_clip(duration_s, fps)
         content: list[ImageContent | TextContent] = [
             TextContent(
                 type="text",
-                text=f"DroidCam — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
+                text=f"SimpleIPCamera — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
             )
         ]
         for frame_b64 in result["frames"]:
             content.append(_clip_image_content(frame_b64))
         vqa = vision.describe_clip(
-            "droidcam", result["frames"], result.get("paths"),
+            "simpleipcamera", result["frames"], result.get("paths"),
             raw_frames=result.get("raw_frames"),
         )
         if vqa:
@@ -2361,7 +2361,7 @@ def get_robot_state(
 ) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
-    cameras (DroidCam = wider third-person view; Pi Camera = front/robot-eye view).
+    cameras (SimpleIPCamera = wider third-person view; Pi Camera = front/robot-eye view).
     Call this before planning any sequence of actions.
 
     Args:
@@ -2385,17 +2385,17 @@ def get_robot_state(
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
         try:
-            droid_frame = cam_mod.capture_droidcam_still(
+            simpleipcam_frame = cam_mod.capture_simpleipcamera_still(
                 target_class_yolo=target_class_yolo,
                 target_class_free_text=target_class_free_text,
             )
-            viz.log_annotated_images(droid_frame["frame"])
+            viz.log_annotated_images(simpleipcam_frame["frame"])
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
-            content.append(_thumbnail_image_content(droid_frame["frame"]))
-            angle_deg = droid_frame.get("object_angle_deg")
-            vlm_note = droid_frame.get("vlm_note")
-            _last_target_distance_px = droid_frame.get("object_distance_px")
-            _last_target_robot_radius_px = droid_frame.get("robot_radius_px")
+            content.append(_thumbnail_image_content(simpleipcam_frame["frame"]))
+            angle_deg = simpleipcam_frame.get("object_angle_deg")
+            vlm_note = simpleipcam_frame.get("vlm_note")
+            _last_target_distance_px = simpleipcam_frame.get("object_distance_px")
+            _last_target_robot_radius_px = simpleipcam_frame.get("robot_radius_px")
             _last_target_yolo = target_class_yolo
             _last_target_free_text = target_class_free_text
             if angle_deg is not None:
@@ -2447,7 +2447,7 @@ def get_robot_state(
 # ── task video ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def compile_video(since: str, camera: str = "droidcam") -> dict:
+def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
     """
     Compile a video by concatenating recorded motion segments since a given
     timestamp. Segments are produced continuously by the SegmentRecorder and
@@ -2458,10 +2458,10 @@ def compile_video(since: str, camera: str = "droidcam") -> dict:
     Args:
         since:  UNIX timestamp as a string (e.g. "1746613200.0"), or a legacy
                 "YYYY-MM-DD HH:MM:SS[,ms]" / "YYYYMMDD_HHMMSS" string.
-        camera: "droidcam" (default) or "pi_camera" for a single-camera clip,
+        camera: "simpleipcamera" (default) or "pi_camera" for a single-camera clip,
                 or "merged" to tile both cameras plus a subtitle card
                 (observation, then action) into one video: subtitle
-                top-left, Pi camera bottom-left, DroidCam full-height right.
+                top-left, Pi camera bottom-left, SimpleIPCamera full-height right.
 
     Returns a dict with video_path, segment_count, total_duration_s.
     """
@@ -2728,16 +2728,16 @@ def consult_vqa_for_pddl_domain(
     # Capture both cameras. Unannotated: this is a general "what's going on"
     # question, not a heading/grasp decision, and no single target class applies.
     front = cam_mod.capture_still()
-    ext = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
+    ext = cam_mod.capture_simpleipcamera_still(target_class_yolo="", annotate=False)
     labeled_images: list[tuple[str, str]] = [
         ("pi_camera", front["frame"]),
-        ("droidcam", ext["frame"]),
+        ("simpleipcamera", ext["frame"]),
     ]
 
     from mcp_robot.recorder import get_recorder
     get_recorder().log_thought(
         sub_observation, sub_action,
-        {"pi_camera": front["frame"], "droidcam": ext["frame"]},
+        {"pi_camera": front["frame"], "simpleipcamera": ext["frame"]},
     )
 
     prompt = (
@@ -2836,25 +2836,25 @@ def _run_pi_camera() -> None:
             break
 
 
-def _run_droidcam() -> None:
+def _run_simpleipcamera() -> None:
     reported = [False]
 
     def _on_frame(frame: str, ts: float) -> None:
         if not reported[0]:
             reported[0] = True
-            _log_init_progress("droidcam", "done")
-        viz.log_droidcam_frame(frame, ts)
+            _log_init_progress("simpleipcamera", "done")
+        viz.log_simpleipcamera_frame(frame, ts)
 
     backoff = 1.0
     while not _stop.is_set():
         try:
-            cam_mod.stream_droidcam(stop_event=_stop, on_frame=_on_frame)
+            cam_mod.stream_simpleipcamera(stop_event=_stop, on_frame=_on_frame)
         except Exception as exc:
             if not reported[0]:
-                _log_init_progress("droidcam", "failed")
-            log.warning("DroidCam stream ended: %s", exc)
+                _log_init_progress("simpleipcamera", "failed")
+            log.warning("SimpleIPCamera stream ended: %s", exc)
         if not _stop.is_set():
-            log.info("DroidCam reconnecting in %.0fs...", backoff)
+            log.info("SimpleIPCamera reconnecting in %.0fs...", backoff)
             _stop.wait(backoff)
             backoff = min(backoff * 2, 30.0)
         else:
@@ -2873,7 +2873,7 @@ def _start_background_streams() -> None:
 
     for target, name in [
         (_run_pi_camera,  "pi-camera"),
-        (_run_droidcam,   "droidcam"),
+        (_run_simpleipcamera,   "simpleipcamera"),
     ]:
         threading.Thread(target=target, name=name, daemon=True).start()
 

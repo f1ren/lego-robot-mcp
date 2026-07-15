@@ -20,7 +20,7 @@ Usage examples:
   # Clip VQA (used by capture_front/external_video_clip)
   python qwen_test.py --mode clip \
       --folder /tmp/lego-robot-snapshots/action_video_20260504_134200 \
-      --camera droidcam
+      --camera simpleipcamera
 
   # Pick the latest action_video_* folder automatically
   python qwen_test.py --mode video --latest
@@ -55,7 +55,7 @@ _PROMPT = (
     "EXPECTED OUTCOME: {expected}\n\n"
     "Below are BEFORE images followed by AFTER images, each labelled by the "
     "camera they came from (pi_camera = robot's front-mounted camera, "
-    "droidcam = third-person view).\n\n"
+    "simpleipcamera = third-person view).\n\n"
     "IMPORTANT: Describe turning direction as clockwise/counter-clockwise "
     "(viewed from above) or compass directions (north/south/east/west), "
     "not as 'left' or 'right'.\n\n"
@@ -72,7 +72,7 @@ _VIDEO_PROMPT = (
     "ACTION COMMANDED: {action}\n"
     "EXPECTED OUTCOME: {expected}\n\n"
     "The frames below are in chronological order and show the complete motion. "
-    "Camera labels: pi_camera = robot eye, droidcam = third-person view.\n\n"
+    "Camera labels: pi_camera = robot eye, simpleipcamera = third-person view.\n\n"
     "IMPORTANT: Describe turning direction as clockwise/counter-clockwise "
     "(viewed from above) or compass directions (north/south/east/west), "
     "not as 'left' or 'right'.\n\n"
@@ -237,7 +237,7 @@ def main() -> None:
     ap.add_argument("--mode", choices=["stills", "video", "clip"], default="video")
     ap.add_argument("--action",   default="unknown action")
     ap.add_argument("--expected", default="something changes")
-    ap.add_argument("--camera",   default="droidcam", help="clip mode: camera label")
+    ap.add_argument("--camera",   default="simpleipcamera", help="clip mode: camera label")
 
     # stills mode
     ap.add_argument("--before", nargs="+", metavar="PATH", help="before image file(s)")

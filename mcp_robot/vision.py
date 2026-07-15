@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 _CAMERA_LABELS = {
     "pi_camera": "front cam — front view (robot's eye, mounted on the arm, looking forward from the gripper)",
-    "droidcam":  "external cam — third-person view (overhead or side angle showing the whole robot)",
+    "simpleipcamera":  "external cam — third-person view (overhead or side angle showing the whole robot)",
 }
 
 # Question half of the consult_vqa_for_pddl_domain prompt (server.py). Kept

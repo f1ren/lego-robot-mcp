@@ -22,9 +22,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser(description="Compile a task video from recorded motion segments.")
     parser.add_argument("since", help="Start timestamp (log format, folder format, or UNIX float)")
-    parser.add_argument("--camera", choices=["droidcam", "pi_camera", "merged"], default="droidcam",
+    parser.add_argument("--camera", choices=["simpleipcamera", "pi_camera", "merged"], default="simpleipcamera",
                         help="Camera whose segments to compile, or 'merged' to tile both cameras "
-                             "plus subtitles into one video (default: droidcam)")
+                             "plus subtitles into one video (default: simpleipcamera)")
     args = parser.parse_args()
 
     if args.camera == "merged":
