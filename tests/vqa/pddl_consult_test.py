@@ -30,7 +30,7 @@ Usage:
 
   # Swap in a different failure scenario
   python3 tests/vqa/pddl_consult_test.py \\
-      --front /path/to/pi_camera.jpg --external /path/to/droidcam.jpg \\
+      --front /path/to/pi_camera.jpg --external /path/to/simpleipcamera.jpg \\
       --context "The gripper closed on empty air; the cup was 5cm to the left of center." \\
       --domain pddl/robot_domain.pddl.bak \\
       --plan "(navigate loc-start loc-table)" --plan "(open-gripper)" \\
@@ -188,7 +188,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Simulate consult_vqa_for_pddl_domain against saved images")
     ap.add_argument("--domain",   default=str(DEFAULT_DOMAIN), help="path to a robot_domain.pddl file")
     ap.add_argument("--front",    default=str(DEFAULT_FRONT), help="pi_camera (front) image")
-    ap.add_argument("--external", default=str(DEFAULT_EXTERNAL), help="droidcam (external) image")
+    ap.add_argument("--external", default=str(DEFAULT_EXTERNAL), help="SimpleIPCamera (external) image")
     ap.add_argument("--context",  default=DEFAULT_CONTEXT, help="failure_context text")
     ap.add_argument("--plan", action="append", metavar="ACTION",
                      help="one grounded PDDL action from the plan being replayed, e.g. "
@@ -224,7 +224,7 @@ def main() -> None:
     problem_text = args.problem or None
 
     front_path, external_path = Path(args.front), Path(args.external)
-    images = [("pi_camera", front_path), ("droidcam", external_path)]
+    images = [("pi_camera", front_path), ("simpleipcamera", external_path)]
     labeled_bytes = [(label, load_image(path)) for label, path in images]
 
     prompt = build_prompt(DEFAULT_QUESTION, args.context, domain_text, problem_text, args.plan)

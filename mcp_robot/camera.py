@@ -24,9 +24,9 @@ _CV2_ROTATE = {
     270: 2,  # cv2.ROTATE_90_COUNTERCLOCKWISE
 }
 
-def _rotate_droidcam(frame):
-    """Rotate a BGR frame per DROIDCAM_ROTATION config (0/90/180/270 CW)."""
-    code = _CV2_ROTATE.get(config.DROIDCAM_ROTATION)
+def _rotate_simpleipcamera(frame):
+    """Rotate a BGR frame per SIMPLEIPCAMERA_ROTATION config (0/90/180/270 CW)."""
+    code = _CV2_ROTATE.get(config.SIMPLEIPCAMERA_ROTATION)
     if code is None:
         return frame
     import cv2
@@ -48,7 +48,7 @@ def _save_snapshot(
     Decode frame_b64 and write it to SNAPSHOT_DIR as a JPEG.
 
     Returns the file path on success, None if saving is disabled or fails.
-    label:   "picamera", "clip", "droidcam", "droidcam_raw", ...
+    label:   "picamera", "clip", "simpleipcamera", "simpleipcamera_raw", ...
     index:   frame index within a clip (None for stills)
     ts_key:  shared timestamp key so a raw/annotated pair of the same frame
              gets matching filenames (differing only by label). Generated
@@ -131,10 +131,10 @@ class _PiFrameCache:
 _pi_cache = _PiFrameCache()
 
 
-# ── DroidCam frame cache ──────────────────────────────────────────────────────
+# ── SimpleIPCamera frame cache ──────────────────────────────────────────────────────
 
-class _DroidCamFrameCache:
-    """Thread-safe ring buffer for DroidCam frames."""
+class _SimpleIPCameraFrameCache:
+    """Thread-safe ring buffer for SimpleIPCamera frames."""
     _BUFFER_S = 30
 
     def __init__(self) -> None:
@@ -153,7 +153,7 @@ class _DroidCamFrameCache:
             while self._buf and self._buf[0]["ts"] < cutoff:
                 self._buf.pop(0)
         from mcp_robot.recorder import get_recorder
-        get_recorder().on_frame("droidcam", frame_b64, ts, cache=self)
+        get_recorder().on_frame("simpleipcamera", frame_b64, ts, cache=self)
 
     def latest(self) -> dict | None:
         with self._lock:
@@ -186,7 +186,7 @@ class _DroidCamFrameCache:
             return [frames[i] for i in indices]
 
 
-_droidcam_cache = _DroidCamFrameCache()
+_simpleipcamera_cache = _SimpleIPCameraFrameCache()
 
 # ── RPi-side scripts ──────────────────────────────────────────────────────────
 
@@ -542,66 +542,66 @@ def _stream_live_ssh(fps: float, on_frame, stop_event: threading.Event | None) -
     get_client().stream_python(script, _on_line, stop_event)
 
 
-def _droidcam_failure_reason() -> str:
+def _simpleipcamera_failure_reason() -> str:
     import urllib.request
     try:
-        with urllib.request.urlopen(config.DROIDCAM_URL, timeout=3) as resp:
+        with urllib.request.urlopen(config.SIMPLEIPCAMERA_URL, timeout=3) as resp:
             if "text/html" in resp.headers.get("Content-Type", ""):
                 if "busy" in resp.read().decode(errors="replace").lower():
                     return (
-                        f"DroidCam is busy (another client is connected). "
-                        f"Close the other viewer and retry. URL: {config.DROIDCAM_URL}"
+                        f"SimpleIPCamera is busy (another client is connected). "
+                        f"Close the other viewer and retry. URL: {config.SIMPLEIPCAMERA_URL}"
                     )
     except Exception as exc:
-        return f"Cannot reach DroidCam at {config.DROIDCAM_URL}: {exc}"
-    return f"Cannot open DroidCam stream at {config.DROIDCAM_URL}"
+        return f"Cannot reach SimpleIPCamera at {config.SIMPLEIPCAMERA_URL}: {exc}"
+    return f"Cannot open SimpleIPCamera stream at {config.SIMPLEIPCAMERA_URL}"
 
 
-def stream_droidcam(
+def stream_simpleipcamera(
     stop_event: threading.Event | None = None,
     on_frame=None,
 ) -> None:
     """
-    Stream frames from DroidCam over HTTP until stop_event is set.
+    Stream frames from SimpleIPCamera over HTTP until stop_event is set.
 
-    Reads from config.DROIDCAM_URL using OpenCV (no SSH needed).
+    Reads from config.SIMPLEIPCAMERA_URL using OpenCV (no SSH needed).
 
     Args:
         stop_event: Set this to stop the stream.
         on_frame:   Optional callback(frame_b64: str, timestamp: float).
-                    Defaults to viz.log_droidcam_frame.
+                    Defaults to viz.log_simpleipcamera_frame.
     """
     import cv2
 
     if on_frame is None:
-        on_frame = viz.log_droidcam_frame
+        on_frame = viz.log_simpleipcamera_frame
 
-    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    cap = cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
     if not cap.isOpened():
         # Probe the URL to distinguish "busy" from a real connection failure.
         # Done only on failure — probing before VideoCapture opens triggers
-        # DroidCam's single-client lockout and breaks the next connect.
-        raise RuntimeError(_droidcam_failure_reason())
+        # SimpleIPCamera's single-client lockout and breaks the next connect.
+        raise RuntimeError(_simpleipcamera_failure_reason())
     try:
         while stop_event is None or not stop_event.is_set():
             ok, frame = cap.read()
             if not ok:
                 break
-            frame = _rotate_droidcam(frame)
+            frame = _rotate_simpleipcamera(frame)
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             b64 = base64.b64encode(buf.tobytes()).decode()
             ts = time.time()
-            _droidcam_cache.put(b64, ts)
+            _simpleipcamera_cache.put(b64, ts)
             on_frame(b64, ts)
     finally:
         cap.release()
 
 
-def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: bool = True) -> dict:
+def capture_simpleipcamera_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: bool = True) -> dict:
     """
-    Return a short DroidCam clip as a list of JPEG frames.
+    Return a short SimpleIPCamera clip as a list of JPEG frames.
 
-    Reads from the cache populated by stream_droidcam(). If no stream is
+    Reads from the cache populated by stream_simpleipcamera(). If no stream is
     running, opens a short-lived cv2.VideoCapture to grab frames directly.
 
     Args:
@@ -620,13 +620,13 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
 
     def _save_pair(raw_b64: str, display_b64: str, index: int) -> tuple[str | None, str | None]:
         ts_key = _snapshot_ts_key()
-        path = _save_snapshot(display_b64, "droidcam_clip", index=index, ts_key=ts_key)
+        path = _save_snapshot(display_b64, "simpleipcamera_clip", index=index, ts_key=ts_key)
         if not annotate:
             return path, path
-        raw_path = _save_snapshot(raw_b64, "droidcam_clip_raw", index=index, ts_key=ts_key)
+        raw_path = _save_snapshot(raw_b64, "simpleipcamera_clip_raw", index=index, ts_key=ts_key)
         return path, raw_path
 
-    clip_frames = _droidcam_cache.clip(duration_s, fps)
+    clip_frames = _simpleipcamera_cache.clip(duration_s, fps)
     if clip_frames is not None:
         raw = [f["frame"] for f in clip_frames]
         display = [_maybe_annotate(f) for f in raw]
@@ -641,9 +641,9 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
 
     import cv2
 
-    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    cap = cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
     if not cap.isOpened():
-        raise RuntimeError(_droidcam_failure_reason())
+        raise RuntimeError(_simpleipcamera_failure_reason())
     try:
         n_frames = max(1, round(duration_s * fps))
         interval = 1.0 / fps
@@ -656,7 +656,7 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
             ok, frame = cap.read()
             if not ok:
                 break
-            frame = _rotate_droidcam(frame)
+            frame = _rotate_simpleipcamera(frame)
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             raw = base64.b64encode(buf.tobytes()).decode()
             display = _maybe_annotate(raw)
@@ -674,15 +674,15 @@ def capture_droidcam_clip(duration_s: float = 2.0, fps: float = 2.0, annotate: b
         cap.release()
 
 
-def stream_droidcam_bgr(
+def stream_simpleipcamera_bgr(
     on_frame,
     stop_event: threading.Event,
 ) -> None:
-    """Deliver a continuous stream of BGR frames from DroidCam.
+    """Deliver a continuous stream of BGR frames from SimpleIPCamera.
 
-    If _droidcam_cache already holds frames newer than 2 s (meaning
-    stream_droidcam() is running), polls the cache so we don't open a
-    competing VideoCapture connection (DroidCam only allows one client).
+    If _simpleipcamera_cache already holds frames newer than 2 s (meaning
+    stream_simpleipcamera() is running), polls the cache so we don't open a
+    competing VideoCapture connection (SimpleIPCamera only allows one client).
     Otherwise opens a short-lived VideoCapture for the duration of the call.
 
     on_frame(bgr: np.ndarray, ts: float) is called for each new frame.
@@ -691,13 +691,13 @@ def stream_droidcam_bgr(
     import cv2 as _cv2
     import numpy as _np
 
-    entry = _droidcam_cache.latest()
+    entry = _simpleipcamera_cache.latest()
     use_cache = entry is not None and (time.time() - entry.get("ts", 0.0)) < 2.0
 
     if use_cache:
         last_ts = 0.0
         while not stop_event.is_set():
-            e = _droidcam_cache.latest()
+            e = _simpleipcamera_cache.latest()
             if e is None or e.get("ts", 0.0) <= last_ts:
                 time.sleep(0.03)
                 continue
@@ -709,30 +709,30 @@ def stream_droidcam_bgr(
                 on_frame(bgr, last_ts)
         return
 
-    cap = _cv2.VideoCapture(config.DROIDCAM_URL)
+    cap = _cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
     if not cap.isOpened():
-        log.warning("stream_droidcam_bgr: cannot open DroidCam at %s", config.DROIDCAM_URL)
+        log.warning("stream_simpleipcamera_bgr: cannot open SimpleIPCamera at %s", config.SIMPLEIPCAMERA_URL)
         return
     try:
         while not stop_event.is_set():
             ok, bgr = cap.read()
             if not ok:
                 break
-            on_frame(_rotate_droidcam(bgr), time.time())
+            on_frame(_rotate_simpleipcamera(bgr), time.time())
     finally:
         cap.release()
 
 
-def capture_droidcam_still(
+def capture_simpleipcamera_still(
     target_class_yolo: str,
     annotate: bool = True,
     target_class_free_text: str = "",
 ) -> dict:
     """
-    Return the most recent DroidCam frame.
+    Return the most recent SimpleIPCamera frame.
 
-    DroidCam allows only one client at a time, so we read from the cache
-    populated by stream_droidcam(). If no stream is running, opens a
+    SimpleIPCamera allows only one client at a time, so we read from the cache
+    populated by stream_simpleipcamera(). If no stream is running, opens a
     short-lived cv2.VideoCapture to grab a single frame. The returned frame
     is overlaid with a green forward-arrow when the robot's heading can be
     detected (see mcp_robot.heading).
@@ -798,27 +798,27 @@ def capture_droidcam_still(
     def _build_result(base: dict, b64: str) -> dict:
         frame, angle_deg, note, dist_px, robot_radius_px, body_area_px = _maybe_annotate(b64)
         ts_key = _snapshot_ts_key()
-        path = _save_snapshot(frame, "droidcam", ts_key=ts_key)
-        raw_path = _save_snapshot(b64, "droidcam_raw", ts_key=ts_key) if annotate else path
+        path = _save_snapshot(frame, "simpleipcamera", ts_key=ts_key)
+        raw_path = _save_snapshot(b64, "simpleipcamera_raw", ts_key=ts_key) if annotate else path
         return {**base, "frame": frame, "path": path, "raw_path": raw_path,
                 "object_angle_deg": angle_deg, "vlm_note": note,
                 "object_distance_px": dist_px, "robot_radius_px": robot_radius_px,
                 "robot_body_area_px": body_area_px}
 
-    cached = _droidcam_cache.latest()
+    cached = _simpleipcamera_cache.latest()
     if cached is not None:
         return _build_result(cached, cached["frame"])
 
     import cv2
 
-    cap = cv2.VideoCapture(config.DROIDCAM_URL)
+    cap = cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
     if not cap.isOpened():
-        raise RuntimeError(_droidcam_failure_reason())
+        raise RuntimeError(_simpleipcamera_failure_reason())
     try:
         ok, frame = cap.read()
         if not ok:
-            raise RuntimeError(f"DroidCam read failed at {config.DROIDCAM_URL}")
-        frame = _rotate_droidcam(frame)
+            raise RuntimeError(f"SimpleIPCamera read failed at {config.SIMPLEIPCAMERA_URL}")
+        frame = _rotate_simpleipcamera(frame)
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         b64 = base64.b64encode(buf.tobytes()).decode()
         return _build_result({"ts": time.time(), "bytes": len(buf)}, b64)

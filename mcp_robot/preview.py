@@ -53,14 +53,14 @@ def main() -> None:
     )
     motor_thread.start()
 
-    def _run_droidcam() -> None:
+    def _run_simpleipcamera() -> None:
         try:
-            camera.stream_droidcam(stop_event=stop)
+            camera.stream_simpleipcamera(stop_event=stop)
         except Exception as exc:
-            log.error("DroidCam stream failed: %s", exc)
+            log.error("SimpleIPCamera stream failed: %s", exc)
 
-    droidcam_thread = threading.Thread(target=_run_droidcam, daemon=True)
-    droidcam_thread.start()
+    simpleipcamera_thread = threading.Thread(target=_run_simpleipcamera, daemon=True)
+    simpleipcamera_thread.start()
 
     log.info("Camera %.0f fps  |  Motors %.0f Hz  —  Ctrl-C to stop", args.fps, args.motor_hz)
     try:
@@ -73,7 +73,7 @@ def main() -> None:
     finally:
         stop.set()
         motor_thread.join(timeout=2)
-        droidcam_thread.join(timeout=2)
+        simpleipcamera_thread.join(timeout=2)
 
     viz.flush()
     log.info("Done.")

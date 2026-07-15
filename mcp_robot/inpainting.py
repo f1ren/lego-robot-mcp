@@ -1,5 +1,5 @@
 """
-Remove the robot and target object from a DroidCam frame using LaMa inpainting.
+Remove the robot and target object from a SimpleIPCamera frame using LaMa inpainting.
 
 The robot is identified by its yellow LEGO body (HSV color mask + rotated-rectangle
 footprint that covers the full chassis including the gripper arm).  The arm/gripper

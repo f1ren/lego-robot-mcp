@@ -222,15 +222,15 @@ CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
 CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
-# ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.190:4747/video")
-DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
-# Target capture rate for DroidCam during action execution and video compilation.
-# Set to DroidCam's native ceiling (~30 fps) — the per-action VQA cost is unaffected
+# ── SimpleIPCamera ────────────────────────────────────────────────────────────
+SIMPLEIPCAMERA_URL         = os.getenv("SIMPLEIPCAMERA_URL", "http://192.168.8.190:8080/stream.mjpeg")
+SIMPLEIPCAMERA_ROTATION    = int(os.getenv("SIMPLEIPCAMERA_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
+# Target capture rate for SimpleIPCamera during action execution and video compilation.
+# Set to SimpleIPCamera's native ceiling (~30 fps) — the per-action VQA cost is unaffected
 # by this value (vision._subsample_frames always caps to 3 frames/camera before the
 # Gemini call regardless of how many were captured), so there's no downside to maxing
 # it out; this only affects recorded-segment/merged-video smoothness.
-DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "30.0"))
+SIMPLEIPCAMERA_CAPTURE_FPS = float(os.getenv("SIMPLEIPCAMERA_CAPTURE_FPS", "30.0"))
 
 # ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
 # stream_live() starts a picamera2 MJPEG server on the RPi and reads it via
@@ -245,10 +245,10 @@ SEGMENT_MANIFEST = os.getenv("SEGMENT_MANIFEST", str(Path(SEGMENT_DIR) / "index.
 SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.25"))
 SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "0.25"))
 # Declared playback fps per camera (container metadata for cv2.VideoWriter).
-# DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate). Keep these two
+# SimpleIPCamera: matches SIMPLEIPCAMERA_CAPTURE_FPS (per-action throttle rate). Keep these two
 # in sync — a mismatch still self-corrects via _maybe_remux's itsscale retiming, but
 # every segment then pays for an avoidable ffmpeg remux subprocess on close.
-SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "30.0"))
+SEGMENT_FPS_SIMPLEIPCAMERA = float(os.getenv("SEGMENT_FPS_SIMPLEIPCAMERA", "30.0"))
 # Pi camera: NOT PICAMERA_CAPTURE_FPS (5.0) — that low rate is the bottleneck
 # this feature is meant to move past. The recorder only ever sees pi_camera
 # frames when the MJPEG continuous stream is active (15-30fps native), so
@@ -266,7 +266,7 @@ SEGMENT_CALIB_ENABLED = bool(int(os.getenv("SEGMENT_CALIB_ENABLED", "1")))
 SEGMENT_CALIB_FRAMES  = int(os.getenv("SEGMENT_CALIB_FRAMES", "40"))
 SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # Pi camera default AE/AWB hunting shifts whole-frame brightness more than
-# DroidCam's ISP does, so it needs a wider margin above its noise floor.
+# the external camera's ISP does, so it needs a wider margin above its noise floor.
 SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
 # The changed-pixel-count metric is far more heavy-tailed/bursty than the
 # whole-frame mean-diff metric, on both cameras, in every calibration run
@@ -340,12 +340,12 @@ THOUGHT_SEGMENT_DURATION_S = float(os.getenv("THOUGHT_SEGMENT_DURATION_S", "3.0"
 # the two cameras plus a subtitle card into one video:
 #   left-top = subtitle (observation, then action) on black
 #   left-bottom = front (Pi) camera
-#   right = external (DroidCam) camera, full column height
+#   right = external (SimpleIPCamera) camera, full column height
 # MERGE_CELL_HEIGHT is the height of each left-column pane; cell width is
 # derived from the Pi camera's native aspect ratio. The right pane is scaled
-# to double that height (to fill the column) at the DroidCam's native aspect.
+# to double that height (to fill the column) at the external camera's native aspect.
 MERGE_CELL_HEIGHT = int(os.getenv("MERGE_CELL_HEIGHT", "360"))
-# Matches SEGMENT_FPS_DROIDCAM/SEGMENT_FPS_PI (both real, remuxed capture rates, not
+# Matches SEGMENT_FPS_SIMPLEIPCAMERA/SEGMENT_FPS_PI (both real, remuxed capture rates, not
 # just declared labels) so the fps= filter in _scale_pad is a pass-through rather than
 # a frame-duplicating upsample.
 MERGE_FPS = float(os.getenv("MERGE_FPS", "30.0"))

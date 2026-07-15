@@ -1379,7 +1379,7 @@ def refresh_approach_path(obs_map: ObstacleMap, plan: NavPlan) -> bool:
 def detect_robot_px(bgr: np.ndarray) -> tuple[int, int] | None:
     """Return the robot's yellow-body centroid as (x, y) pixel coords, or None.
 
-    Cheap enough to call on every DroidCam frame during motor execution.
+    Cheap enough to call on every SimpleIPCamera frame during motor execution.
     """
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(hsv, YELLOW_HSV_LO, YELLOW_HSV_HI)

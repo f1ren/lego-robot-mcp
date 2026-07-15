@@ -25,7 +25,7 @@ python3 tests/qwen_test.py --mode stills \
     --expected "robot turns clockwise"
 
 # Clip VQA (used by capture_front/external_video_clip)
-python3 tests/qwen_test.py --mode clip --latest --camera droidcam
+python3 tests/qwen_test.py --mode clip --latest --camera simpleipcamera
 ```
 
 Override model/host via env vars:
@@ -51,7 +51,7 @@ GEMINI_MODEL=gemini-2.5-pro python3 tests/vqa/pddl_consult_test.py
 
 # Point at a different scenario / domain
 python3 tests/vqa/pddl_consult_test.py \
-    --front /path/to/pi_camera.jpg --external /path/to/droidcam.jpg \
+    --front /path/to/pi_camera.jpg --external /path/to/simpleipcamera.jpg \
     --context "The gripper closed on empty air; the cup was 5cm left of center." \
     --domain pddl/robot_domain.pddl.bak
 
