@@ -110,6 +110,12 @@ class TestHeadingDirection(unittest.TestCase):
         """Gripper points north — fixture captured 2026-06-04 with switch and lights on."""
         self._assert_heading("heading/droidcam_heading_switch_and_lights_on.jpg", "N")
 
+    def test_gripper_southwest_cup_shadow(self):
+        """Gripper points south-west, toward the cup — regression for the robot's own cast
+        shadow (bigger + smoother than the real gripper blob) winning the area-based score
+        and flipping the arrow 180 degrees to point NE at the shadow instead."""
+        self._assert_heading("heading/droidcam_cup_gripper_shadow.jpg", "SW")
+
 
 if __name__ == "__main__":
     unittest.main()

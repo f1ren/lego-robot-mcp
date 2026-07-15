@@ -45,7 +45,7 @@ def parse_since(since: str) -> float:
 def compile_task_video(
     since: str,
     manifest_path: str,
-    camera: str = "droidcam",
+    camera: str = "simpleipcamera",
     out_dir: str = "~/Videos/LegoRobot",
 ) -> CompileResult:
     try:
@@ -125,7 +125,7 @@ def compile_task_video(
 # Tiles both cameras plus a subtitle card into a single video:
 #   left-top    = subtitle (observation, then action) on black
 #   left-bottom = front (Pi) camera
-#   right       = external (DroidCam) camera, full column height
+#   right       = external (SimpleIPCamera) camera, full column height
 #
 # The two cameras record independent, motion-triggered segments (see
 # recorder.py) that are only approximately aligned in time (open/close is
@@ -313,16 +313,16 @@ def _append_camera_branch(
 
 
 def _render_scene(
-    droid_segs: list[dict], pi_segs: list[dict], subtitle_png: str, dur: float,
+    simpleipcam_segs: list[dict], pi_segs: list[dict], subtitle_png: str, dur: float,
     right_w: int, right_h: int, cell_w: int, cell_h: int, fps: float, out_path: str,
 ) -> str | None:
     """Render one tiled scene clip (subtitle top-left, Pi camera bottom-left,
-    DroidCam full-height right). Returns an error string, or None on success."""
+    SimpleIPCamera full-height right). Returns an error string, or None on success."""
     inputs: list[str] = []
     filters: list[str] = []
     next_idx = 0
 
-    next_idx = _append_camera_branch(inputs, filters, next_idx, droid_segs, right_w, right_h, dur, fps, "ext")
+    next_idx = _append_camera_branch(inputs, filters, next_idx, simpleipcam_segs, right_w, right_h, dur, fps, "ext")
     next_idx = _append_camera_branch(inputs, filters, next_idx, pi_segs, cell_w, cell_h, dur, fps, "pic")
 
     inputs += ["-loop", "1", "-t", f"{dur:.3f}", "-r", f"{fps}", "-i", subtitle_png]
@@ -392,11 +392,11 @@ def compile_merged_video(
         return CompileResult(None, 0, 0.0)
 
     try:
-        by_camera = _read_segments_by_camera(manifest_path, since_ts, ("droidcam", "pi_camera"))
+        by_camera = _read_segments_by_camera(manifest_path, since_ts, ("simpleipcamera", "pi_camera"))
     except Exception as exc:
         return CompileResult(None, 0, 0.0, error=f"Failed to read manifest: {exc}")
 
-    all_segments = sorted(by_camera["droidcam"] + by_camera["pi_camera"], key=lambda r: r["start_ts"])
+    all_segments = sorted(by_camera["simpleipcamera"] + by_camera["pi_camera"], key=lambda r: r["start_ts"])
     if not all_segments:
         return CompileResult(None, 0, 0.0)
 
@@ -407,14 +407,14 @@ def compile_merged_video(
     cell_w = _even(cell_h * pi_w0 / pi_h0)
 
     right_h = cell_h * 2
-    droid_native = _first_probe(by_camera["droidcam"])
-    if droid_native:
-        droid_w0, droid_h0 = droid_native
-    elif config.DROIDCAM_ROTATION in (90, 270):
-        droid_w0, droid_h0 = config.CAMERA_HEIGHT, config.CAMERA_WIDTH
+    simpleipcam_native = _first_probe(by_camera["simpleipcamera"])
+    if simpleipcam_native:
+        simpleipcam_w0, simpleipcam_h0 = simpleipcam_native
+    elif config.SIMPLEIPCAMERA_ROTATION in (90, 270):
+        simpleipcam_w0, simpleipcam_h0 = config.CAMERA_HEIGHT, config.CAMERA_WIDTH
     else:
-        droid_w0, droid_h0 = config.CAMERA_WIDTH, config.CAMERA_HEIGHT
-    right_w = _even(right_h * droid_w0 / droid_h0)
+        simpleipcam_w0, simpleipcam_h0 = config.CAMERA_WIDTH, config.CAMERA_HEIGHT
+    right_w = _even(right_h * simpleipcam_w0 / simpleipcam_h0)
 
     fps = config.MERGE_FPS
     out_dir_expanded = os.path.expanduser(out_dir)
@@ -428,18 +428,18 @@ def compile_merged_video(
             t0 = min(s["start_ts"] for s in scene)
             t1 = max(s["end_ts"] for s in scene)
             dur = max(t1 - t0, 1.0 / fps)
-            droid_segs = [s for s in scene if s["camera"] == "droidcam"]
+            simpleipcam_segs = [s for s in scene if s["camera"] == "simpleipcamera"]
             pi_segs = [s for s in scene if s["camera"] == "pi_camera"]
             observation, action = _scene_subtitle(scene)
 
-            log.info("Scene %d: t0=%.3f dur=%.1fs droid_segs=%d pi_segs=%d obs=%r act=%r",
-                      i, t0, dur, len(droid_segs), len(pi_segs), observation, action)
+            log.info("Scene %d: t0=%.3f dur=%.1fs simpleipcam_segs=%d pi_segs=%d obs=%r act=%r",
+                      i, t0, dur, len(simpleipcam_segs), len(pi_segs), observation, action)
 
             sub_png = os.path.join(tmp_dir, f"sub_{i:04d}.png")
             _write_subtitle_image(sub_png, cell_w, cell_h, observation, action)
 
             scene_out = os.path.join(tmp_dir, f"scene_{i:04d}.mp4")
-            err = _render_scene(droid_segs, pi_segs, sub_png, dur,
+            err = _render_scene(simpleipcam_segs, pi_segs, sub_png, dur,
                                  right_w, right_h, cell_w, cell_h, fps, scene_out)
             if err:
                 return CompileResult(None, 0, 0.0, error=f"Scene {i} render failed: {err}")

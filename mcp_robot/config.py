@@ -77,8 +77,21 @@ DEFAULT_GRIPPER_SPEED = int(os.getenv("DEFAULT_GRIPPER_SPEED", "25"))
 ARM_SPEED_MAX = int(os.getenv("ARM_SPEED_MAX", "15"))
 # Arm-specific floor, decoupled from the shared SPEED_MIN (which stays 15 for
 # wheels/gripper, per the CV-detectability rule above) — DEFAULT_ARM_SPEED is
-# now below that shared floor, so arm moves need their own.
-ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "7"))
+# now below that shared floor, so arm moves need their own. Lowered to match
+# LIFT_ARM_SPEED below.
+ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
+
+# lift_arm's own default, 66% of DEFAULT_ARM_SPEED — lifting was still too
+# fast at the shared arm default, so it gets a slower speed of its own
+# (lower_arm/move_arm are unaffected and keep DEFAULT_ARM_SPEED).
+LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
+
+# lift_arm closes the gripper (holding torque) before raising the arm, then
+# releases the hold torque after this many seconds — long enough to observe
+# whether a grasped object stays put through the lift and a brief settle
+# before the fingers are allowed to coast. See
+# mcp_robot.robot._GRASP_HOLD_AND_LIFT.
+LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
 
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined
@@ -121,16 +134,52 @@ CLICK_PRESS_FALLBACK_MM = float(os.getenv("CLICK_PRESS_FALLBACK_MM", "80.0"))
 CLICK_RELEASE_FRACTION = float(os.getenv("CLICK_RELEASE_FRACTION", "0.5"))
 
 # ── Long-range drive guard (drive_to overshoot protection) ────────────────────
-# drive_to() drives the exact measured distance in one uncorrected blind move
-# — no clamp, no overtravel margin (contrast CLICK_PRESS_MARGIN_MM above).
-# That's fine at close range, but dead-reckoning error (wheel slip, drift)
-# compounds with distance, so a single long blind drive risks a bad overshoot.
-# Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths, drive_to() only
-# covers DRIVE_TO_PARTIAL_FRACTION of the measured distance and tells the
-# caller to re-invoke it — each re-invocation re-measures from a shorter,
-# more reliable range.
+# drive_to() drives the measured distance in one uncorrected blind move, minus
+# DRIVE_TO_TOUCH_OFFSET_MM (see below) — no clamp, no added overtravel margin
+# (contrast CLICK_PRESS_MARGIN_MM above). Dead-reckoning error (wheel slip,
+# drift) compounds with distance, so a single long blind drive risks a bad
+# overshoot. Past DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths,
+# drive_to() only covers DRIVE_TO_PARTIAL_FRACTION of the touch-adjusted
+# distance and tells the caller to re-invoke it — each re-invocation
+# re-measures from a shorter, more reliable range.
 DRIVE_TO_LONG_RANGE_BODY_LENGTHS = float(os.getenv("DRIVE_TO_LONG_RANGE_BODY_LENGTHS", "2.0"))
-DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.85"))
+DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION",        "0.9"))
+
+# The distance drive_to() measures (object_distance_px in _measure_target,
+# scaled to mm) is centroid-to-centroid: robot body centroid -> target
+# centroid (grasp_readiness.annotate_frame_with_object: dist_px =
+# hypot(body_center - obj.center)). Driving that full distance would put the
+# robot's *centroid* where the target's centroid currently is — the gripper,
+# mounted well forward of the centroid, would already have driven through the
+# target well before that. DRIVE_TO_TOUCH_OFFSET_MM is subtracted from the
+# measured distance (floored at 0) *first*, on every leg — the short-range
+# single drive, and both legs of the long-range auto-refine — so the robot
+# always targets the touch point, never the centroid.
+#
+# On the long-range first leg, DRIVE_TO_PARTIAL_FRACTION is applied to that
+# already touch-adjusted distance (not to the raw measured distance) —
+# first_drive_mm = max(0, distance_mm - DRIVE_TO_TOUCH_OFFSET_MM) *
+# DRIVE_TO_PARTIAL_FRACTION. Applying the fraction before the subtraction
+# instead would let a distance only just over the long-range threshold
+# overshoot into the touch zone on the first leg alone: e.g. at 400mm with
+# the defaults below, 0.85 x 400mm = 340mm driven leaves only a 60mm
+# centroid-gap — already less than the 130mm touch offset — before the
+# second leg's touch-aware logic even runs. Subtracting first means the
+# fraction is always applied to the touch-relevant distance, so the first
+# leg can never land closer than the touch offset on its own.
+#
+# Was 140mm — a visual estimate (not independently measured) from a real
+# drive_to() run: output/logs/mcp_server.log 2026-07-11 21:39:04 logged a
+# "second (final) drive" commanded for the full re-measured 143mm although the
+# robot, per output/snapshots/droidcam_20260711_213904_969.jpg from that same
+# instant, looked already close to touching the target — implying the true
+# touching gap is close to that 143mm measured distance, not 0. Roughly
+# consistent with ROBOT_BODY_LENGTH_MM/2 (76mm, centroid to body-hull front
+# edge) plus the gripper's reach beyond the body hull and the target's own
+# radius. Shortened by 1cm to 130mm on 2026-07-12. Refine this constant with
+# more measurements if drive_to() consistently stops short of or drives into
+# targets.
+DRIVE_TO_TOUCH_OFFSET_MM = float(os.getenv("DRIVE_TO_TOUCH_OFFSET_MM", "130.0"))
 
 # ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
 # Real-world gap (mm) between the target object's nearest point and the
@@ -173,15 +222,15 @@ CAMERA_HEIGHT  = int(os.getenv("CAMERA_HEIGHT",  "480"))
 CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
-# ── DroidCam ──────────────────────────────────────────────────────────────────
-DROIDCAM_URL         = os.getenv("DROIDCAM_URL", "http://192.168.8.190:4747/video")
-DROIDCAM_ROTATION    = int(os.getenv("DROIDCAM_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
-# Target capture rate for DroidCam during action execution and video compilation.
-# Set to DroidCam's native ceiling (~30 fps) — the per-action VQA cost is unaffected
+# ── SimpleIPCamera ────────────────────────────────────────────────────────────
+SIMPLEIPCAMERA_URL         = os.getenv("SIMPLEIPCAMERA_URL", "http://192.168.8.190:8080/stream.mjpeg")
+SIMPLEIPCAMERA_ROTATION    = int(os.getenv("SIMPLEIPCAMERA_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
+# Target capture rate for SimpleIPCamera during action execution and video compilation.
+# Set to SimpleIPCamera's native ceiling (~30 fps) — the per-action VQA cost is unaffected
 # by this value (vision._subsample_frames always caps to 3 frames/camera before the
 # Gemini call regardless of how many were captured), so there's no downside to maxing
 # it out; this only affects recorded-segment/merged-video smoothness.
-DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "30.0"))
+SIMPLEIPCAMERA_CAPTURE_FPS = float(os.getenv("SIMPLEIPCAMERA_CAPTURE_FPS", "30.0"))
 
 # ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
 # stream_live() starts a picamera2 MJPEG server on the RPi and reads it via
@@ -196,10 +245,10 @@ SEGMENT_MANIFEST = os.getenv("SEGMENT_MANIFEST", str(Path(SEGMENT_DIR) / "index.
 SEGMENT_PREROLL_S  = float(os.getenv("SEGMENT_PREROLL_S",  "0.25"))
 SEGMENT_COOLDOWN_S = float(os.getenv("SEGMENT_COOLDOWN_S", "0.25"))
 # Declared playback fps per camera (container metadata for cv2.VideoWriter).
-# DroidCam: matches DROIDCAM_CAPTURE_FPS (per-action throttle rate). Keep these two
+# SimpleIPCamera: matches SIMPLEIPCAMERA_CAPTURE_FPS (per-action throttle rate). Keep these two
 # in sync — a mismatch still self-corrects via _maybe_remux's itsscale retiming, but
 # every segment then pays for an avoidable ffmpeg remux subprocess on close.
-SEGMENT_FPS_DROIDCAM = float(os.getenv("SEGMENT_FPS_DROIDCAM", "30.0"))
+SEGMENT_FPS_SIMPLEIPCAMERA = float(os.getenv("SEGMENT_FPS_SIMPLEIPCAMERA", "30.0"))
 # Pi camera: NOT PICAMERA_CAPTURE_FPS (5.0) — that low rate is the bottleneck
 # this feature is meant to move past. The recorder only ever sees pi_camera
 # frames when the MJPEG continuous stream is active (15-30fps native), so
@@ -217,7 +266,7 @@ SEGMENT_CALIB_ENABLED = bool(int(os.getenv("SEGMENT_CALIB_ENABLED", "1")))
 SEGMENT_CALIB_FRAMES  = int(os.getenv("SEGMENT_CALIB_FRAMES", "40"))
 SEGMENT_CALIB_SIGMA   = float(os.getenv("SEGMENT_CALIB_SIGMA", "5.0"))
 # Pi camera default AE/AWB hunting shifts whole-frame brightness more than
-# DroidCam's ISP does, so it needs a wider margin above its noise floor.
+# the external camera's ISP does, so it needs a wider margin above its noise floor.
 SEGMENT_CALIB_SIGMA_PI = float(os.getenv("SEGMENT_CALIB_SIGMA_PI", "9.0"))
 # The changed-pixel-count metric is far more heavy-tailed/bursty than the
 # whole-frame mean-diff metric, on both cameras, in every calibration run
@@ -252,6 +301,24 @@ SEGMENT_CALIB_SIGMA_PIXEL_COUNT = float(os.getenv("SEGMENT_CALIB_SIGMA_PIXEL_COU
 # so calibration measures steady-state noise instead. Raise this further if
 # false-positive segments keep appearing shortly after "calibrated" log lines.
 SEGMENT_CALIB_WARMUP_S = float(os.getenv("SEGMENT_CALIB_WARMUP_S", "3.0"))
+# Calibration above only ever runs once, early in the stream's life, so it
+# freezes in whatever ambient lighting was present at that moment. If the
+# room's lighting changes mid-session the calibrated threshold no longer
+# reflects the camera's real noise floor — see the 2026-07-12 investigation,
+# where pressing a wall light switch left a segment open for 47.9s (vs. a
+# sub-second norm) because post-switch flicker (mean_diff ~1.9-2.3, periodic
+# every ~11 frames — rolling-shutter banding beating against the frame rate)
+# sat just under a threshold calibrated in the dimmer pre-light state.
+# Whole-frame mean brightness is the detection signal: it moved <1 unit
+# across that same 48s of flicker, but jumped ~20 units and held the instant
+# the light switched — a much cleaner "the ambient level changed" signal
+# than frame-to-frame diff, which flicker also perturbs.
+SEGMENT_RECALIB_BRIGHTNESS_STEP = float(os.getenv("SEGMENT_RECALIB_BRIGHTNESS_STEP", "15.0"))
+# How long the brightness delta must hold past SEGMENT_RECALIB_BRIGHTNESS_STEP,
+# in one direction, before it's treated as a real ambient change rather than a
+# transient (e.g. the arm/gripper briefly sweeping through frame) — transients
+# shouldn't pay the ~4-6s recording gap a recalibration costs.
+SEGMENT_RECALIB_SUSTAIN_S = float(os.getenv("SEGMENT_RECALIB_SUSTAIN_S", "2.0"))
 # Log (DEBUG, mcp_robot.recorder logger) every own-motion trip and the
 # resulting shared-clock update — mean_diff/pixel counts vs. thresholds, and
 # which camera drove the update. Root logger stays at INFO (server.py), so
@@ -273,12 +340,12 @@ THOUGHT_SEGMENT_DURATION_S = float(os.getenv("THOUGHT_SEGMENT_DURATION_S", "3.0"
 # the two cameras plus a subtitle card into one video:
 #   left-top = subtitle (observation, then action) on black
 #   left-bottom = front (Pi) camera
-#   right = external (DroidCam) camera, full column height
+#   right = external (SimpleIPCamera) camera, full column height
 # MERGE_CELL_HEIGHT is the height of each left-column pane; cell width is
 # derived from the Pi camera's native aspect ratio. The right pane is scaled
-# to double that height (to fill the column) at the DroidCam's native aspect.
+# to double that height (to fill the column) at the external camera's native aspect.
 MERGE_CELL_HEIGHT = int(os.getenv("MERGE_CELL_HEIGHT", "360"))
-# Matches SEGMENT_FPS_DROIDCAM/SEGMENT_FPS_PI (both real, remuxed capture rates, not
+# Matches SEGMENT_FPS_SIMPLEIPCAMERA/SEGMENT_FPS_PI (both real, remuxed capture rates, not
 # just declared labels) so the fps= filter in _scale_pad is a pass-through rather than
 # a frame-duplicating upsample.
 MERGE_FPS = float(os.getenv("MERGE_FPS", "30.0"))

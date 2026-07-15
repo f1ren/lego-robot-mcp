@@ -46,7 +46,7 @@ def _frame_count(path: str) -> int:
 
 
 class _FakeCache:
-    """Minimal stand-in for _PiFrameCache/_DroidCamFrameCache.clip_since."""
+    """Minimal stand-in for _PiFrameCache/_SimpleIPCameraFrameCache.clip_since."""
 
     def __init__(self, frames=None):
         self.frames = frames or []
@@ -513,6 +513,77 @@ class TestSegmentRecorder(unittest.TestCase):
         # more changed pixels before declaring motion.
         self.assertGreater(high.motion_pixel_count, low.motion_pixel_count)
 
+    # ── 15d: sustained brightness step force-closes and recalibrates ────────
+
+    def test_sustained_brightness_step_triggers_recalibration(self):
+        """A brightness shift that holds past recalib_sustain_s must
+        force-close whatever segment is open and reset calibration so the
+        noise floor re-measures against the new ambient level — see the
+        2026-07-12 investigation (light-switch flicker outliving a stale
+        threshold kept a segment open for 47.9s)."""
+        rec = self._make_recorder(
+            calib_enabled=True, calib_frames=4, calib_sigma=3.0, calib_warmup_s=0,
+            recalib_brightness_step=10.0, recalib_sustain_s=0.3,
+        )
+
+        t = 1000.0
+        for _ in range(5):  # seed + 4 diffs -> calibrates at brightness=128
+            rec.on_frame("droidcam", _solid_b64(64, 64, 128), t)
+            t = round(t + 0.1, 3)
+
+        state = rec._cameras["droidcam"]
+        self.assertTrue(state.calib_done)
+        self.assertAlmostEqual(state.calib_brightness, 128.0, delta=1.0)
+
+        # Step to a brightness 50 units higher — real motion too, so a
+        # segment opens — and hold it past recalib_sustain_s (0.3s).
+        t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", _solid_b64(64, 64, 178), t)
+        self.assertIsNotNone(state.open_segment, "the step itself is real motion and should open a segment")
+
+        t = round(t + 0.35, 3)
+        rec.on_frame("droidcam", _solid_b64(64, 64, 178), t)
+
+        self.assertIsNone(state.open_segment, "a sustained step must force-close the open segment")
+        self.assertEqual(len(state.recent_closed), 1)
+        self.assertFalse(state.calib_done, "recalibration must restart after a sustained step")
+
+        # Finish the new calibration pass at the new brightness level.
+        for _ in range(4):
+            t = round(t + 0.1, 3)
+            rec.on_frame("droidcam", _solid_b64(64, 64, 178), t)
+
+        self.assertTrue(state.calib_done)
+        self.assertAlmostEqual(state.calib_brightness, 178.0, delta=1.0)
+
+    # ── 15e: a transient brightness blip must not trigger recalibration ──────
+
+    def test_transient_brightness_change_does_not_recalibrate(self):
+        """A brief brightness excursion that reverts before recalib_sustain_s
+        elapses (e.g. the arm/gripper briefly crossing the frame) must not
+        reset calibration."""
+        rec = self._make_recorder(
+            calib_enabled=True, calib_frames=4, calib_sigma=3.0, calib_warmup_s=0,
+            recalib_brightness_step=10.0, recalib_sustain_s=1.0,
+        )
+
+        t = 1000.0
+        for _ in range(5):
+            rec.on_frame("droidcam", _solid_b64(64, 64, 128), t)
+            t = round(t + 0.1, 3)
+
+        state = rec._cameras["droidcam"]
+        self.assertTrue(state.calib_done)
+
+        # Brief excursion, then back to baseline well before recalib_sustain_s (1.0s).
+        t = round(t + 0.1, 3)
+        rec.on_frame("droidcam", _solid_b64(64, 64, 178), t)
+        t = round(t + 0.2, 3)
+        rec.on_frame("droidcam", _solid_b64(64, 64, 128), t)
+
+        self.assertTrue(state.calib_done, "a transient excursion must not trigger recalibration")
+        self.assertAlmostEqual(state.calib_brightness, 128.0, delta=1.0)
+
     # ── 16: cross-trigger opens a segment on the second camera ───────────────
 
     def test_cross_trigger_opens_segment_on_second_camera(self):
@@ -608,26 +679,26 @@ class TestSegmentRecorder(unittest.TestCase):
         if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
             self.skipTest("ffmpeg/ffprobe not available")
 
-        rec = self._make_recorder(fps_by_camera={"droidcam": 10.0, "pi_camera": 10.0})
+        rec = self._make_recorder(fps_by_camera={"simpleipcamera": 10.0, "pi_camera": 10.0})
 
-        # Synthetic solid-color frames (not real fixtures): droidcam portrait
-        # 480x640 (like a rotated DroidCam feed), pi_camera landscape 640x480
+        # Synthetic solid-color frames (not real fixtures): simpleipcamera portrait
+        # 480x640 (like a rotated SimpleIPCamera feed), pi_camera landscape 640x480
         # — guarantees deterministic motion (huge frame diff) and exercises
         # aspect-preserving scale/pad for both orientations.
-        droid_w, droid_h = 480, 640
+        simpleipcam_w, simpleipcam_h = 480, 640
         pi_w, pi_h = 640, 480
-        droid_lo, droid_hi = _solid_b64(droid_w, droid_h, 40), _solid_b64(droid_w, droid_h, 220)
+        simpleipcam_lo, simpleipcam_hi = _solid_b64(simpleipcam_w, simpleipcam_h, 40), _solid_b64(simpleipcam_w, simpleipcam_h, 220)
         pi_lo, pi_hi = _solid_b64(pi_w, pi_h, 40), _solid_b64(pi_w, pi_h, 220)
 
         t0 = 1000.0
         t = t0
-        rec.on_frame("droidcam", droid_lo, t); t = round(t + 0.1, 3)
-        rec.on_frame("droidcam", droid_hi, t); t = round(t + 0.1, 3)
-        rec.on_frame("droidcam", droid_lo, t); t = round(t + 0.1, 3)
-        droid_close = round(t + rec.cooldown_s, 3)
-        rec.on_frame("droidcam", droid_lo, droid_close)
+        rec.on_frame("simpleipcamera", simpleipcam_lo, t); t = round(t + 0.1, 3)
+        rec.on_frame("simpleipcamera", simpleipcam_hi, t); t = round(t + 0.1, 3)
+        rec.on_frame("simpleipcamera", simpleipcam_lo, t); t = round(t + 0.1, 3)
+        simpleipcam_close = round(t + rec.cooldown_s, 3)
+        rec.on_frame("simpleipcamera", simpleipcam_lo, simpleipcam_close)
 
-        t = round(t0 + 0.05, 3)  # slightly offset from droidcam, within cross-trigger window
+        t = round(t0 + 0.05, 3)  # slightly offset from simpleipcamera, within cross-trigger window
         rec.on_frame("pi_camera", pi_lo, t); t = round(t + 0.1, 3)
         rec.on_frame("pi_camera", pi_hi, t); t = round(t + 0.1, 3)
         rec.on_frame("pi_camera", pi_lo, t); t = round(t + 0.1, 3)
@@ -635,7 +706,7 @@ class TestSegmentRecorder(unittest.TestCase):
         rec.on_frame("pi_camera", pi_lo, pi_close)
 
         meta = {"tool": "drive", "sub_observation": "Path is clear", "sub_action": "Driving backward"}
-        self.assertTrue(rec.tag_range("droidcam", t0, droid_close, meta))
+        self.assertTrue(rec.tag_range("simpleipcamera", t0, simpleipcam_close, meta))
         self.assertTrue(rec.tag_range("pi_camera", t0, pi_close, meta))
 
         from mcp_robot.video_compiler import compile_merged_video
@@ -653,7 +724,7 @@ class TestSegmentRecorder(unittest.TestCase):
         cell_h = _even(config.MERGE_CELL_HEIGHT)
         cell_w = _even(cell_h * pi_w / pi_h)
         right_h = cell_h * 2
-        right_w = _even(right_h * droid_w / droid_h)
+        right_w = _even(right_h * simpleipcam_w / simpleipcam_h)
 
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",

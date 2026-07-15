@@ -15,7 +15,7 @@
     (gripper-open)
   )
 
-  ; Move to approach an object for pick-up.  Requires the arm already lowered
+  ; Move to approach an object to grasp.  Requires the arm already lowered
   ; and the gripper already open, so the robot is grasp-ready for the whole
   ; approach instead of opening/lowering only after arriving next to the
   ; target. Declare (adjacent from to) for every navigable pair in the
@@ -28,7 +28,7 @@
     :effect (and (not (robot-at ?from)) (robot-at ?to))
   )
 
-  ; Move while already holding an object — the transport leg after pick-up
+  ; Move while already holding an object — the transport leg after grasp
   ; and before place. The gripper is necessarily closed around the held
   ; object here, so (unlike `navigate` above) this does not require
   ; gripper-open/arm-lowered.
@@ -43,7 +43,7 @@
   ; also stops the planner from "reopening" the gripper while an object is
   ; held just to satisfy navigate's precondition again, which would drop it.
   ; Convention: never assert (gripper-open) in (:init), so the planner always
-  ; generates this step before pick-up regardless of observed state.
+  ; generates this step before grasp regardless of observed state.
   (:action open-gripper
     :parameters ()
     :precondition (and (arm-lowered) (gripper-empty))
@@ -52,7 +52,7 @@
 
   ; Lower the arm to ground level.  No precondition — safe to call even if
   ; already lowered.  Convention: never assert (arm-lowered) in (:init), so
-  ; the planner always generates this step before pick-up regardless of
+  ; the planner always generates this step before grasp regardless of
   ; observed state.
   (:action lower-arm
     :parameters ()
@@ -69,7 +69,7 @@
   ; Grasp an object at the robot's current location.
   ; Requires the gripper to be open and the arm to be lowered first.
   ; Closes the gripper (not (gripper-open)); arm stays lowered.
-  (:action pick-up
+  (:action grasp
     :parameters (?o ?l)
     :precondition (and (robot-at ?l) (object-at ?o ?l) (gripper-empty)
                        (gripper-open) (arm-lowered))

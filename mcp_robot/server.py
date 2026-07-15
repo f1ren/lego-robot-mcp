@@ -17,7 +17,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
-  lift_arm               Lift arm fully to home/retracted position
+  lift_arm               Close gripper (hold torque), lift arm to home/retracted position, hold, release gripper
   control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
@@ -27,9 +27,9 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   Camera
   ──────
   get_front_camera_image      Capture one still from Pi Camera (front/robot-eye view)
-  get_external_camera_image   Capture one still from DroidCam (third-person view)
+  get_external_camera_image   Capture one still from SimpleIPCamera (third-person view)
   capture_front_video_clip    Capture N-second clip from Pi Camera
-  capture_external_video_clip Capture N-second clip from DroidCam
+  capture_external_video_clip Capture N-second clip from SimpleIPCamera
 
   Vision / localization
   ─────────────────────
@@ -93,7 +93,7 @@ _last_problem_pddl: str | None = None
 
 # ── initialization tracker ────────────────────────────────────────────────────
 
-_INIT_COMPONENTS = ["motors", "picamera", "droidcam"]
+_INIT_COMPONENTS = ["motors", "picamera", "simpleipcamera"]
 _init_status: dict[str, str] = {c: "pending" for c in _INIT_COMPONENTS}
 _init_lock = threading.Lock()
 
@@ -174,7 +174,7 @@ def _resolve_target(target_class_yolo: str, target_class_free_text: str) -> tupl
 
 
 def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tuple[float | None, float | None]:
-    """Capture a fresh droidcam still and measure *target*'s angle off the
+    """Capture a fresh simpleipcamera still and measure *target*'s angle off the
     robot's forward heading and straight-line distance, converted to mm.
 
     Updates the _last_target_* globals as a side effect (same fields
@@ -187,7 +187,7 @@ def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tupl
     """
     global _last_target_distance_px, _last_target_robot_radius_px
     global _last_target_yolo, _last_target_free_text
-    frame_result = cam_mod.capture_droidcam_still(
+    frame_result = cam_mod.capture_simpleipcamera_still(
         target_class_yolo=target_class_yolo,
         target_class_free_text=target_class_free_text,
     )
@@ -260,23 +260,23 @@ def _thumbnail_image_content(frame_b64: str) -> ImageContent:
 
 
 
-def _capture_droidcam_background(stop_event: threading.Event) -> None:
-    """Background thread: poll DroidCam and feed frames into _droidcam_cache.
+def _capture_simpleipcamera_background(stop_event: threading.Event) -> None:
+    """Background thread: poll SimpleIPCamera and feed frames into _simpleipcamera_cache.
 
     Frames are stored raw (no heading arrow) so the VLM sees clean before/after
     comparisons without the arrow creating spurious motion detections. Feeding
-    _droidcam_cache also lets the SegmentRecorder observe these frames.
-    cap.read() blocks until the next frame arrives from DroidCam's MJPEG stream,
-    naturally capping at DroidCam's native rate; we add a sleep only when our
+    _simpleipcamera_cache also lets the SegmentRecorder observe these frames.
+    cap.read() blocks until the next frame arrives from SimpleIPCamera's MJPEG stream,
+    naturally capping at SimpleIPCamera's native rate; we add a sleep only when our
     target fps is lower than what the camera delivers.
     """
     try:
         import cv2
-        cap = cv2.VideoCapture(config.DROIDCAM_URL)
+        cap = cv2.VideoCapture(config.SIMPLEIPCAMERA_URL)
         if not cap.isOpened():
-            log.debug("Background DroidCam capture: could not open stream")
+            log.debug("Background SimpleIPCamera capture: could not open stream")
             return
-        target_fps = config.DROIDCAM_CAPTURE_FPS
+        target_fps = config.SIMPLEIPCAMERA_CAPTURE_FPS
         interval = 1.0 / target_fps
         try:
             while not stop_event.is_set():
@@ -285,14 +285,14 @@ def _capture_droidcam_background(stop_event: threading.Event) -> None:
                 if ok:
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                     b64 = base64.b64encode(buf.tobytes()).decode()
-                    cam_mod._droidcam_cache.put(b64, time.time())
+                    cam_mod._simpleipcamera_cache.put(b64, time.time())
                 slack = interval - (time.time() - t0)
                 if slack > 0:
                     time.sleep(slack)
         finally:
             cap.release()
     except Exception as exc:
-        log.debug("Background DroidCam capture failed: %s", exc)
+        log.debug("Background SimpleIPCamera capture failed: %s", exc)
 
 
 def _apply_optical_flow_per_camera(
@@ -339,17 +339,17 @@ def _with_change_analysis(
 
     Strategy:
     - Pi camera: slice frames from the streaming cache (populated by stream_live).
-    - DroidCam: if streaming cache is active use it; otherwise spin up a
+    - SimpleIPCamera: if streaming cache is active use it; otherwise spin up a
       background cv2 capture thread for the duration of the action.
     - Fallback: if neither camera yields frames, capture before/after stills.
 
-    annotate: whether to overlay the heading arrow on DroidCam frames sent to
+    annotate: whether to overlay the heading arrow on SimpleIPCamera frames sent to
               the VQA model. Pass False for arm/gripper actions so the arrow
               does not cover the arm or gripper and confuse the model about
               their state. Pass True (default) for drive/turn actions where
               heading information is needed for evaluation.
     vqa_cameras: set of camera labels to include in the VQA call (e.g.
-              {"droidcam"}). None (default) means all cameras.
+              {"simpleipcamera"}). None (default) means all cameras.
 
     On action error, returns _err(...) and skips vision.
     On vision failure, the action result is returned without change_description
@@ -364,13 +364,13 @@ def _with_change_analysis(
     """
     t_start = time.time()
 
-    # Start background DroidCam capture only when its cache is empty (no existing stream)
+    # Start background SimpleIPCamera capture only when its cache is empty (no existing stream)
     stop_event: threading.Event | None = None
     bg_thread: threading.Thread | None = None
-    if cam_mod._droidcam_cache.latest() is None:
+    if cam_mod._simpleipcamera_cache.latest() is None:
         stop_event = threading.Event()
         bg_thread = threading.Thread(
-            target=_capture_droidcam_background,
+            target=_capture_simpleipcamera_background,
             args=(stop_event,),
             daemon=True,
         )
@@ -403,11 +403,11 @@ def _with_change_analysis(
     def _maybe_annotate(b64: str) -> str:
         return heading.annotate_jpeg_b64(b64) if annotate else b64
 
-    droid_clip = cam_mod._droidcam_cache.clip_since(t_start, config.DROIDCAM_CAPTURE_FPS)
-    if droid_clip:
-        for f in droid_clip:
-            raw_video.append((f["ts"], "droidcam", f["frame"]))
-            annotated_video.append((f["ts"], "droidcam", _maybe_annotate(f["frame"])))
+    simpleipcam_clip = cam_mod._simpleipcamera_cache.clip_since(t_start, config.SIMPLEIPCAMERA_CAPTURE_FPS)
+    if simpleipcam_clip:
+        for f in simpleipcam_clip:
+            raw_video.append((f["ts"], "simpleipcamera", f["frame"]))
+            annotated_video.append((f["ts"], "simpleipcamera", _maybe_annotate(f["frame"])))
 
     pi_clip = cam_mod._pi_cache.clip_since(t_start, config.PICAMERA_CAPTURE_FPS)
     if pi_clip:
@@ -424,7 +424,7 @@ def _with_change_analysis(
     if not labeled:
         raise RuntimeError(
             f"No video frames captured during action {action_desc!r} — "
-            "at least one camera (DroidCam or Pi Camera) must be streaming."
+            "at least one camera (SimpleIPCamera or Pi Camera) must be streaming."
         )
 
     out = _ok(result)
@@ -533,7 +533,7 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
         lambda: robot_mod.move_motor(p, degrees, speed),
         context=context,
         annotate=is_wheel,
-        vqa_cameras={"droidcam"} if is_wheel else None,
+        vqa_cameras={"simpleipcamera"} if is_wheel else None,
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -581,11 +581,11 @@ def drive(
         if duration_s == 0
         else f"drive left={left_speed} right={right_speed} for {duration_s}s"
     )
-    expected_str = expected if expected else "robot moves or pivots; observe droidcam for direction and distance"
+    expected_str = expected if expected else "robot moves or pivots; observe simpleipcamera for direction and distance"
     return _with_change_analysis(
         desc, expected_str, lambda: robot_mod.drive(left_speed, right_speed, duration_s),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -639,7 +639,7 @@ def turn(
         desc, expected_str,
         lambda: robot_mod.turn(body_degrees, speed),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -765,18 +765,28 @@ def drive_to(
 
     Measures the straight-line distance to the target via the external
     camera (same px->mm body-plate calibration navigate_to()/click_button()
-    use, then mm->wheel-encoder-degrees via navigation.mm_to_wheel_degrees),
-    and drives forward that far. Unlike click_button()'s press distance,
-    there is no min/max clamp and no overtravel margin added — this aims to
-    stop at the target, not push through it.
+    use, then mm->wheel-encoder-degrees via navigation.mm_to_wheel_degrees).
+    That measurement is robot-body-centroid to target-centroid, so driving
+    the full distance would put the robot's centroid where the target's
+    centroid currently is — the gripper, mounted forward of the centroid,
+    would already have driven through the target well before that.
+    drive_to() first subtracts config.DRIVE_TO_TOUCH_OFFSET_MM from the
+    measured distance (floored at 0), on every leg — the short-range single
+    drive, and both legs of the long-range auto-refine below — so the robot
+    always targets the touch point, not the centroid. Unlike click_button()'s
+    press distance, there is still no min/max clamp and no *added* overtravel
+    margin.
 
     Long-range guard: a single blind drive accumulates dead-reckoning error
     (wheel slip/drift) in proportion to distance, so if the measured distance
     exceeds config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS robot body lengths
     (default 2x ROBOT_BODY_LENGTH_MM), the first drive only covers
-    config.DRIVE_TO_PARTIAL_FRACTION of it (default 85%). drive_to() then
-    re-measures from that closer, more reliable range and automatically fires
-    one final drive to close the rest — capped at 2 physical drives total
+    config.DRIVE_TO_PARTIAL_FRACTION of the touch-adjusted distance (default
+    85%) — the fraction is applied *after* the touch-offset subtraction, so
+    this leg can't itself land inside the touch offset on a distance that's
+    only just over the long-range threshold. drive_to() then re-measures from
+    that closer, more reliable range and automatically fires one final drive
+    to close the rest — capped at 2 physical drives total
     (each independently VQA-verified), so this never turns into an unbounded
     loop; that's what navigate_to() is for. The result carries
     `driven_distance_mm`, and — when a second drive ran — `drives_executed: 2`
@@ -858,13 +868,31 @@ def drive_to(
 
     long_range_threshold_mm = config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS * config.ROBOT_BODY_LENGTH_MM
     first_long_range = distance_mm > long_range_threshold_mm
-    first_drive_mm = distance_mm * config.DRIVE_TO_PARTIAL_FRACTION if first_long_range else distance_mm
+    touch_adjusted_mm = max(0.0, distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
+    if first_long_range:
+        # Apply the dead-reckoning safety fraction to the touch-adjusted
+        # distance, not the raw centroid distance — otherwise a distance only
+        # just over the long-range threshold could have 85% of the *raw*
+        # distance itself land inside the touch offset (e.g. 400mm raw: 0.85x
+        # raw = 340mm driven, leaving only a 60mm centroid-gap — less than a
+        # 130mm touch offset — i.e. already overshooting on this leg alone,
+        # before the second leg's touch-aware logic even runs).
+        first_drive_mm = touch_adjusted_mm * config.DRIVE_TO_PARTIAL_FRACTION
+    else:
+        first_drive_mm = touch_adjusted_mm
 
     first_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(first_drive_mm)))
     if first_drive_deg <= 0:
-        log.info("drive_to: already at target (measured distance=%.0fmm), no drive needed", distance_mm)
+        log.info(
+            "drive_to: already within touch offset (measured distance=%.0fmm, "
+            "touch offset=%.0fmm), no drive needed",
+            distance_mm, config.DRIVE_TO_TOUCH_OFFSET_MM,
+        )
         return _ok({
-            "message": f"already at target (measured distance={distance_mm:.0f}mm); no drive needed",
+            "message": (
+                f"already within touch offset (measured distance={distance_mm:.0f}mm, "
+                f"touch offset={config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm); no drive needed"
+            ),
             "measured_angle_deg": angle_deg,
             "measured_distance_mm": distance_mm,
         })
@@ -872,35 +900,47 @@ def drive_to(
     if first_long_range:
         log.info(
             "drive_to: measured distance=%.0fmm exceeds long-range threshold=%.0fmm "
-            "(%.1fx body length) — driving %.0f%% = %.0fmm first, then auto-refining "
-            "with one final measured drive (drive_degrees=%d)",
+            "(%.1fx body length) — driving %.0f%% of the %.0fmm touch-adjusted "
+            "distance = %.0fmm first, then auto-refining with one final measured "
+            "drive (drive_degrees=%d)",
             distance_mm, long_range_threshold_mm, config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS,
-            config.DRIVE_TO_PARTIAL_FRACTION * 100, first_drive_mm, first_drive_deg,
+            config.DRIVE_TO_PARTIAL_FRACTION * 100, touch_adjusted_mm, first_drive_mm, first_drive_deg,
         )
         first_desc = (
             f"drive_to speed={speed} drive_degrees={first_drive_deg} (driving "
-            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured; 1st of up to "
-            "2 drives to avoid overshoot)"
+            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured "
+            f"({touch_adjusted_mm:.0f}mm after touch offset); 1st of up to 2 "
+            "drives to avoid overshoot)"
         )
         first_expected = expected if expected else (
             f"robot drives forward ~{first_drive_deg}° wheel rotation "
             f"(~{first_drive_mm:.0f}mm) — an intentional partial approach, stopping "
-            f"short of the full {distance_mm:.0f}mm measured distance to avoid "
+            f"well short of the full {distance_mm:.0f}mm measured distance to avoid "
             "overshoot; the robot will not yet be at the target"
         )
     else:
-        log.info("drive_to: measured distance=%.0fmm — drive_degrees=%d", distance_mm, first_drive_deg)
-        first_desc = f"drive_to speed={speed} drive_degrees={first_drive_deg} (measured {distance_mm:.0f}mm)"
+        log.info(
+            "drive_to: measured distance=%.0fmm — driving %.0fmm after %.0fmm touch "
+            "offset — drive_degrees=%d",
+            distance_mm, first_drive_mm, config.DRIVE_TO_TOUCH_OFFSET_MM, first_drive_deg,
+        )
+        first_desc = (
+            f"drive_to speed={speed} drive_degrees={first_drive_deg} (driving "
+            f"{first_drive_mm:.0f}mm of {distance_mm:.0f}mm measured, stopping "
+            f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm short to touch rather than "
+            "center on the target)"
+        )
         first_expected = expected if expected else (
             f"robot drives forward ~{first_drive_deg}° wheel rotation "
-            f"(~{first_drive_mm:.0f}mm) toward the target"
+            f"(~{first_drive_mm:.0f}mm) toward the target, stopping with its front "
+            "at the target rather than driving its center onto it"
         )
 
     first_result = _with_change_analysis(
         first_desc, first_expected,
         lambda: robot_mod.drive_degrees(first_drive_deg, speed, speed),
         context=context or "drive_to: driving measured distance to target",
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
@@ -953,40 +993,46 @@ def drive_to(
             "a second drive_to() drive."
         )
 
-    second_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(second_distance_mm)))
+    second_drive_mm = max(0.0, second_distance_mm - config.DRIVE_TO_TOUCH_OFFSET_MM)
+    second_drive_deg = int(round(nav_mod.mm_to_wheel_degrees(second_drive_mm)))
     if second_drive_deg <= 0:
         first_result["message"] = (
             f"First drive covered {first_drive_mm:.0f}mm; re-measured distance is "
-            f"now {second_distance_mm:.0f}mm — already at target, no second drive needed."
+            f"now {second_distance_mm:.0f}mm — within the "
+            f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm touch offset, no second drive needed."
         )
         return first_result
 
     second_long_range = second_distance_mm > long_range_threshold_mm
     log.info(
-        "drive_to: second (final) drive — re-measured distance=%.0fmm, "
-        "drive_degrees=%d (drive 2 of 2, driven in full — no further auto-refine)",
-        second_distance_mm, second_drive_deg,
+        "drive_to: second (final) drive — re-measured distance=%.0fmm, driving "
+        "%.0fmm after %.0fmm touch offset, drive_degrees=%d (drive 2 of 2, driven "
+        "in full — no further auto-refine)",
+        second_distance_mm, second_drive_mm, config.DRIVE_TO_TOUCH_OFFSET_MM, second_drive_deg,
     )
     second_desc = (
         f"drive_to speed={speed} drive_degrees={second_drive_deg} (2nd of 2 "
-        f"drives, closing remeasured {second_distance_mm:.0f}mm)"
+        f"drives, driving {second_drive_mm:.0f}mm of remeasured {second_distance_mm:.0f}mm, "
+        f"stopping {config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm short to touch rather "
+        "than center on the target)"
     )
     second_expected = (
         f"robot drives forward ~{second_drive_deg}° wheel rotation "
-        f"(~{second_distance_mm:.0f}mm) to reach the target, completing the "
-        "approach the first drive intentionally left short"
+        f"(~{second_drive_mm:.0f}mm) to reach the target, completing the "
+        "approach the first drive intentionally left short, stopping with its "
+        "front at the target rather than centered on it"
     )
     second_result = _with_change_analysis(
         second_desc, second_expected,
         lambda: robot_mod.drive_degrees(second_drive_deg, speed, speed),
         context=context or "drive_to: second drive closing remaining measured distance",
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         sub_observation=sub_observation,
         sub_action=sub_action,
     )
     second_result["measured_angle_deg"] = angle_deg
     second_result["measured_distance_mm"] = distance_mm
-    second_result["driven_distance_mm"] = first_drive_mm + second_distance_mm
+    second_result["driven_distance_mm"] = first_drive_mm + second_drive_mm
     second_result["drives_executed"] = 2
     second_result["first_drive"] = {
         "driven_mm": first_drive_mm,
@@ -999,7 +1045,8 @@ def drive_to(
         f"Long-range drive ({distance_mm:.0f}mm measured, over "
         f"{config.DRIVE_TO_LONG_RANGE_BODY_LENGTHS:.0f}x body length) auto-refined "
         f"in 2 drives: {first_drive_mm:.0f}mm, then a re-measured "
-        f"{second_distance_mm:.0f}mm."
+        f"{second_distance_mm:.0f}mm (drove {second_drive_mm:.0f}mm after "
+        f"{config.DRIVE_TO_TOUCH_OFFSET_MM:.0f}mm touch offset)."
         + (
             " The second drive was itself still long-range (2-drive cap reached) — "
             "verify the result and call drive_to() again if it undershot."
@@ -1187,7 +1234,7 @@ def click_button(
         desc, expected_str,
         lambda: robot_mod.click_button(speed, press_degrees),
         context=context,
-        vqa_cameras={"droidcam"},
+        vqa_cameras={"simpleipcamera"},
         skip_vqa=not config.CLICK_BUTTON_VQA,
     )
 
@@ -1275,17 +1322,23 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context
 
 
 @mcp.tool()
-def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
+def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
-    Lift the robot arm fully to the home/retracted position (the same call
-    click_button's prep_for_press and put() use internally). Captures
-    before/after images and returns a Gemini-generated `change_description`.
+    Grasp-safe arm lift: closes the gripper with holding torque, raises the
+    arm fully to the home/retracted position, holds briefly, then releases
+    the gripper's hold torque. All four steps run inside a single script on
+    the RPi (see mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque
+    stays actively applied by the BuildHAT firmware for the whole raise +
+    settle window — this is what stops a grasped object (e.g. a cup) from
+    slipping out while the arm moves. Captures before/after images and
+    returns a Gemini-generated `change_description`.
 
     Args:
-        speed:    Motor speed, 7-15 (default 7 — halved from the old default
-                  of 15 to slow the move down for diagnosing the raise-then-
-                  fall bug; max 15 still caps jitter).
+        speed:    Arm motor speed, 5-15 (default 5 — 66% of DEFAULT_ARM_SPEED,
+                  slowed further so the raise-then-fall is easier to observe;
+                  max 15 still caps jitter). Gripper close speed is fixed at
+                  config.DEFAULT_GRIPPER_SPEED, not controlled by this arg.
         expected: Short, precise description of the expected outcome.
         context:  Why this action is being taken and hints for evaluation.
         sub_observation: ~4-word video subtitle: what was just observed or instructed
@@ -1297,11 +1350,14 @@ def lift_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context:
     if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
         return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     expected_str = expected if expected else (
-        f"arm raises fully to home position (~{config.ARM_UP_DEG}°, i.e. ~"
-        f"{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° up from fully lowered)"
+        "gripper jaws close fully (grasps anything between them), arm raises fully to "
+        f"home position (~{config.ARM_UP_DEG}°, i.e. ~{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° "
+        "up from fully lowered) while the gripper holds, then the gripper releases its hold "
+        "torque — fingers remain at the closed position, they do not reopen"
     )
     return _with_change_analysis(
-        f"lift arm fully to home position at speed {speed}",
+        f"close gripper with hold, lift arm fully to home position at speed {speed}, "
+        "hold, then release gripper hold",
         expected_str,
         lambda: robot_mod.lift_arm(speed),
         context=context,
@@ -1367,7 +1423,7 @@ def control_gripper(
             return _err(str(exc))
 
     # Gate: check grasp readiness before closing.
-    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+    frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
     import numpy as _np, cv2 as _cv2
     raw = base64.b64decode(frame_result["frame"])
     arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1427,7 +1483,7 @@ def check_grasp_readiness(
     target_class_free_text: str,
 ) -> list[TextContent]:
     """
-    CV-based grasp readiness check using the external (DroidCam) camera.
+    CV-based grasp readiness check using the external (SimpleIPCamera) camera.
 
     Captures a live frame and verifies two conditions required before closing
     the gripper:
@@ -1452,7 +1508,7 @@ def check_grasp_readiness(
     if not target_class_yolo or not target_class_free_text:
         return [TextContent(type="text", text="ERROR: target_class_yolo and target_class_free_text must both be non-empty.")]
     try:
-        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         import numpy as _np, cv2 as _cv2
         arr = _np.frombuffer(raw, dtype=_np.uint8)
@@ -1476,7 +1532,7 @@ def _nav_track_motor(
     base_overlay: np.ndarray,
     stop_event: threading.Event,
 ) -> None:
-    """Background thread for navigate_to: stream DroidCam frames with CV
+    """Background thread for navigate_to: stream SimpleIPCamera frames with CV
     robot-position tracking overlaid on the planned path to Rerun.
 
     Called while motors are running; replaces VQA for step verification.
@@ -1492,7 +1548,7 @@ def _nav_track_motor(
         tracking = nav_mod.draw_tracking_overlay(base_overlay, trail)
         viz.log_nav_tracking(tracking, ts)
 
-    cam_mod.stream_droidcam_bgr(_on_frame, stop_event)
+    cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
 
 
 def _scan_for_target(
@@ -1617,7 +1673,7 @@ def scan_for_target(
 
 
 def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, heading.Heading | None]:
-    """Capture the current external (DroidCam) frame and detect robot heading.
+    """Capture the current external (SimpleIPCamera) frame and detect robot heading.
 
     Shared by navigate_to's per-step preamble and its post-loop final-turn
     check — each applies its own handling when capture/decode/detection
@@ -1628,7 +1684,7 @@ def _capture_external_frame(target_class_yolo: str) -> tuple[np.ndarray | None, 
     (h_result is then always None too); h_result is None if heading
     detection failed on an otherwise-valid frame.
     """
-    frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+    frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
     raw_bytes = base64.b64decode(frame_result["frame"])
     arr = np.frombuffer(raw_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1697,7 +1753,7 @@ def navigate_to(
                          (e.g. "Navigating to cup").
 
     At every step the tool:
-      1. Captures an external (DroidCam) frame and detects robot + target.
+      1. Captures an external (SimpleIPCamera) frame and detects robot + target.
          If the target is not visible on the external camera, the robot
          lowers its arm and rotates up to 360° CW in 30° steps, capturing
          front-camera frames at each position and running YOLO + VLM
@@ -1833,7 +1889,7 @@ def navigate_to(
                     # re-detect the target — it may now be in frame from the
                     # new heading.
                     try:
-                        frame_result = cam_mod.capture_droidcam_still(target_class_yolo=target_class_yolo, annotate=False)
+                        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo=target_class_yolo, annotate=False)
                         raw_bytes = base64.b64decode(frame_result["frame"])
                         arr = np.frombuffer(raw_bytes, dtype=np.uint8)
                         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -2076,7 +2132,7 @@ def navigate_to(
         nav_meta = {"tool": f"navigate_to {target_class_yolo}",
                     "sub_observation": sub_observation or None,
                     "sub_action": sub_action or None}
-        for cam in ("droidcam", "pi_camera"):
+        for cam in ("simpleipcamera", "pi_camera"):
             rec.tag_range(cam, nav_t_start, time.time(), nav_meta)
 
     return content
@@ -2093,7 +2149,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     class set, such as "light switch", "door handle", "power outlet",
     "red cable connector", "white box on the shelf", etc.
 
-    Captures the external (DroidCam) camera, asks Gemini Flash to find the
+    Captures the external (SimpleIPCamera) camera, asks Gemini Flash to find the
     object described by *description*, and returns:
       • An annotated frame with the heading arrow, object bounding box, and
         angle label overlaid.
@@ -2116,7 +2172,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
     log.info("[TOOL] locate_object description=%r", description)
     try:
         # Capture external camera (unannotated — VLM should see the raw scene)
-        frame_result = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
+        frame_result = cam_mod.capture_simpleipcamera_still(target_class_yolo="", annotate=False)
         raw = base64.b64decode(frame_result["frame"])
         arr = np.frombuffer(raw, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -2228,25 +2284,27 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
             ),
         ]
     except Exception as exc:
+        log.error("[TOOL] get_front_camera_image error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
 @mcp.tool()
 def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
-    Capture a single still frame from the DroidCam (third-person/overhead view).
+    Capture a single still frame from the SimpleIPCamera (third-person/overhead view).
     Useful for observing the robot's position and surroundings from outside.
     """
     log.info("[TOOL] get_external_camera_image")
     try:
-        result = cam_mod.capture_droidcam_still(target_class_yolo="")
+        result = cam_mod.capture_simpleipcamera_still(target_class_yolo="")
         viz.log_annotated_images(result["frame"])
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
-            TextContent(type="text", text=f"DroidCam — external/third-person view{path_info}"),
+            TextContent(type="text", text=f"SimpleIPCamera — external/third-person view{path_info}"),
         ]
     except Exception as exc:
+        log.error("[TOOL] get_external_camera_image error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2278,6 +2336,7 @@ def capture_front_video_clip(
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
+        log.error("[TOOL] capture_front_video_clip error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2287,7 +2346,7 @@ def capture_external_video_clip(
     fps: float = 2.0,
 ) -> list[ImageContent | TextContent]:
     """
-    Capture a short clip from the DroidCam (third-person/overhead view).
+    Capture a short clip from the SimpleIPCamera (third-person/overhead view).
 
     Args:
         duration_s: Clip length in seconds (1–10 recommended).
@@ -2295,23 +2354,24 @@ def capture_external_video_clip(
     """
     log.info("[TOOL] capture_external_video_clip duration_s=%r fps=%r", duration_s, fps)
     try:
-        result = cam_mod.capture_droidcam_clip(duration_s, fps)
+        result = cam_mod.capture_simpleipcamera_clip(duration_s, fps)
         content: list[ImageContent | TextContent] = [
             TextContent(
                 type="text",
-                text=f"DroidCam — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
+                text=f"SimpleIPCamera — {result['count']} frames at {fps:.1f} fps ({duration_s}s)",
             )
         ]
         for frame_b64 in result["frames"]:
             content.append(_clip_image_content(frame_b64))
         vqa = vision.describe_clip(
-            "droidcam", result["frames"], result.get("paths"),
+            "simpleipcamera", result["frames"], result.get("paths"),
             raw_frames=result.get("raw_frames"),
         )
         if vqa:
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
+        log.error("[TOOL] capture_external_video_clip error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2322,7 +2382,7 @@ def get_robot_state(
 ) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
-    cameras (DroidCam = wider third-person view; Pi Camera = front/robot-eye view).
+    cameras (SimpleIPCamera = wider third-person view; Pi Camera = front/robot-eye view).
     Call this before planning any sequence of actions.
 
     Args:
@@ -2346,17 +2406,17 @@ def get_robot_state(
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
         try:
-            droid_frame = cam_mod.capture_droidcam_still(
+            simpleipcam_frame = cam_mod.capture_simpleipcamera_still(
                 target_class_yolo=target_class_yolo,
                 target_class_free_text=target_class_free_text,
             )
-            viz.log_annotated_images(droid_frame["frame"])
+            viz.log_annotated_images(simpleipcam_frame["frame"])
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
-            content.append(_thumbnail_image_content(droid_frame["frame"]))
-            angle_deg = droid_frame.get("object_angle_deg")
-            vlm_note = droid_frame.get("vlm_note")
-            _last_target_distance_px = droid_frame.get("object_distance_px")
-            _last_target_robot_radius_px = droid_frame.get("robot_radius_px")
+            content.append(_thumbnail_image_content(simpleipcam_frame["frame"]))
+            angle_deg = simpleipcam_frame.get("object_angle_deg")
+            vlm_note = simpleipcam_frame.get("vlm_note")
+            _last_target_distance_px = simpleipcam_frame.get("object_distance_px")
+            _last_target_robot_radius_px = simpleipcam_frame.get("robot_radius_px")
             _last_target_yolo = target_class_yolo
             _last_target_free_text = target_class_free_text
             if angle_deg is not None:
@@ -2383,6 +2443,7 @@ def get_robot_state(
             if vlm_note:
                 content.append(TextContent(type="text", text=f"VLM note: {vlm_note}"))
         except Exception as exc:
+            log.error("[TOOL] get_robot_state simpleipcamera capture error: %s", exc, exc_info=True)
             _last_target_distance_px = None
             _last_target_robot_radius_px = None
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
@@ -2402,13 +2463,14 @@ def get_robot_state(
             content.append(TextContent(type="text", text=summary))
         return content
     except Exception as exc:
+        log.error("[TOOL] get_robot_state error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
 # ── task video ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def compile_video(since: str, camera: str = "droidcam") -> dict:
+def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
     """
     Compile a video by concatenating recorded motion segments since a given
     timestamp. Segments are produced continuously by the SegmentRecorder and
@@ -2419,10 +2481,10 @@ def compile_video(since: str, camera: str = "droidcam") -> dict:
     Args:
         since:  UNIX timestamp as a string (e.g. "1746613200.0"), or a legacy
                 "YYYY-MM-DD HH:MM:SS[,ms]" / "YYYYMMDD_HHMMSS" string.
-        camera: "droidcam" (default) or "pi_camera" for a single-camera clip,
+        camera: "simpleipcamera" (default) or "pi_camera" for a single-camera clip,
                 or "merged" to tile both cameras plus a subtitle card
                 (observation, then action) into one video: subtitle
-                top-left, Pi camera bottom-left, DroidCam full-height right.
+                top-left, Pi camera bottom-left, SimpleIPCamera full-height right.
 
     Returns a dict with video_path, segment_count, total_duration_s.
     """
@@ -2441,6 +2503,27 @@ def compile_video(since: str, camera: str = "droidcam") -> dict:
 
 
 # ── PDDL task planning ───────────────────────────────────────────────────────
+# The actual STRIPS solving and VQA-diagnose-and-replan loop live in
+# neurosymbolic_counselor (extracted from this file — see
+# github.com/f1ren/NAPC). Only what's genuinely
+# robot-specific stays here: the on-disk domain-file convention, camera
+# capture, and video-subtitle logging.
+
+_PDDL_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "pddl",
+)
+DOMAIN_PATH = os.path.join(_PDDL_DIR, "robot_domain.pddl")
+# Experimental override written by consult_vqa_for_pddl_domain. When present,
+# plan_pddl uses this instead of DOMAIN_PATH so the original, git-tracked
+# domain is never mutated. Gitignored; delete the file to fall back to
+# DOMAIN_PATH.
+DOMAIN_FIXED_PATH = os.path.join(_PDDL_DIR, "robot_domain_fixed.pddl")
+
+
+def _active_domain_path() -> str:
+    return DOMAIN_FIXED_PATH if os.path.exists(DOMAIN_FIXED_PATH) else DOMAIN_PATH
+
 
 @mcp.tool()
 def plan_pddl(problem_pddl: str) -> dict:
@@ -2451,13 +2534,13 @@ def plan_pddl(problem_pddl: str) -> dict:
     when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
     defines seven actions:
       - navigate         ?from ?to         → navigate_to  [requires arm-lowered + gripper-open —
-                                              this is the approach leg toward a pick-up target]
+                                              this is the approach leg toward a grasp target]
       - navigate-holding ?from ?to ?object → navigate_to  [requires holding ?object — the
-                                              transport leg after pick-up, before place]
+                                              transport leg after grasp, before place]
       - open-gripper                       → control_gripper(open)  [requires arm-lowered]
       - lower-arm                          → lower_arm
       - lift-arm         ?object           → lift_arm  [requires holding ?object + arm-lowered]
-      - pick-up          ?object ?location → control_gripper(close)  [gripper+arm must be ready]
+      - grasp            ?object ?location → control_gripper(close)  [gripper+arm must be ready]
       - place            ?object ?location → put  (opens gripper + raises arm)
 
     You supply only the *problem* as a PDDL string.  It must declare:
@@ -2467,11 +2550,11 @@ def plan_pddl(problem_pddl: str) -> dict:
 
     Convention — NEVER assert (arm-lowered) or (gripper-open) in (:init), even
     if the robot's physical state has them true.  Omitting them forces the planner
-    to always emit lower-arm and open-gripper before every pick-up, which matches
+    to always emit lower-arm and open-gripper before every grasp, which matches
     the CLAUDE.md safety rules ("always open/lower regardless of observed state").
     This is also structurally enforced: `navigate`'s precondition requires
     arm-lowered + gripper-open, and `open-gripper`'s precondition requires
-    arm-lowered — so the planner cannot reach a pick-up target without first
+    arm-lowered — so the planner cannot reach a grasp target without first
     lowering the arm and then opening the gripper, in that order.
 
     Example problem (move a cup from the table to the sink):
@@ -2495,7 +2578,7 @@ def plan_pddl(problem_pddl: str) -> dict:
         (lower-arm)
         (open-gripper)
         (navigate loc-start loc-table)
-        (pick-up cup loc-table)
+        (grasp cup loc-table)
         (navigate-holding loc-table loc-sink cup)
         (place cup loc-sink)
 
@@ -2512,106 +2595,21 @@ def plan_pddl(problem_pddl: str) -> dict:
     """
     global _last_plan, _last_problem_pddl
     log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
-    from mcp_robot import planner
+    domain_path = _active_domain_path()
+    if not os.path.exists(domain_path):
+        return _err(f"PDDL domain file not found: {domain_path}")
+    with open(domain_path) as f:
+        domain_text = f.read()
+
+    from neurosymbolic_counselor import solve
     try:
-        actions = planner.solve(problem_pddl)
+        actions = solve(domain_text, problem_pddl)
     except ImportError:
         return _err("pyperplan is not installed — run: pip install pyperplan")
-    except RuntimeError as exc:
-        return _err(str(exc))
     log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
     _last_plan = actions
     _last_problem_pddl = problem_pddl
     return _ok({"plan": actions})
-
-
-def _format_plan(plan: list[str] | None) -> str:
-    """Render the last plan_pddl output for the consult_vqa_for_pddl_domain prompt.
-
-    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
-    """
-    if plan is None:
-        return "plan_pddl has not been called yet this session."
-    if not plan:
-        return "(empty) — the last plan_pddl call found no solution."
-    return ", ".join(plan)
-
-
-def _format_problem(problem_pddl: str | None) -> str:
-    """Render the last plan_pddl problem for the consult_vqa_for_pddl_domain prompt.
-
-    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
-    """
-    if problem_pddl is None:
-        return "plan_pddl has not been called yet this session — no problem PDDL to show."
-    return problem_pddl
-
-
-def _extract_pddl_block(text: str, keyword: str) -> str | None:
-    """Extract the first balanced (define (<keyword> ...)) block from free-form text.
-
-    Copied verbatim in tests/vqa/pddl_consult_test.py — update both together.
-    """
-    import re
-    m = re.search(rf'\(define\s+\({keyword}\b', text, re.IGNORECASE)
-    if not m:
-        return None
-    start = m.start()
-    depth = 0
-    for i, ch in enumerate(text[start:], start=start):
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
-
-
-def _extract_pddl_domain(text: str) -> str | None:
-    return _extract_pddl_block(text, "domain")
-
-
-def _extract_pddl_problem(text: str) -> str | None:
-    return _extract_pddl_block(text, "problem")
-
-
-def _consult_directive(updated_plan: list[str] | None, plan_error: str | None, no_problem_available: bool) -> str:
-    """Build the top-line instruction for consult_vqa_for_pddl_domain's return.
-
-    This is the field the caller is most likely to act on, so it states the
-    required next step in plain imperative language instead of leaving the
-    caller to notice domain_updated/new_domain/updated_plan on its own and
-    infer what to do — that's what silently failed to happen in practice
-    (session 6b41008b: domain_updated came back true, but nothing in the
-    response said so, and it was competing for attention against thousands of
-    characters of vqa_response prose containing its own, more actionable-looking
-    suggestion — the caller acted on the prose and never replanned).
-    """
-    if no_problem_available:
-        return (
-            "No problem PDDL is on record (plan_pddl has not been called yet "
-            "this session) — nothing was auto-replanned. Call plan_pddl "
-            "yourself once you have a problem_pddl, folding in any fix below."
-        )
-    if plan_error is not None:
-        return f"Auto-replan failed: {plan_error}. Resolve this before proceeding."
-    if not updated_plan:
-        return (
-            "Replanned automatically against the fix below — still no solution "
-            "(empty plan). The gap may not be fully resolved; investigate "
-            "further or consult again with more context."
-        )
-    return (
-        "EXECUTE updated_plan below — it was replanned automatically against "
-        "the fix below and supersedes any plan from an earlier plan_pddl call. "
-        "Do not reuse an older plan or hand-construct steps. If updated_plan "
-        "contains an action with no corresponding MCP tool, decide whether an "
-        "existing tool already produces the same physical effect (e.g. a "
-        "lighting action may map to click_button) or a new tool needs to be "
-        "written per CLAUDE.md's Tool Use rules — this tool does not attempt "
-        "that mapping itself."
-    )
 
 
 @mcp.tool()
@@ -2626,9 +2624,9 @@ def consult_vqa_for_pddl_domain(
     Captures the current robot view and external camera, reads the active domain
     (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
     both the problem PDDL and grounded plan from the most recent plan_pddl call,
-    then asks the question in vision.CONSULT_DOMAIN_QUESTION (shared with
-    tests/vqa/pddl_consult_test.py, which replays this same prompt against saved
-    images so wording changes can be tried without a connected robot).
+    then asks the question in neurosymbolic_counselor.counselor.DEFAULT_QUESTION
+    (also the prompt tests/vqa/pddl_consult_test.py replays against saved images
+    so wording changes can be tried without a connected robot).
 
     The VQA may fix the domain (general actions/predicates), the problem (this
     task's objects/init/goal), or both — whichever block(s) are present in its
@@ -2637,12 +2635,12 @@ def consult_vqa_for_pddl_domain(
     original, is never modified). A new problem is used for the replan below
     but is NOT persisted anywhere — re-supply it to any later plan_pddl call.
 
-    This tool then immediately replans — calling plan_pddl itself against
-    whatever domain/problem are now active — so the caller never has to
-    remember that as a separate step. "directive" and "updated_plan" are the
-    primary output and are placed first in the response for that reason;
-    "vqa_response" and the rest are supporting detail, not the required next
-    action.
+    This tool then immediately replans via neurosymbolic_counselor.consult(),
+    which re-solves against whatever domain/problem are now active — so the
+    caller never has to remember that as a separate step. "directive" and
+    "updated_plan" are the primary output and are placed first in the response
+    for that reason; "vqa_response" and the rest are supporting detail, not
+    the required next action.
 
     NOTE: pddl/robot_domain_fixed.pddl is gitignored and never committed.
     Delete it (rm pddl/robot_domain_fixed.pddl) to return to the original
@@ -2671,103 +2669,82 @@ def consult_vqa_for_pddl_domain(
         problem_updated — True if a new problem was extracted from the response
         new_problem     — new problem text if problem_updated, else null
     """
-    from mcp_robot import planner as planner_mod
+    global _last_plan, _last_problem_pddl
 
     log.info("[TOOL] consult_vqa_for_pddl_domain context=%r", failure_context)
     if not sub_observation.strip() or not sub_action.strip():
         return _err("sub_observation and sub_action must both be non-empty.")
 
-    # Read the currently active domain (fixed override takes precedence)
-    domain_path = (
-        planner_mod.DOMAIN_FIXED_PATH
-        if os.path.exists(planner_mod.DOMAIN_FIXED_PATH)
-        else planner_mod.DOMAIN_PATH
-    )
-    with open(domain_path) as f:
+    with open(_active_domain_path()) as f:
         domain_text = f.read()
 
     # Capture both cameras. Unannotated: this is a general "what's going on"
     # question, not a heading/grasp decision, and no single target class applies.
     front = cam_mod.capture_still()
-    ext = cam_mod.capture_droidcam_still(target_class_yolo="", annotate=False)
-    labeled_images: list[tuple[str, str]] = [
-        ("pi_camera", front["frame"]),
-        ("droidcam", ext["frame"]),
-    ]
+    ext = cam_mod.capture_simpleipcamera_still(target_class_yolo="", annotate=False)
 
     from mcp_robot.recorder import get_recorder
     get_recorder().log_thought(
         sub_observation, sub_action,
-        {"pi_camera": front["frame"], "droidcam": ext["frame"]},
+        {"pi_camera": front["frame"], "simpleipcamera": ext["frame"]},
     )
 
-    prompt = (
-        f"{vision.CONSULT_DOMAIN_QUESTION}\n\n"
-        f"CONTEXT: {failure_context}\n"
-        f"CURRENT PLAN: {_format_plan(_last_plan)}\n"
-        "Attached are the images from the robot's view and the external camera. "
-        "Both were considered, alongside the following PDDL domain:\n\n"
-        f"{domain_text}\n\n"
-        "...and the following PDDL problem (this task's objects/init/goal):\n\n"
-        f"{_format_problem(_last_problem_pddl)}"
+    # neurosymbolic_counselor's images are raw bytes (camera frames here are
+    # base64, per capture_still/capture_simpleipcamera_still's return shape).
+    images = [
+        ("pi_camera", base64.b64decode(front["frame"])),
+        ("simpleipcamera", base64.b64decode(ext["frame"])),
+    ]
+
+    def _ask(prompt: str, imgs: list[tuple[str, bytes]]) -> str:
+        # vision.ask_with_images expects base64 — re-encode at this boundary
+        # rather than changing vision.py's long-standing convention.
+        b64_images = [(label, base64.b64encode(data).decode()) for label, data in imgs]
+        return vision.ask_with_images(prompt, b64_images)
+
+    from neurosymbolic_counselor import consult
+    result = consult(
+        domain_text=domain_text,
+        problem_text=_last_problem_pddl,
+        plan=_last_plan,
+        failure_context=failure_context,
+        images=images,
+        ask=_ask,
     )
 
-    vqa_response = vision.ask_with_images(prompt, labeled_images)
-
-    # Extract a new domain from the response if present
-    new_domain = _extract_pddl_domain(vqa_response)
-    domain_updated = False
-    if new_domain:
-        with open(planner_mod.DOMAIN_FIXED_PATH, "w") as f:
-            f.write(new_domain)
-        domain_updated = True
+    if result.domain_updated:
+        with open(DOMAIN_FIXED_PATH, "w") as f:
+            f.write(result.new_domain)
         log.info(
             "consult_vqa_for_pddl_domain: new domain saved to %s (original %s untouched)",
-            planner_mod.DOMAIN_FIXED_PATH, planner_mod.DOMAIN_PATH,
+            DOMAIN_FIXED_PATH, DOMAIN_PATH,
         )
 
-    # Extract a new problem from the response if present. Unlike the domain,
-    # this is never written to disk — it only feeds the replan below and is
-    # returned so the caller can pass it to plan_pddl itself afterward.
-    new_problem = _extract_pddl_problem(vqa_response)
-    problem_updated = new_problem is not None
-
-    # Auto-replan against whatever is now active: the just-written domain (if
-    # any — planner.solve() re-reads DOMAIN_FIXED_PATH/DOMAIN_PATH from disk on
-    # every call, so it picks up the write above for free) and the VQA-refined
-    # problem if one came back, else whatever plan_pddl was last called with.
-    # This is what makes the fix actually actionable — without it,
-    # domain_updated/new_domain are inert facts the caller has to notice and
-    # act on unprompted, which is the exact failure this tool exists to close.
-    replan_problem = new_problem if new_problem else _last_problem_pddl
-    updated_plan: list[str] | None = None
-    plan_error: str | None = None
-    if replan_problem is not None:
+    if result.updated_plan is not None:
         log.info(
-            "consult_vqa_for_pddl_domain: auto-replanning (problem source: %s)",
-            "VQA-refined problem" if new_problem else "last plan_pddl call",
+            "consult_vqa_for_pddl_domain: auto-replanned (problem source: %s)",
+            "VQA-refined problem" if result.problem_updated else "last plan_pddl call",
         )
-        replan_result = plan_pddl(replan_problem)
-        if replan_result["ok"]:
-            updated_plan = replan_result["plan"]
-        else:
-            plan_error = replan_result["error"]
-            log.info("consult_vqa_for_pddl_domain: auto-replan failed: %s", plan_error)
+        _last_plan = result.updated_plan
+        if result.problem_updated:
+            _last_problem_pddl = result.new_problem
+    elif result.plan_error is not None:
+        log.info("consult_vqa_for_pddl_domain: auto-replan failed: %s", result.plan_error)
     else:
         log.info("consult_vqa_for_pddl_domain: no problem_pddl on record — auto-replan skipped")
 
-    result = {
-        "directive": _consult_directive(updated_plan, plan_error, replan_problem is None),
-        "updated_plan": updated_plan,
-        "vqa_response": vqa_response,
-        "domain_updated": domain_updated,
-        "new_domain": new_domain,
-        "problem_updated": problem_updated,
-        "new_problem": new_problem,
+    response = {
+        "directive": result.directive,
+        "updated_plan": result.updated_plan,
+        "vqa_response": result.model_response,
+        "domain_updated": result.domain_updated,
+        "new_domain": result.new_domain,
+        "problem_updated": result.problem_updated,
+        "new_problem": result.new_problem,
     }
-    if plan_error is not None:
-        result["plan_error"] = plan_error
-    return _ok(result)
+    if result.plan_error is not None:
+        response["plan_error"] = result.plan_error
+    return _ok(response)
 
 
 # ── background streaming ──────────────────────────────────────────────────────
@@ -2797,25 +2774,25 @@ def _run_pi_camera() -> None:
             break
 
 
-def _run_droidcam() -> None:
+def _run_simpleipcamera() -> None:
     reported = [False]
 
     def _on_frame(frame: str, ts: float) -> None:
         if not reported[0]:
             reported[0] = True
-            _log_init_progress("droidcam", "done")
-        viz.log_droidcam_frame(frame, ts)
+            _log_init_progress("simpleipcamera", "done")
+        viz.log_simpleipcamera_frame(frame, ts)
 
     backoff = 1.0
     while not _stop.is_set():
         try:
-            cam_mod.stream_droidcam(stop_event=_stop, on_frame=_on_frame)
+            cam_mod.stream_simpleipcamera(stop_event=_stop, on_frame=_on_frame)
         except Exception as exc:
             if not reported[0]:
-                _log_init_progress("droidcam", "failed")
-            log.warning("DroidCam stream ended: %s", exc)
+                _log_init_progress("simpleipcamera", "failed")
+            log.warning("SimpleIPCamera stream ended: %s", exc)
         if not _stop.is_set():
-            log.info("DroidCam reconnecting in %.0fs...", backoff)
+            log.info("SimpleIPCamera reconnecting in %.0fs...", backoff)
             _stop.wait(backoff)
             backoff = min(backoff * 2, 30.0)
         else:
@@ -2834,7 +2811,7 @@ def _start_background_streams() -> None:
 
     for target, name in [
         (_run_pi_camera,  "pi-camera"),
-        (_run_droidcam,   "droidcam"),
+        (_run_simpleipcamera,   "simpleipcamera"),
     ]:
         threading.Thread(target=target, name=name, daemon=True).start()
 

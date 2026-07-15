@@ -558,7 +558,7 @@ def check_grasp_readiness(
     """Check whether the scene is ready for the gripper to close.
 
     Args:
-        bgr: BGR image from the external (DroidCam) camera.
+        bgr: BGR image from the external (SimpleIPCamera) camera.
         target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS).
             No default — every caller must state what it is looking for.
         target_class_free_text: free-text description for Gemini Flash fallback

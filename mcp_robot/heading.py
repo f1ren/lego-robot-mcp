@@ -1,5 +1,5 @@
 """
-Detect the robot's forward heading in external (DroidCam) frames and overlay
+Detect the robot's forward heading in external (SimpleIPCamera) frames and overlay
 a green arrow showing the direction the gripper is pointing.
 
 The robot has a yellow LEGO body whose chassis presents many long parallel
@@ -204,7 +204,9 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     # Length-weighted histogram of line angles in [0, 180).
     angle_hist = np.zeros(180, dtype=np.float32)
     for L in lines:
-        x1, y1, x2, y2 = L[0]
+        # cv2.HoughLinesP returns shape (N, 1, 4) on OpenCV 4.x but (N, 4) on
+        # 5.x — reshape(-1) extracts the 4 coords under either convention.
+        x1, y1, x2, y2 = L.reshape(-1)
         ldx, ldy = x2 - x1, y2 - y1
         length = math.hypot(ldx, ldy)
         ang = int(math.degrees(math.atan2(ldy, ldx))) % 180
@@ -254,10 +256,22 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         black_mask, cv2.MORPH_CLOSE, np.ones((19, 19), np.uint8)
     )
 
+    # Texture (Canny edge density) within the gripper ROI. The real gripper
+    # is a mechanical assembly (jaws, chain links) with lots of internal
+    # edges; the robot's own cast shadow on the floor is dark enough to pass
+    # the black-mask threshold above but is a smooth gradient with almost no
+    # internal edges. Used below to down-weight shadow blobs that would
+    # otherwise win on area alone.
+    gray_gripper_roi = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    gripper_edges = cv2.Canny(gray_gripper_roi, 60, 150)
+
     # Pick the black blob that best represents the gripper. Score by
-    # area × |projection onto body long axis| so that off-axis noise (cables,
-    # shadows perpendicular to the forward direction) cannot outscore the
-    # actual gripper which sits at one end of the body's long axis.
+    # area × |projection onto body long axis| × edge density so that
+    # off-axis noise (cables, shadows perpendicular to the forward
+    # direction) and large-but-smooth blobs (cast shadows, which can
+    # otherwise out-area the real gripper) cannot outscore the actual
+    # gripper, which sits at one end of the body's long axis and has
+    # visible mechanical texture.
     contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
     bcx, bcy = body_center
@@ -274,7 +288,11 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         cx_full, cy_full = gc[0] + x0, gc[1] + y0
         ddx, ddy = cx_full - bcx, cy_full - bcy
         along = abs(ddx * axis[0] + ddy * axis[1])
-        score = area * along
+        c_mask = np.zeros(black_mask.shape, dtype=np.uint8)
+        cv2.drawContours(c_mask, [c], -1, 255, thickness=cv2.FILLED)
+        edge_px = cv2.countNonZero(cv2.bitwise_and(gripper_edges, c_mask))
+        texture = edge_px / area
+        score = area * along * texture
         if score > best_score:
             best_score = score
             arrow_anchor = (cx_full, cy_full)

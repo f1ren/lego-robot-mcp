@@ -24,35 +24,14 @@ log = logging.getLogger(__name__)
 
 _CAMERA_LABELS = {
     "pi_camera": "front cam — front view (robot's eye, mounted on the arm, looking forward from the gripper)",
-    "droidcam":  "external cam — third-person view (overhead or side angle showing the whole robot)",
+    "simpleipcamera":  "external cam — third-person view (overhead or side angle showing the whole robot)",
 }
 
-# Question half of the consult_vqa_for_pddl_domain prompt (server.py). Kept
-# free of scenario-specific vocabulary — do not hardcode words that hint at
-# any particular fix — so the same wording generalizes across unrelated
-# failures instead of only working on the case it was tuned against. Iterate
-# on this against saved images with tests/vqa/pddl_consult_test.py (imports
-# this same constant) before changing it here — both consumers share this
-# one string so they can't drift apart.
-CONSULT_DOMAIN_QUESTION = (
-    "QUESTION: First, describe everything visible in both images in full — "
-    "every object, surface, marking, and condition — without pre-filtering for "
-    "what seems relevant to the task. The CONTEXT below is the operator's "
-    "working theory of what went wrong; it may be incomplete, so verify it "
-    "against what you actually see rather than assuming it is complete or "
-    "correct. Then, grounded strictly in your description, explain what seems "
-    "to be the problem. Do not invent an action that merely restates a verb "
-    "from the task "
-    "— any gap you propose must be traceable to something specific you "
-    "pointed out. Both a PDDL DOMAIN (general actions/predicates, reusable "
-    "across tasks) and a PDDL PROBLEM (this task's specific objects, initial "
-    "state, and goal) are attached below — decide which one the gap actually "
-    "belongs in. A missing object, wrong adjacency, or unreachable goal is a "
-    "problem-level fix; a missing action or predicate is a domain-level fix. "
-    "What are the PDDL components involved? Is there anything missing from "
-    "the formalization? If so, suggest a fixed domain and/or a fixed problem "
-    "— include only the block(s) that actually need to change."
-)
+# The consult_vqa_for_pddl_domain question prompt used to live here as
+# CONSULT_DOMAIN_QUESTION; it's now neurosymbolic_counselor.counselor's
+# DEFAULT_QUESTION (github.com/f1ren/NAPC) so there's
+# one canonical copy instead of two that can drift. server.py and
+# tests/vqa/pddl_consult_test.py both import it from there.
 
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
@@ -842,10 +821,18 @@ def locate_object_vlm(
     try:
         # Gemini occasionally emits "x"/"y" instead of the requested "x1"/"y1"
         # for the top-left corner — fall back to those before giving up.
-        x1 = int(data.get("x1", data.get("x")) * w)
-        y1 = int(data.get("y1", data.get("y")) * h)
-        x2 = int(data["x2"] * w)
-        y2 = int(data["y2"] * h)
+        raw_x1 = data.get("x1", data.get("x"))
+        raw_y1 = data.get("y1", data.get("y"))
+        raw_x2 = data["x2"]
+        raw_y2 = data["y2"]
+        # Gemini normally normalizes coords to [0,1], but occasionally emits
+        # one axis already in pixel space (e.g. x1=0.49 alongside y1=194) — a
+        # value > 1 can't be a normalized fraction, so treat it as already
+        # being in pixel space instead of scaling it again.
+        x1 = int(raw_x1) if raw_x1 > 1 else int(raw_x1 * w)
+        y1 = int(raw_y1) if raw_y1 > 1 else int(raw_y1 * h)
+        x2 = int(raw_x2) if raw_x2 > 1 else int(raw_x2 * w)
+        y2 = int(raw_y2) if raw_y2 > 1 else int(raw_y2 * h)
     except (KeyError, TypeError) as exc:
         log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
         raise VQAResponseParseError(f"missing bbox fields ({exc})", text) from exc

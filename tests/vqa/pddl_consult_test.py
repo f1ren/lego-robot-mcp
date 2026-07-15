@@ -3,18 +3,26 @@
 Standalone simulator for the consult_vqa_for_pddl_domain MCP tool.
 
 Lets you replay the exact prompt/image/domain combination sent to Gemini
-without needing a connected robot. QUESTION_TEXT is imported from
-mcp_robot.vision.CONSULT_DOMAIN_QUESTION — the same constant the production
-tool uses — so edit it there and re-run this script until the model actually
-spots the missing domain element; the fix then applies to both at once
-(the MCP server hot-reloads on code changes).
+without needing a connected robot. The question half of the prompt
+(DEFAULT_QUESTION) and the extraction/formatting helpers are imported from
+neurosymbolic_counselor (github.com/f1ren/NAPC) — the
+same package server.py's consult_vqa_for_pddl_domain calls into — so there's
+one canonical copy instead of two that can drift.
+
+What's still worth testing from *this* repo specifically: this script calls
+vision.ask_with_images(), lego-robot-mcp's real backend (Gemini quota-fallback
+switching, Ollama fallback, config.py-driven backend selection) — behavior
+the new package's own generic scripts/replay_consult.py knows nothing about
+— against this project's real fixture images.
 
 The default images and --context reproduce a real failed call (2026-07-02
 10:59:25): robot facing a wall-mounted light switch at close range, blue cup
 still not in view after a full 360° scan_for_target sweep found nothing.
 Gemini's reply invented a "toggle-lights" action instead of flagging the
 real gap (no action to reposition/search elsewhere once a full scan comes up
-empty) — use this script to iterate on the prompt until it does.
+empty) — use this script to iterate on the prompt until it does. To actually
+edit the wording, do it in NAPC's counselor.py and
+reinstall (pip install -e, or -U if installed from git) before re-running.
 
 Usage:
   GEMINI_API_KEY=<key> python3 tests/vqa/pddl_consult_test.py
@@ -22,11 +30,11 @@ Usage:
 
   # Swap in a different failure scenario
   python3 tests/vqa/pddl_consult_test.py \\
-      --front /path/to/pi_camera.jpg --external /path/to/droidcam.jpg \\
+      --front /path/to/pi_camera.jpg --external /path/to/simpleipcamera.jpg \\
       --context "The gripper closed on empty air; the cup was 5cm to the left of center." \\
       --domain pddl/robot_domain.pddl.bak \\
       --plan "(navigate loc-start loc-table)" --plan "(open-gripper)" \\
-      --plan "(lower-arm)" --plan "(pick-up cup loc-table)"
+      --plan "(lower-arm)" --plan "(grasp cup loc-table)"
 
   # Write out the suggested domain and/or problem if the response contains them
   python3 tests/vqa/pddl_consult_test.py \\
@@ -42,16 +50,14 @@ Usage:
   # response can name the right concept while describing the scene and still
   # ship a fix about something unrelated. It's a substring tally only (not
   # sent to the model) — keep it experiment-local rather than encoding it
-  # into CONSULT_DOMAIN_QUESTION, which should stay general.
+  # into DEFAULT_QUESTION, which should stay general.
   python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
 """
 from __future__ import annotations
 
 import argparse
-import os
-import re
+import base64
 import sys
-import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent
@@ -61,13 +67,11 @@ FIXTURES  = Path(__file__).parent.parent / "fixtures" / "pddl_consult"
 # run — typically the main checkout, not this worktree. Running this file
 # directly (rather than via -m or pytest, both of which put the worktree root
 # on sys.path automatically) would otherwise silently import the main
-# checkout's mcp_robot instead of this one. Force it explicitly so editing
-# CONSULT_DOMAIN_QUESTION in *this* worktree is what actually gets picked up.
+# checkout's mcp_robot instead of this one. Force it explicitly.
 sys.path.insert(0, str(REPO_ROOT))
-from mcp_robot.vision import _CAMERA_LABELS, CONSULT_DOMAIN_QUESTION as QUESTION_TEXT  # noqa: E402
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-robotics-er-1.6-preview")
+from mcp_robot import config, vision  # noqa: E402
+from neurosymbolic_counselor.counselor import DEFAULT_QUESTION, build_prompt  # noqa: E402
+from neurosymbolic_counselor.extraction import extract_pddl_domain, extract_pddl_problem  # noqa: E402
 
 DEFAULT_DOMAIN   = REPO_ROOT / "pddl" / "robot_domain.pddl"
 DEFAULT_FRONT    = FIXTURES / "pi_camera.jpg"
@@ -95,73 +99,16 @@ DEFAULT_PROBLEM = (
 )
 
 
-def format_plan(plan: list[str] | None) -> str:
-    """Copied verbatim from mcp_robot/server.py::_format_plan."""
-    if plan is None:
-        return "plan_pddl has not been called yet this session."
-    if not plan:
-        return "(empty) — the last plan_pddl call found no solution."
-    return ", ".join(plan)
-
-
-def format_problem(problem_pddl: str | None) -> str:
-    """Copied verbatim from mcp_robot/server.py::_format_problem."""
-    if problem_pddl is None:
-        return "plan_pddl has not been called yet this session — no problem PDDL to show."
-    return problem_pddl
-
-
-def build_prompt(
-    question: str, context: str, domain_text: str, problem_text: str | None, plan: list[str] | None,
-) -> str:
-    """Mirrors the prompt assembly in consult_vqa_for_pddl_domain (server.py)."""
-    return (
-        f"{question}\n\n"
-        f"CONTEXT: {context}\n"
-        f"CURRENT PLAN: {format_plan(plan)}\n"
-        "Attached are the images from the robot's view and the external camera. "
-        "Both were considered, alongside the following PDDL domain:\n\n"
-        f"{domain_text}\n\n"
-        "...and the following PDDL problem (this task's objects/init/goal):\n\n"
-        f"{format_problem(problem_text)}"
-    )
-
-
-def extract_pddl_block(text: str, keyword: str) -> str | None:
-    """Copied verbatim from mcp_robot/server.py::_extract_pddl_block."""
-    m = re.search(rf'\(define\s+\({keyword}\b', text, re.IGNORECASE)
-    if not m:
-        return None
-    start = m.start()
-    depth = 0
-    for i, ch in enumerate(text[start:], start=start):
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
-
-
-def extract_pddl_domain(text: str) -> str | None:
-    return extract_pddl_block(text, "domain")
-
-
-def extract_pddl_problem(text: str) -> str | None:
-    return extract_pddl_block(text, "problem")
-
-
 def load_image(path: Path) -> bytes:
     if not path.exists():
         sys.exit(f"Image not found: {path}")
     return path.read_bytes()
 
 
-def print_call_summary(model: str, domain_path: Path, images: list[tuple[str, Path]], prompt: str) -> None:
+def print_call_summary(domain_path: Path, images: list[tuple[str, Path]], prompt: str) -> None:
     print("=" * 70)
-    print(f"MODEL : {model}")
-    print(f"DOMAIN: {domain_path}")
+    print(f"BACKEND: {config.VISION_BACKEND}  (GEMINI_MODEL={config.GEMINI_MODEL})")
+    print(f"DOMAIN : {domain_path}")
     print("IMAGES:")
     for label, path in images:
         print(f"  [{label}] {path}  ({path.stat().st_size} bytes)")
@@ -173,55 +120,23 @@ def print_call_summary(model: str, domain_path: Path, images: list[tuple[str, Pa
     print()
 
 
-def call_gemini(model: str, prompt: str, labeled_images: list[tuple[str, bytes]]) -> str:
-    from google.genai import types
-
-    from google import genai
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    parts: list = [types.Part.from_text(text=prompt)]
-    for label, image_bytes in labeled_images:
-        desc = _CAMERA_LABELS.get(label, label)
-        parts.append(types.Part.from_text(text=f"\n=== {desc} ==="))
-        parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
-
-    max_attempts = 4
-    delay = 2.0
-    for attempt in range(1, max_attempts + 1):
-        print(f"Calling Gemini (attempt {attempt}/{max_attempts})... ", end="", flush=True)
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=[types.Content(role="user", parts=parts)],
-            )
-            print("done\n")
-            return (resp.text or "").strip()
-        except Exception as exc:
-            print(f"failed: {exc}")
-            if attempt == max_attempts:
-                sys.exit(f"All {max_attempts} attempts exhausted.")
-            print(f"Retrying in {delay:.0f}s...")
-            time.sleep(delay)
-            delay *= 2
-    raise AssertionError("unreachable")
-
-
 def run_trial(
     index: int,
     total: int,
-    model: str,
     prompt: str,
     labeled_bytes: list[tuple[str, bytes]],
     expect: list[str] | None,
     save_domain: str | None,
     save_problem: str | None,
 ) -> tuple[bool, bool | None]:
-    """Run one Gemini call; return (domain_or_problem_block_found, expect_hit_or_None)."""
+    """Run one vision.ask_with_images call; return (domain_or_problem_block_found, expect_hit_or_None)."""
     if total > 1:
         print(f"\n{'=' * 70}\nTRIAL {index}/{total}\n{'=' * 70}")
 
-    response = call_gemini(model, prompt, labeled_bytes)
+    b64_images = [(label, base64.b64encode(data).decode()) for label, data in labeled_bytes]
+    print("Calling vision.ask_with_images... ", end="", flush=True)
+    response = vision.ask_with_images(prompt, b64_images)
+    print("done\n")
 
     print("--- RESPONSE ---")
     print(response)
@@ -273,7 +188,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Simulate consult_vqa_for_pddl_domain against saved images")
     ap.add_argument("--domain",   default=str(DEFAULT_DOMAIN), help="path to a robot_domain.pddl file")
     ap.add_argument("--front",    default=str(DEFAULT_FRONT), help="pi_camera (front) image")
-    ap.add_argument("--external", default=str(DEFAULT_EXTERNAL), help="droidcam (external) image")
+    ap.add_argument("--external", default=str(DEFAULT_EXTERNAL), help="SimpleIPCamera (external) image")
     ap.add_argument("--context",  default=DEFAULT_CONTEXT, help="failure_context text")
     ap.add_argument("--plan", action="append", metavar="ACTION",
                      help="one grounded PDDL action from the plan being replayed, e.g. "
@@ -288,7 +203,7 @@ def main() -> None:
     ap.add_argument("--save-domain", metavar="PATH", help="if a response contains a new PDDL domain, write it here")
     ap.add_argument("--save-problem", metavar="PATH", help="if a response contains a new PDDL problem, write it here")
     ap.add_argument("--repeat", type=int, default=1, metavar="N",
-                     help="call Gemini N times with the identical prompt/images and tally results")
+                     help="call the model N times with the identical prompt/images and tally results")
     ap.add_argument("--expect", action="append", metavar="SUBSTRING",
                      help="case-insensitive substring to look for in the SUGGESTED PDDL DOMAIN/PROBLEM "
                           "blocks only (not the surrounding prose) — the model can name the right concept "
@@ -297,8 +212,8 @@ def main() -> None:
                           "match. Purely a local grading aid — never sent to the model.")
     args = ap.parse_args()
 
-    if not GEMINI_API_KEY:
-        sys.exit("GEMINI_API_KEY env var is not set")
+    if not config.GEMINI_API_KEY and config.VISION_BACKEND != "ollama":
+        sys.exit("GEMINI_API_KEY env var is not set (or set VISION_BACKEND=ollama to use a local model instead)")
     if args.repeat < 1:
         sys.exit("--repeat must be >= 1")
 
@@ -309,14 +224,14 @@ def main() -> None:
     problem_text = args.problem or None
 
     front_path, external_path = Path(args.front), Path(args.external)
-    images = [("pi_camera", front_path), ("droidcam", external_path)]
+    images = [("pi_camera", front_path), ("simpleipcamera", external_path)]
     labeled_bytes = [(label, load_image(path)) for label, path in images]
 
-    prompt = build_prompt(QUESTION_TEXT, args.context, domain_text, problem_text, args.plan)
-    print_call_summary(GEMINI_MODEL, domain_path, images, prompt)
+    prompt = build_prompt(DEFAULT_QUESTION, args.context, domain_text, problem_text, args.plan)
+    print_call_summary(domain_path, images, prompt)
 
     results = [
-        run_trial(i, args.repeat, GEMINI_MODEL, prompt, labeled_bytes, args.expect,
+        run_trial(i, args.repeat, prompt, labeled_bytes, args.expect,
                   args.save_domain, args.save_problem)
         for i in range(1, args.repeat + 1)
     ]
