@@ -155,3 +155,61 @@ def test_locate_object_vlm_handles_mixed_normalized_and_pixel_coords(fake_gemini
     assert result is not None
     bbox, *_ = result
     assert bbox == (20, 20, 100, 60)  # x scaled by w=200, y used as-is (already pixels)
+
+
+# ── locate_object_vlm fatal response-parsing errors ──────────────────────────
+#
+# These must raise vision.VQAResponseParseError specifically (a VQAFailure
+# subclass), not a plain RuntimeError and not silently behave like "not
+# found" (None) — a malformed reply is not evidence the object is absent.
+
+
+def test_locate_object_vlm_no_json_raises_parse_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    fake_gemini_client(["Sorry, I cannot help with that request."])
+
+    with pytest.raises(vision.VQAResponseParseError, match="no JSON object"):
+        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+
+def test_locate_object_vlm_invalid_json_raises_parse_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    fake_gemini_client(['{"found": true, "x1": 0.1,,,}'])
+
+    with pytest.raises(vision.VQAResponseParseError, match="JSON decode error"):
+        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+
+def test_locate_object_vlm_missing_bbox_fields_raises_parse_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    payload = json.dumps({"found": True, "confidence": 0.97, "note": "blue cup"})
+    fake_gemini_client([payload])
+
+    with pytest.raises(vision.VQAResponseParseError, match="missing bbox fields"):
+        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+
+def test_locate_object_vlm_degenerate_bbox_raises_parse_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    payload = json.dumps({
+        "found": True, "x1": 0.5, "y1": 0.5, "x2": 0.5, "y2": 0.9,  # x2 == x1
+        "hsv_hue_lo": 100, "hsv_hue_hi": 130, "hsv_sat_min": 50, "hsv_val_min": 60,
+        "approx_area_frac": 0.08, "confidence": 0.97, "note": "blue cup on floor",
+    })
+    fake_gemini_client([payload])
+
+    with pytest.raises(vision.VQAResponseParseError, match="degenerate bbox"):
+        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+
+# ── describe_action_video fatal backend failures ──────────────────────────────
+
+
+def test_describe_action_video_raises_vqa_failure_on_gemini_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "VISION_BACKEND", "gemini")
+    monkeypatch.setattr(vision, "_has_motion_labeled", lambda labeled: True)
+    fake_gemini_client([Exception("400 Bad Request: invalid argument")])
+
+    frame = base64.b64encode(b"not-a-real-jpeg").decode()
+    with pytest.raises(vision.VQAFailure, match="Gemini vision analysis failed"):
+        vision.describe_action_video("drive forward", "move toward cup", [("pi_camera", frame)])

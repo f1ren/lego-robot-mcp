@@ -493,6 +493,11 @@ def describe_action_video(
                             Falls back to labeled_frames if not provided.
 
     Returns a two-line "Verdict: …\\nChanges: …" string, or "" if no frames.
+
+    Raises VQAFailure if every configured backend fails to produce a
+    response — callers must not fold that into change_description as if it
+    were a real assessment; report it to the MCP caller as a failure so the
+    action can be recalled or the failure investigated.
     """
     if not labeled_frames:
         return ""
@@ -536,15 +541,15 @@ def describe_action_video(
         try:
             return _gemini_describe_video(action, expected, labeled_frames, frame_paths, context=context)
         except Exception as exc:
-            log.warning("Gemini describe_action_video failed: %s", exc)
-            return f"(vision analysis failed: {exc})"
+            log.error("Gemini describe_action_video failed: %s", exc)
+            raise VQAFailure(f"Gemini vision analysis failed: {exc}") from exc
 
     if backend == "ollama":
         try:
             return _ollama_describe_video(action, expected, labeled_frames, frame_paths, context=context)
         except Exception as exc:
-            log.warning("Ollama describe_action_video failed: %s", exc)
-            return f"(vision analysis failed: {exc})"
+            log.error("Ollama describe_action_video failed: %s", exc)
+            raise VQAFailure(f"Ollama vision analysis failed: {exc}") from exc
 
     # "auto": Gemini first, Ollama fallback
     if config.GEMINI_API_KEY:
@@ -556,8 +561,8 @@ def describe_action_video(
     try:
         return _ollama_describe_video(action, expected, labeled_frames, frame_paths, context=context)
     except Exception as exc:
-        log.warning("Ollama video fallback failed: %s", exc)
-        return f"(vision analysis failed: {exc})"
+        log.error("Ollama video fallback failed: %s", exc)
+        raise VQAFailure(f"vision analysis failed on all backends: {exc}") from exc
 
 
 def ask_with_images(
@@ -669,6 +674,44 @@ class LowConfidenceDetection(Exception):
         )
 
 
+class VQAFailure(RuntimeError):
+    """A VQA backend call (Gemini or Ollama) failed to produce a usable
+    result — no response was obtained at all, or every configured backend
+    was exhausted.
+
+    Distinct from a normal VQA *result* (a description, a verdict, "not
+    found", low confidence): here the underlying question — what does the
+    camera show, is the object present — is simply unanswered, not answered
+    negatively. Callers must report this to the MCP caller as a failure
+    (e.g. a dedicated error field, not folded into change_description or a
+    "not found" message) so the operator knows to recall the action or
+    investigate/fix the failure, rather than acting on it as if it were
+    real content.
+    """
+
+
+class VQAResponseParseError(VQAFailure):
+    """Gemini returned a response, but locate_object_vlm could not parse it
+    into the structure it needs — no JSON found, invalid JSON, missing
+    required fields, or degenerate (nonsensical) values.
+
+    A subclass of VQAFailure: the object may well be present even though
+    nothing usable came back, so this must not be treated the same as
+    "object not found".
+    """
+
+    def __init__(self, detail: str, raw_response: str = ""):
+        self.detail = detail
+        self.raw_response = raw_response
+        msg = (
+            f"Gemini's response could not be parsed ({detail}) — this is a "
+            "parsing failure, not evidence the object is absent."
+        )
+        if raw_response:
+            msg += f" Raw response: {raw_response!r}"
+        super().__init__(msg)
+
+
 def locate_object_vlm(
     bgr: np.ndarray,
     description: str,
@@ -684,7 +727,11 @@ def locate_object_vlm(
 
     Returns None if the object is not found at all. Raises LowConfidenceDetection
     if a candidate was found but confidence is at or below
-    _LOCATE_CONFIDENCE_THRESHOLD. Raises RuntimeError on API/parsing failures.
+    _LOCATE_CONFIDENCE_THRESHOLD. Raises plain RuntimeError on API/config
+    failures (no response obtained at all), or VQAResponseParseError when a
+    response was obtained but couldn't be parsed into a usable result —
+    callers must not treat the latter as "not found", since the object may
+    still be present.
     """
     import json
     import re
@@ -759,13 +806,13 @@ def locate_object_vlm(
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         log.error("locate_object_vlm: no JSON found in response: %s", text)
-        raise RuntimeError(f"locate_object_vlm: Gemini returned no JSON — raw: {text!r}")
+        raise VQAResponseParseError("no JSON object found in Gemini's reply", text)
 
     try:
         data = json.loads(m.group())
     except json.JSONDecodeError as exc:
         log.error("locate_object_vlm: JSON parse error: %s — raw: %s", exc, text)
-        raise RuntimeError(f"locate_object_vlm: JSON parse error: {exc} — raw: {text!r}") from exc
+        raise VQAResponseParseError(f"JSON decode error: {exc}", text) from exc
 
     if not data.get("found", True):
         log.info("locate_object_vlm: '%s' not found in frame", description)
@@ -788,7 +835,7 @@ def locate_object_vlm(
         y2 = int(raw_y2) if raw_y2 > 1 else int(raw_y2 * h)
     except (KeyError, TypeError) as exc:
         log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
-        raise RuntimeError(f"locate_object_vlm: missing bbox fields in response: {data}") from exc
+        raise VQAResponseParseError(f"missing bbox fields ({exc})", text) from exc
 
     x1 = max(0, min(w - 1, x1))
     y1 = max(0, min(h - 1, y1))
@@ -796,7 +843,7 @@ def locate_object_vlm(
     y2 = max(0, min(h - 1, y2))
     if x2 <= x1 or y2 <= y1:
         log.error("locate_object_vlm: degenerate bbox [%d,%d,%d,%d] — ignoring", x1, y1, x2, y2)
-        raise RuntimeError(f"locate_object_vlm: degenerate bbox [{x1},{y1},{x2},{y2}] from response: {data}")
+        raise VQAResponseParseError(f"degenerate bbox [{x1},{y1},{x2},{y2}]", text)
 
     hue_lo  = int(np.clip(data.get("hsv_hue_lo",   0), 0, 179))
     hue_hi  = int(np.clip(data.get("hsv_hue_hi", 179), 0, 179))
@@ -1006,6 +1053,9 @@ def locate_object_hybrid(
 
     Raises LowConfidenceDetection (propagated from locate_object_vlm) if a
     candidate was found but below the confidence threshold required to act.
+    Raises VQAResponseParseError (also propagated) if Gemini's response
+    could not be parsed — callers must not treat that the same as "not
+    found".
     """
     result = locate_object_vlm(bgr, description)
     if result is None:

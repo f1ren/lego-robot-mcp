@@ -190,6 +190,40 @@ class TestGraspReadinessCup(unittest.TestCase):
             self.assertIn(key, d, f"Missing key '{key}' in to_dict()")
 
 
+class TestGraspReadinessVQAParseError(unittest.TestCase):
+    """
+    A malformed/unparseable Gemini reply must be reported as a distinct VQA
+    parsing failure, not silently folded into "object not found" — unlike a
+    genuine miss, a parse failure is not evidence the object is absent (see
+    vision.VQAResponseParseError, grasp_readiness._vlm_detect).
+
+    YOLO and _vlm_detect are both stubbed so this is deterministic/offline:
+    YOLO returns no candidates (forcing the VLM fallback path), and
+    _vlm_detect raises the exact exception locate_object_vlm raises on a
+    malformed Gemini reply.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        grasp_mod._load_model()
+        cls._grasp_mod = grasp_mod
+        cls._bgr = _load(CUP_IMG)
+
+    def test_parse_error_reported_distinctly_from_not_found(self):
+        from mcp_robot.vision import VQAResponseParseError
+        parse_exc = VQAResponseParseError("JSON decode error: bad", "{not json}")
+        with mock.patch.object(self._grasp_mod, "_yolo_detect", return_value=[]), \
+             mock.patch.object(self._grasp_mod, "_vlm_detect", side_effect=parse_exc):
+            result, heading, obj = self._grasp_mod._compute_readiness(
+                self._bgr, target_class_yolo="cup", target_class_free_text="blue cup",
+            )
+        self.assertFalse(result.ready)
+        self.assertIn("parsing failure", result.reason)
+        self.assertNotIn("did not find", result.reason)
+        self.assertIn("VQA parsing failure", result.action)
+
+
 class TestGraspReadinessCupTooFarRegression(unittest.TestCase):
     """
     Regression for a real false positive (output/logs/mcp_server.log,
