@@ -298,11 +298,22 @@ def _capture_droidcam_background(stop_event: threading.Event) -> None:
 def _apply_optical_flow_per_camera(
     annotated: list[tuple[float, str, str]],
     raw: list[tuple[float, str, str]],
+    vqa_cameras: set[str] | None = None,
 ) -> list[tuple[float, str, str]]:
     """Add optical flow red arrows to annotated frames, processed per-camera.
 
     Flow is computed from raw frames (no heading-arrow overlay) so the static
     arrow pixels don't produce spurious flow vectors.
+
+    vqa_cameras: if given, skip the (CPU-heavy, dense) flow computation for
+    any camera label not in this set — those frames are never sent to the
+    vision model, so computing flow for them is pure discarded work. This
+    matters beyond just CPU cost: on this machine the Pi camera's frame
+    source queues frames upstream when this process's GIL is busy, so
+    holding the GIL here for cameras nobody looks at was directly stalling
+    the Pi camera's background read thread for multiple seconds per action
+    (see 2026-07-14 pi_camera/droidcam latency investigation). None means
+    all cameras (default, unchanged behavior).
     """
     cam_indices: dict[str, list[int]] = {}
     for i, (_, label, _) in enumerate(annotated):
@@ -314,6 +325,8 @@ def _apply_optical_flow_per_camera(
 
     result = list(annotated)
     for label, indices in cam_indices.items():
+        if vqa_cameras is not None and label not in vqa_cameras:
+            continue
         ann_b64s = [annotated[i][2] for i in indices]
         flow_b64s = heading.annotate_flow_sequence_jpeg_b64(ann_b64s, cam_raw_b64.get(label))
         for idx, new_b64 in zip(indices, flow_b64s):
@@ -413,7 +426,7 @@ def _with_change_analysis(
 
     annotated_video.sort(key=lambda x: x[0])
     raw_video.sort(key=lambda x: x[0])
-    annotated_video = _apply_optical_flow_per_camera(annotated_video, raw_video)
+    annotated_video = _apply_optical_flow_per_camera(annotated_video, raw_video, vqa_cameras)
     labeled = [(label, b64) for _, label, b64 in annotated_video]
     raw_labeled = [(label, b64) for _, label, b64 in raw_video]
 

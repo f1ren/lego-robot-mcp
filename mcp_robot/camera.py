@@ -504,17 +504,61 @@ def _stream_live_http(on_frame, stop_event: threading.Event | None) -> None:
         raise RuntimeError(f"Cannot connect to Pi Camera MJPEG server at {url}")
 
     log.info("Pi Camera MJPEG stream started at %s", url)
-    try:
-        while stop_event is None or not stop_event.is_set():
+
+    # Decouple network acquisition from downstream processing. Downstream
+    # work below (JPEG re-encode, base64, on_frame -> SegmentRecorder's
+    # decode/motion-diff/VideoWriter.write, all synchronous in this thread)
+    # can take longer than the source's frame interval, especially when
+    # something else in this process is holding the GIL (e.g. a motor
+    # action's post-processing). Unlike DroidCam/mjpeg_bridge — whose decode
+    # runs in a separate OS process feeding a single-slot "latest frame"
+    # store — this cv2.VideoCapture reads picamera2's MJPEG stream in this
+    # same process, so any delay here lets the OS queue the backlog on the
+    # Pi's own send socket instead of dropping it (confirmed via `ss -tin` on
+    # the Pi during a stall: a real multi-hundred-KB unsent backlog with
+    # 600ms+ RTT). Once the backlog exists, every read returns the next
+    # queued-but-stale frame rather than a fresh one, so the recorder ends up
+    # writing content that's several seconds old under a "now" timestamp.
+    #
+    # A dedicated grabber thread does nothing but read+store the latest
+    # frame as fast as the source delivers it, so it's never the thing
+    # falling behind; anything it can't keep up with is silently overwritten
+    # rather than queued, and this thread only ever processes the freshest
+    # frame available.
+    _latest: dict = {"frame": None, "seq": 0}
+    grabber_stop = threading.Event()
+
+    def _grab_loop() -> None:
+        while not grabber_stop.is_set():
             ok, frame = cap.read()
             if not ok:
+                grabber_stop.set()
                 break
+            _latest["frame"] = frame
+            _latest["seq"] += 1
+
+    grabber_thread = threading.Thread(target=_grab_loop, daemon=True)
+    grabber_thread.start()
+
+    try:
+        last_seq = 0
+        while stop_event is None or not stop_event.is_set():
+            if grabber_stop.is_set() and _latest["seq"] == last_seq:
+                break
+            seq = _latest["seq"]
+            if seq == last_seq:
+                time.sleep(0.005)
+                continue
+            last_seq = seq
+            frame = _latest["frame"]
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             b64 = base64.b64encode(buf.tobytes()).decode()
             ts = time.time()
             _pi_cache.put(b64, ts, frame.shape[1], frame.shape[0])
             on_frame(b64, ts)
     finally:
+        grabber_stop.set()
+        grabber_thread.join(timeout=2)
         cap.release()
         server_stop.set()
         server_thread.join(timeout=5)
