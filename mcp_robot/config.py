@@ -259,11 +259,11 @@ DROIDCAM_CAPTURE_FPS = float(os.getenv("DROIDCAM_CAPTURE_FPS", "30.0"))
 # above, plus a /health endpoint camera._droidcam_failure_reason() queries.
 MJPEG_BRIDGE_WSS_PORT  = int(os.getenv("MJPEG_BRIDGE_WSS_PORT", "8443"))
 MJPEG_BRIDGE_HTTP_PORT = int(os.getenv("MJPEG_BRIDGE_HTTP_PORT", "8080"))
-# Reuses the cert already trusted on the phone from the mediamtx setup (same
-# CA — see mediamtx/certs/ in the main checkout, outside this repo) so no new
-# trust-profile step is needed on the phone.
-MJPEG_BRIDGE_TLS_CERT  = os.getenv("MJPEG_BRIDGE_TLS_CERT", "/home/navatm/Projects/lego-robot-mcp/mediamtx/certs/server.crt")
-MJPEG_BRIDGE_TLS_KEY   = os.getenv("MJPEG_BRIDGE_TLS_KEY", "/home/navatm/Projects/lego-robot-mcp/mediamtx/certs/server.key")
+# Self-signed cert/key, generated once and trusted on the phone as a config
+# profile (see certs/ in the main checkout, outside this repo — not the
+# worktree, so it survives worktree cleanup).
+MJPEG_BRIDGE_TLS_CERT  = os.getenv("MJPEG_BRIDGE_TLS_CERT", "/home/navatm/Projects/lego-robot-mcp/certs/server.crt")
+MJPEG_BRIDGE_TLS_KEY   = os.getenv("MJPEG_BRIDGE_TLS_KEY", "/home/navatm/Projects/lego-robot-mcp/certs/server.key")
 
 # ── Pi Camera MJPEG HTTP server ───────────────────────────────────────────────
 # stream_live() starts a picamera2 MJPEG server on the RPi and reads it via

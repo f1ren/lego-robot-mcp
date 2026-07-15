@@ -12,9 +12,9 @@ build/
 memory/
 output/
 
-# Local infra (binaries/certs live at the main checkout, not the repo;
-# certs/ holds private key material — must never be tracked)
-mediamtx/
+# Local infra (lives at the main checkout, not the repo, so it survives
+# worktree cleanup; holds private key material — must never be tracked)
+/certs/
 
 # Test files
 tests/fixtures/*/annotated/
