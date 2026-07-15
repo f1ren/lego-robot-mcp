@@ -1,5 +1,5 @@
 """
-Detect the robot's forward heading in external (DroidCam) frames and overlay
+Detect the robot's forward heading in external (SimpleIPCamera) frames and overlay
 a green arrow showing the direction the gripper is pointing.
 
 The robot has a yellow LEGO body whose chassis presents many long parallel

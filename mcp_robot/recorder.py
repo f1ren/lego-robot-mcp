@@ -2,7 +2,7 @@
 Continuous motion-segment video recorder.
 
 Taps frames already flowing through the camera frame caches
-(`_PiFrameCache`/`_DroidCamFrameCache` in camera.py) and incrementally writes
+(`_PiFrameCache`/`_SimpleIPCameraFrameCache` in camera.py) and incrementally writes
 motion-bounded mp4 segments to disk in real time. A manifest (JSONL) records
 each closed segment's time range and path; `tag_range` lets callers attach
 action metadata (tool name, change description) to whichever segment(s)
@@ -15,7 +15,7 @@ to measure that camera's natural frame-to-frame pixel noise.  The mean-diff
 threshold is set to mean_diff + SIGMA * std_diff above that noise floor,
 where SIGMA is SEGMENT_CALIB_SIGMA_PI for the Pi Camera and
 SEGMENT_CALIB_SIGMA for every other camera. This prevents the noisier Pi
-Camera from triggering false-positive segments while the quieter DroidCam
+Camera from triggering false-positive segments while the quieter SimpleIPCamera
 keeps its baseline sensitivity.  Set SEGMENT_CALIB_ENABLED=0 to skip
 calibration and use the fixed global threshold for all cameras.
 
@@ -204,7 +204,7 @@ class SegmentRecorder:
         self.preroll_s = preroll_s
         self.cooldown_s = cooldown_s
         self.fps_by_camera = fps_by_camera or {
-            "droidcam": config.SEGMENT_FPS_DROIDCAM,
+            "simpleipcamera": config.SEGMENT_FPS_SIMPLEIPCAMERA,
             "pi_camera": config.SEGMENT_FPS_PI,
         }
         self.recent_ring = recent_ring
@@ -558,7 +558,7 @@ class SegmentRecorder:
         Each camera's segment is built and written entirely outside
         self._lock: on_frame() is called synchronously, inline, from the same
         thread that reads each live camera stream (see camera.py's
-        _PiFrameCache.put/_DroidCamFrameCache.put), so holding the lock for
+        _PiFrameCache.put/_SimpleIPCameraFrameCache.put), so holding the lock for
         the ~45-90 frames written here would stall those threads and drop
         real, physical frames arriving meanwhile. The lock is only taken
         briefly at the end, per camera, to pair the manifest append with the
