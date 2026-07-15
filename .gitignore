@@ -22,3 +22,5 @@ pddl/robot_domain_fixed.pddl
 
 # Models
 yolo11n.pt
+
+certs/
