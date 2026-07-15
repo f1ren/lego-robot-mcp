@@ -57,6 +57,11 @@ _MIN_GRIPPER_AREA_FRAC = 0.0005  # 0.05% of frame
 _ROI_EXPAND_ALONG = 1.5   # fraction of max(bw, bh) along the forward/backward axis
 _ROI_EXPAND_PERP  = 0.4   # fraction of min(bw, bh) perpendicular to the axis
 
+# Dilation used only to *group* nearby black-mask fragments into one gripper
+# candidate (see the fragmentation comment below) — generous on purpose, since
+# scoring still runs on the real undilated pixels within each group.
+_GRIPPER_LINK_KSIZE = 41
+
 _ARROW_COLOR_BGR = (0, 220, 0)   # bright green
 _ARROW_THICKNESS_FRAC = 0.006    # of image diagonal
 
@@ -272,30 +277,39 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     # otherwise out-area the real gripper) cannot outscore the actual
     # gripper, which sits at one end of the body's long axis and has
     # visible mechanical texture.
-    contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #
+    # A thin/wireframe gripper (open claw, chain-link arm) can fragment into
+    # several small contours after MORPH_OPEN even though MORPH_CLOSE has
+    # already run — each fragment individually under _MIN_GRIPPER_AREA_FRAC,
+    # letting an unrelated solid black blob elsewhere on the chassis (cable
+    # ties, connectors) win by default even though the gripper's *combined*
+    # mass would have won. Group fragments that are spatially close via a
+    # generous linking dilation, but measure area/texture/centroid from the
+    # real (undilated) pixels in each group so dilation never inflates a score.
+    link_mask = cv2.dilate(black_mask, np.ones((_GRIPPER_LINK_KSIZE, _GRIPPER_LINK_KSIZE), np.uint8))
+    groups, _ = cv2.findContours(link_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
     bcx, bcy = body_center
     best_score = -1.0
     arrow_anchor: tuple[int, int] | None = None
     gripper_area = 0
-    for c in contours:
-        area = cv2.contourArea(c)
+    for g in groups:
+        g_mask = np.zeros(black_mask.shape, dtype=np.uint8)
+        cv2.drawContours(g_mask, [g], -1, 255, thickness=cv2.FILLED)
+        real_mask = cv2.bitwise_and(black_mask, g_mask)
+        m = cv2.moments(real_mask, binaryImage=True)
+        area = m["m00"]
         if area < min_area:
             continue
-        gc = _centroid(c)
-        if gc is None:
-            continue
-        cx_full, cy_full = gc[0] + x0, gc[1] + y0
+        cx_full, cy_full = m["m10"] / area + x0, m["m01"] / area + y0
         ddx, ddy = cx_full - bcx, cy_full - bcy
         along = abs(ddx * axis[0] + ddy * axis[1])
-        c_mask = np.zeros(black_mask.shape, dtype=np.uint8)
-        cv2.drawContours(c_mask, [c], -1, 255, thickness=cv2.FILLED)
-        edge_px = cv2.countNonZero(cv2.bitwise_and(gripper_edges, c_mask))
+        edge_px = cv2.countNonZero(cv2.bitwise_and(gripper_edges, real_mask))
         texture = edge_px / area
         score = area * along * texture
         if score > best_score:
             best_score = score
-            arrow_anchor = (cx_full, cy_full)
+            arrow_anchor = (int(round(cx_full)), int(round(cy_full)))
             gripper_area = int(area)
     if arrow_anchor is None:
         log.info(
