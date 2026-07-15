@@ -34,39 +34,22 @@ Override model/host via env vars:
 OLLAMA_HOST=http://rpi.local:11434 OLLAMA_MODEL=qwen2.5vl python3 tests/qwen_test.py --latest
 ```
 
-## pddl_consult_test.py — replay consult_vqa_for_pddl_domain
+## Replaying consult_vqa_for_pddl_domain
 
-Simulates the `consult_vqa_for_pddl_domain` MCP tool against saved images instead of a
-live robot. `QUESTION_TEXT` is imported from `mcp_robot.vision.CONSULT_DOMAIN_QUESTION` —
-the same constant the production tool sends — so editing it there and re-running this
-script is enough to try new wording; there is nothing to keep in sync separately.
-Defaults to the images/context from a real failed call (see `tests/fixtures/pddl_consult/`).
+The PDDL-repair-via-VLM replay script (formerly `pddl_consult_test.py` here) now lives in
+the NAPC repo (`~/Projects/NAPC`, `f1ren/NAPC` on GitHub) as `scripts/replay_consult.py` —
+it doesn't touch robot physics, only the prompt/extraction logic that lego-robot-mcp's
+`consult_vqa_for_pddl_domain` calls into, so it belongs with that package rather than here.
+Same fixture images (`scripts/fixtures/front.jpg` / `external.jpg` there are byte-identical
+to the old `tests/fixtures/pddl_consult/` copies), same CLI shape (`--repeat`/`--expect`/
+`--save-domain`/`--save-problem`/etc.), run from the NAPC checkout instead:
 
 ```bash
-# Re-run the default (real) failure scenario
-python3 tests/vqa/pddl_consult_test.py
-
-# Try a different model
-GEMINI_MODEL=gemini-2.5-pro python3 tests/vqa/pddl_consult_test.py
-
-# Point at a different scenario / domain
-python3 tests/vqa/pddl_consult_test.py \
-    --front /path/to/pi_camera.jpg --external /path/to/simpleipcamera.jpg \
-    --context "The gripper closed on empty air; the cup was 5cm left of center." \
-    --domain pddl/robot_domain.pddl.bak
-
-# Run the same prompt/images N times before trusting a wording — Gemini is
-# stochastic, so one good response doesn't mean the wording is reliable.
-# --expect checks only the suggested domain block, not the surrounding prose
-# (a response can name the right concept while describing the scene and
-# still ship an unrelated domain fix — that's not a pass). It's a local
-# substring tally only (never sent to the model); keep scenario-specific
-# hints out of QUESTION_TEXT itself so it stays reusable across unrelated
-# experiments.
-python3 tests/vqa/pddl_consult_test.py --repeat 5 --expect SUBSTRING1 --expect SUBSTRING2
+cd ~/Projects/NAPC
+python3 scripts/replay_consult.py
 ```
 
-Because both consumers import the same `CONSULT_DOMAIN_QUESTION` constant, there is no
-separate "port it back" step — editing `mcp_robot/vision.py` updates the live
-`consult_vqa_for_pddl_domain` tool immediately (the MCP server hot-reloads on code
-changes).
+One capability gap versus the old lego-robot-mcp script: `replay_consult.py` only calls
+`gemini_ask_with_images` — it has no `--backend ollama` option, even though
+`neurosymbolic_counselor.backends.ollama_ask_with_images` exists. Add one if you need to
+replay a scenario against the local Ollama/Qwen backend.
