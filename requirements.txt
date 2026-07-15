@@ -1,5 +1,5 @@
 mcp[cli]>=1.0
-neurosymbolic-counselor @ git+ssh://git@github.com/f1ren/NAPC.git
+neurosymbolic-counselor @ git+ssh://git@github.com/f1ren/NAPC.git@v0.1.0
 paramiko>=3.4
 google-genai>=1.0
 ollama>=0.3

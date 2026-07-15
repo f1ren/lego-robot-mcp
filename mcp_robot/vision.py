@@ -29,9 +29,10 @@ _CAMERA_LABELS = {
 
 # The consult_vqa_for_pddl_domain question prompt used to live here as
 # CONSULT_DOMAIN_QUESTION; it's now neurosymbolic_counselor.counselor's
-# DEFAULT_QUESTION (github.com/f1ren/NAPC) so there's
-# one canonical copy instead of two that can drift. server.py and
-# tests/vqa/pddl_consult_test.py both import it from there.
+# DEFAULT_QUESTION (github.com/f1ren/NAPC) — the only
+# copy, used internally by that package's consult(), which server.py's
+# consult_vqa_for_pddl_domain tool calls into. Nothing in this repo imports
+# DEFAULT_QUESTION directly.
 
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
