@@ -204,7 +204,9 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     # Length-weighted histogram of line angles in [0, 180).
     angle_hist = np.zeros(180, dtype=np.float32)
     for L in lines:
-        x1, y1, x2, y2 = L[0]
+        # cv2.HoughLinesP returns shape (N, 1, 4) on OpenCV 4.x but (N, 4) on
+        # 5.x — reshape(-1) extracts the 4 coords under either convention.
+        x1, y1, x2, y2 = L.reshape(-1)
         ldx, ldy = x2 - x1, y2 - y1
         length = math.hypot(ldx, ldy)
         ang = int(math.degrees(math.atan2(ldy, ldx))) % 180

@@ -2267,6 +2267,7 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
             ),
         ]
     except Exception as exc:
+        log.error("[TOOL] get_front_camera_image error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2286,6 +2287,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
             TextContent(type="text", text=f"DroidCam — external/third-person view{path_info}"),
         ]
     except Exception as exc:
+        log.error("[TOOL] get_external_camera_image error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2317,6 +2319,7 @@ def capture_front_video_clip(
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
+        log.error("[TOOL] capture_front_video_clip error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2351,6 +2354,7 @@ def capture_external_video_clip(
             content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
         return content
     except Exception as exc:
+        log.error("[TOOL] capture_external_video_clip error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
@@ -2422,6 +2426,7 @@ def get_robot_state(
             if vlm_note:
                 content.append(TextContent(type="text", text=f"VLM note: {vlm_note}"))
         except Exception as exc:
+            log.error("[TOOL] get_robot_state droidcam capture error: %s", exc, exc_info=True)
             _last_target_distance_px = None
             _last_target_robot_radius_px = None
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
@@ -2441,6 +2446,7 @@ def get_robot_state(
             content.append(TextContent(type="text", text=summary))
         return content
     except Exception as exc:
+        log.error("[TOOL] get_robot_state error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
