@@ -699,6 +699,12 @@ def turn_to(
             "pass target_class_yolo/target_class_free_text, or call "
             "navigate_to()/click_button() first."
         )
+    if yolo and not free:
+        return _err(
+            "turn_to: target_class_free_text must be non-empty when target_class_yolo is set "
+            "(otherwise the VLM fallback is silently skipped if YOLO finds nothing) — pass "
+            "both explicitly, or pass neither to reuse the last navigate_to()/click_button() target."
+        )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
@@ -833,6 +839,12 @@ def drive_to(
             "drive_to: no target specified and no prior target on record — "
             "pass target_class_yolo/target_class_free_text, or call "
             "navigate_to()/click_button() first."
+        )
+    if yolo and not free:
+        return _err(
+            "drive_to: target_class_free_text must be non-empty when target_class_yolo is set "
+            "(otherwise the VLM fallback is silently skipped if YOLO finds nothing) — pass "
+            "both explicitly, or pass neither to reuse the last navigate_to()/click_button() target."
         )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
@@ -2381,7 +2393,7 @@ def capture_external_video_clip(
 @mcp.tool()
 def get_robot_state(
     target_class_yolo: str,
-    target_class_free_text: str = "",
+    target_class_free_text: str,
 ) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
@@ -2400,11 +2412,20 @@ def get_robot_state(
         target_class_free_text: Free-text description for Gemini Flash when YOLO
                                 finds nothing (e.g. "light switch", "door handle").
                                 The detected object's angle from the robot's heading
-                                is returned so you know how much to turn.
+                                is returned so you know how much to turn. No default —
+                                REQUIRED whenever target_class_yolo is non-empty (the
+                                VLM fallback is silently skipped otherwise); pass ""
+                                for both to skip object search and just check state.
     """
     global _state_call_count, _last_target_distance_px, _last_target_robot_radius_px
     global _last_target_yolo, _last_target_free_text
     log.info("[TOOL] get_robot_state yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
+    if target_class_yolo and not target_class_free_text:
+        return [TextContent(type="text", text=(
+            "ERROR: target_class_free_text must be non-empty when target_class_yolo is set — "
+            "otherwise the VLM fallback is silently skipped if YOLO finds nothing. "
+            "Pass both, or pass target_class_yolo=\"\" too to skip object search entirely."
+        ))]
     try:
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
