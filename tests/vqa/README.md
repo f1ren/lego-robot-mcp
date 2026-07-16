@@ -33,23 +33,3 @@ Override model/host via env vars:
 ```bash
 OLLAMA_HOST=http://rpi.local:11434 OLLAMA_MODEL=qwen2.5vl python3 tests/qwen_test.py --latest
 ```
-
-## Replaying consult_vqa_for_pddl_domain
-
-The PDDL-repair-via-VLM replay script (formerly `pddl_consult_test.py` here) now lives in
-the NAPC repo (`~/Projects/NAPC`, `f1ren/NAPC` on GitHub) as `scripts/replay_consult.py` —
-it doesn't touch robot physics, only the prompt/extraction logic that lego-robot-mcp's
-`consult_vqa_for_pddl_domain` calls into, so it belongs with that package rather than here.
-Same fixture images (`scripts/fixtures/front.jpg` / `external.jpg` there are byte-identical
-to the old `tests/fixtures/pddl_consult/` copies), same CLI shape (`--repeat`/`--expect`/
-`--save-domain`/`--save-problem`/etc.), run from the NAPC checkout instead:
-
-```bash
-cd ~/Projects/NAPC
-python3 scripts/replay_consult.py
-```
-
-One capability gap versus the old lego-robot-mcp script: `replay_consult.py` only calls
-`gemini_ask_with_images` — it has no `--backend ollama` option, even though
-`napc.backends.ollama_ask_with_images` exists. Add one if you need to
-replay a scenario against the local Ollama/Qwen backend.
