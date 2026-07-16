@@ -2504,7 +2504,7 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
 
 # ── PDDL task planning ───────────────────────────────────────────────────────
 # The actual STRIPS solving and VQA-diagnose-and-replan loop live in
-# neurosymbolic_counselor (extracted from this file — see
+# napc (extracted from this file — see
 # github.com/f1ren/NAPC). Only what's genuinely
 # robot-specific stays here: the on-disk domain-file convention, camera
 # capture, and video-subtitle logging.
@@ -2601,7 +2601,7 @@ def plan_pddl(problem_pddl: str) -> dict:
     with open(domain_path) as f:
         domain_text = f.read()
 
-    from neurosymbolic_counselor import solve
+    from napc import solve
     try:
         actions = solve(domain_text, problem_pddl)
     except ImportError:
@@ -2624,7 +2624,7 @@ def consult_vqa_for_pddl_domain(
     Captures the current robot view and external camera, reads the active domain
     (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
     both the problem PDDL and grounded plan from the most recent plan_pddl call,
-    then asks the question in neurosymbolic_counselor.counselor.DEFAULT_QUESTION
+    then asks the question in napc.counselor.DEFAULT_QUESTION
     (also the prompt tests/vqa/pddl_consult_test.py replays against saved images
     so wording changes can be tried without a connected robot).
 
@@ -2635,7 +2635,7 @@ def consult_vqa_for_pddl_domain(
     original, is never modified). A new problem is used for the replan below
     but is NOT persisted anywhere — re-supply it to any later plan_pddl call.
 
-    This tool then immediately replans via neurosymbolic_counselor.consult(),
+    This tool then immediately replans via napc.consult(),
     which re-solves against whatever domain/problem are now active — so the
     caller never has to remember that as a separate step. "directive" and
     "updated_plan" are the primary output and are placed first in the response
@@ -2689,7 +2689,7 @@ def consult_vqa_for_pddl_domain(
         {"pi_camera": front["frame"], "simpleipcamera": ext["frame"]},
     )
 
-    # neurosymbolic_counselor's images are raw bytes (camera frames here are
+    # napc's images are raw bytes (camera frames here are
     # base64, per capture_still/capture_simpleipcamera_still's return shape).
     images = [
         ("pi_camera", base64.b64decode(front["frame"])),
@@ -2702,7 +2702,7 @@ def consult_vqa_for_pddl_domain(
         b64_images = [(label, base64.b64encode(data).decode()) for label, data in imgs]
         return vision.ask_with_images(prompt, b64_images)
 
-    from neurosymbolic_counselor import consult
+    from napc import consult
     result = consult(
         domain_text=domain_text,
         problem_text=_last_problem_pddl,

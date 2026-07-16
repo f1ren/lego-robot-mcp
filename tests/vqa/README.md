@@ -51,5 +51,5 @@ python3 scripts/replay_consult.py
 
 One capability gap versus the old lego-robot-mcp script: `replay_consult.py` only calls
 `gemini_ask_with_images` — it has no `--backend ollama` option, even though
-`neurosymbolic_counselor.backends.ollama_ask_with_images` exists. Add one if you need to
+`napc.backends.ollama_ask_with_images` exists. Add one if you need to
 replay a scenario against the local Ollama/Qwen backend.

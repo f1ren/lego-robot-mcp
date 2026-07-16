@@ -28,7 +28,7 @@ _CAMERA_LABELS = {
 }
 
 # The consult_vqa_for_pddl_domain question prompt used to live here as
-# CONSULT_DOMAIN_QUESTION; it's now neurosymbolic_counselor.counselor's
+# CONSULT_DOMAIN_QUESTION; it's now napc.counselor's
 # DEFAULT_QUESTION (github.com/f1ren/NAPC) — the only
 # copy, used internally by that package's consult(), which server.py's
 # consult_vqa_for_pddl_domain tool calls into. Nothing in this repo imports
