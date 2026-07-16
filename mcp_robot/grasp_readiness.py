@@ -639,10 +639,17 @@ def annotate_frame_with_object(
 
     # VLM path: YOLO found nothing (or was skipped) → ask Gemini Flash
     if obj is None and target_class_free_text:
-        obj = _vlm_detect(bgr, target_class_free_text)
+        try:
+            obj = _vlm_detect(bgr, target_class_free_text)
+        except vision.VQAResponseParseError as exc:
+            return annotate_bgr(bgr), None, str(exc), None, heading.body_radius_px, heading.body_area
 
-    if obj is None:
-        return annotate_bgr(bgr), None, "", None, heading.body_radius_px, heading.body_area
+    # _vlm_detect may return a LowConfidenceDetection (candidate seen but
+    # below threshold) instead of None — that's not a plain miss, but it
+    # also has no .center, so it must be treated like one here.
+    if obj is None or isinstance(obj, vision.LowConfidenceDetection):
+        note = str(obj) if isinstance(obj, vision.LowConfidenceDetection) else ""
+        return annotate_bgr(bgr), None, note, None, heading.body_radius_px, heading.body_area
 
     angle_deg = compute_heading_to_object_angle(heading, obj.center)
     dist_px = math.hypot(
