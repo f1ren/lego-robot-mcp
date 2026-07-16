@@ -8,7 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.0",
-    "neurosymbolic-counselor @ git+ssh://git@github.com/f1ren/NAPC.git@v0.1.1",
+    "neurosymbolic-counselor @ git+ssh://git@github.com/f1ren/NAPC.git@v0.1.2",
     "paramiko>=3.4",
     "google-genai>=1.0",
     "ollama>=0.3",
