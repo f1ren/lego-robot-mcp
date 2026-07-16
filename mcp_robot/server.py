@@ -191,7 +191,7 @@ def _measure_target(target_class_yolo: str, target_class_free_text: str) -> tupl
         target_class_yolo=target_class_yolo,
         target_class_free_text=target_class_free_text,
     )
-    viz.log_annotated_images(frame_result["frame"])
+    viz.log_annotated_images(external_b64=frame_result["frame"], reason="Target check")
     _last_target_distance_px = frame_result.get("object_distance_px")
     _last_target_robot_radius_px = frame_result.get("robot_radius_px")
     _last_target_yolo = target_class_yolo
@@ -439,13 +439,16 @@ def _with_change_analysis(
     cam_frames: dict[str, list[str]] = {}
     for lbl, b64 in labeled:
         cam_frames.setdefault(lbl, []).append(b64)
-    cam_stacks = [
-        vision.stack_frames(cam_b64s) if len(cam_b64s) > 1 else cam_b64s[0]
-        for cam_b64s in cam_frames.values()
-    ]
+
+    def _stack(cam_b64s: list[str] | None) -> str | None:
+        if not cam_b64s:
+            return None
+        return vision.stack_frames(cam_b64s) if len(cam_b64s) > 1 else cam_b64s[0]
+
     viz.log_annotated_images(
-        cam_stacks[0] if len(cam_stacks) > 0 else None,
-        cam_stacks[1] if len(cam_stacks) > 1 else None,
+        pi_b64=_stack(cam_frames.get("pi_camera")),
+        external_b64=_stack(cam_frames.get("simpleipcamera")),
+        reason="Evaluating execution",
     )
 
     description = None
@@ -1546,7 +1549,7 @@ def _nav_track_motor(
             if len(trail) > 40:
                 trail.pop(0)
         tracking = nav_mod.draw_tracking_overlay(base_overlay, trail)
-        viz.log_nav_tracking(tracking, ts)
+        viz.log_nav_tracking(tracking, ts, reason="Tracking motion")
 
     cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
 
@@ -1997,10 +2000,18 @@ def navigate_to(
                 overlay_b64 = base64.b64encode(overlay_buf.tobytes()).decode()
                 key_frames_b64.append(overlay_b64)
 
+            # Both overlay and cspace are external-camera renders (navigation
+            # annotations are always external-camera based), so they're
+            # combined side-by-side into one frame for the single "Annotated
+            # — External Camera" row rather than split across rows.
             cspace_bgr = nav_mod.build_cspace_bgr(bgr, obs_map, plan)
-            ok_cs, cs_buf = cv2.imencode(".jpg", cspace_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
-            cspace_b64 = base64.b64encode(cs_buf.tobytes()).decode() if ok_cs else None
-            viz.log_annotated_images(cspace_b64, overlay_b64)
+            nav_panel_bgr = cv2.hconcat([overlay_bgr, cspace_bgr])
+            ok_nav, nav_buf = cv2.imencode(".jpg", nav_panel_bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if ok_nav:
+                viz.log_annotated_images(
+                    external_b64=base64.b64encode(nav_buf.tobytes()).decode(),
+                    reason="Navigation plan",
+                )
 
             # ── 8. Termination checks ─────────────────────────────────────
             if nav_mod.near_target(obs_map):
@@ -2274,7 +2285,7 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
     log.info("[TOOL] get_front_camera_image")
     try:
         result = cam_mod.capture_still()
-        viz.log_annotated_images(result["frame"])
+        viz.log_annotated_images(pi_b64=result["frame"], reason="Manual capture")
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
@@ -2297,7 +2308,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
     log.info("[TOOL] get_external_camera_image")
     try:
         result = cam_mod.capture_simpleipcamera_still(target_class_yolo="")
-        viz.log_annotated_images(result["frame"])
+        viz.log_annotated_images(external_b64=result["frame"], reason="Manual capture")
         path_info = f" — saved to {result['path']}" if result.get("path") else ""
         return [
             _image_content(result["frame"]),
@@ -2410,7 +2421,7 @@ def get_robot_state(
                 target_class_yolo=target_class_yolo,
                 target_class_free_text=target_class_free_text,
             )
-            viz.log_annotated_images(simpleipcam_frame["frame"])
+            viz.log_annotated_images(external_b64=simpleipcam_frame["frame"], reason="State check")
             content.append(TextContent(type="text", text="Third-person view 320×240 thumbnail:"))
             content.append(_thumbnail_image_content(simpleipcam_frame["frame"]))
             angle_deg = simpleipcam_frame.get("object_angle_deg")
@@ -2448,7 +2459,7 @@ def get_robot_state(
             _last_target_robot_radius_px = None
             content.append(TextContent(type="text", text=f"Third-person view unavailable: {exc}"))
         pi_frame = cam_mod.capture_still()
-        viz.log_annotated_images(pi_frame["frame"])
+        viz.log_annotated_images(pi_b64=pi_frame["frame"], reason="State check")
         content.append(TextContent(type="text", text="Front view (Pi Camera):"))
         content.append(_thumbnail_image_content(pi_frame["frame"]))
         if _state_call_count > 1:

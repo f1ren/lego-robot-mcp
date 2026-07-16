@@ -47,8 +47,8 @@ def _send_blueprint() -> None:
                 rrb.Spatial2DView(name="SimpleIPCamera", origin="camera/simpleipcamera"),
             ),
             rrb.Vertical(
-                rrb.Spatial2DView(name="Annotated A", origin="action/image_a"),
-                rrb.Spatial2DView(name="Annotated B", origin="action/image_b"),
+                rrb.Spatial2DView(name="Annotated — Pi Camera", origin="action/pi_camera"),
+                rrb.Spatial2DView(name="Annotated — External Camera", origin="action/external_camera"),
             ),
         ),
         collapse_panels=True,
@@ -92,6 +92,44 @@ def _b64_to_numpy(b64: str):
     return np.asarray(Image.open(BytesIO(base64.b64decode(b64))).convert("RGB"))
 
 
+def _decode_bgr(b64: str):
+    """Decode a base64 JPEG into an OpenCV BGR array."""
+    import cv2
+    import numpy as np
+    arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+def _caption_bgr(bgr, reason: str):
+    """Burn a short caption into the bottom-left corner of a BGR array.
+
+    reason: ~2-3 word explanation of why this frame is being shown (e.g.
+            "State check", "Navigation plan"). No-op if empty.
+    """
+    if not reason or bgr is None:
+        return bgr
+    import cv2
+    out = bgr.copy()
+    h = out.shape[0]
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+    (tw, th), _ = cv2.getTextSize(reason, font, scale, thickness)
+    x, y = 8, h - 12
+    cv2.rectangle(out, (x - 5, y - th - 7), (x + tw + 5, y + 7), (0, 0, 0), cv2.FILLED)
+    cv2.putText(out, reason, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    return out
+
+
+def _log_captioned(entity: str, b64: str, reason: str) -> None:
+    """Decode, caption, and log one base64 JPEG frame to entity as RGB."""
+    import cv2
+    bgr = _decode_bgr(b64)
+    if bgr is None:
+        return
+    bgr = _caption_bgr(bgr, reason)
+    rr = _rr()
+    rr.log(entity, rr.Image(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
+
+
 def _log_camera(frame_b64: str, ts: float | None = None, entity: str = "camera/rpi") -> None:
     """Log one frame to the given camera entity with a wall-clock timestamp."""
     rr = _rr()
@@ -130,35 +168,47 @@ def log_simpleipcamera_frame(frame_b64: str, timestamp: float) -> None:
     _log_camera(frame_b64, timestamp, entity="camera/simpleipcamera")
 
 
+def log_annotated_images(
+    pi_b64: str | None = None,
+    external_b64: str | None = None,
+    reason: str = "",
+) -> None:
+    """Log annotated action images to the Rerun viewer, routed by camera source.
 
-def log_annotated_images(img_a_b64: str | None, img_b_b64: str | None = None) -> None:
-    """Log a pair of annotated action images to the Rerun viewer.
-
-    img_a: left panel (e.g. first VQA frame, obstacle mask, or camera still)
-    img_b: right panel (e.g. last VQA frame, nav overlay) — optional
+    pi_b64:       Pi-camera-derived annotated frame -> top row ("Annotated —
+                   Pi Camera"), mirroring the raw "Pi Camera" row on the left.
+    external_b64: SimpleIPCamera-derived annotated frame (including nav
+                   overlay/C-space renders, which are always external-camera
+                   based) -> bottom row ("Annotated — External Camera"),
+                   mirroring the raw "SimpleIPCamera" row on the left.
+    reason:       ~2-3 word caption burned onto the bottom-left corner of
+                   each provided frame explaining why it's shown (e.g.
+                   "State check", "Navigation plan", "Evaluating execution").
     """
     if not _ensure_init():
         return
     rr = _rr()
     rr.set_time("time", timestamp=time.time())
-    if img_a_b64:
-        rr.log("action/image_a", rr.Image(_b64_to_numpy(img_a_b64)))
-    if img_b_b64:
-        rr.log("action/image_b", rr.Image(_b64_to_numpy(img_b_b64)))
+    if pi_b64:
+        _log_captioned("action/pi_camera", pi_b64, reason)
+    if external_b64:
+        _log_captioned("action/external_camera", external_b64, reason)
 
 
-def log_nav_tracking(bgr: "np.ndarray", ts: float | None = None) -> None:
-    """Stream a nav-tracking frame to Rerun (reuses action/image_b panel).
+def log_nav_tracking(bgr: "np.ndarray", ts: float | None = None, reason: str = "") -> None:
+    """Stream a nav-tracking frame to Rerun's external-camera annotated row.
 
-    bgr: OpenCV BGR numpy array (the draw_tracking_overlay output).
+    bgr: OpenCV BGR numpy array (the draw_tracking_overlay output) — always
+         SimpleIPCamera-derived, so it belongs on the bottom ("external
+         camera") row alongside other navigation annotations.
     """
     if not _ensure_init():
         return
     import cv2 as _cv2
     rr = _rr()
     rr.set_time("time", timestamp=ts if ts is not None else time.time())
-    rgb = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
-    rr.log("action/image_b", rr.Image(rgb))
+    rgb = _cv2.cvtColor(_caption_bgr(bgr, reason), _cv2.COLOR_BGR2RGB)
+    rr.log("action/external_camera", rr.Image(rgb))
 
 
 def flush() -> None:
