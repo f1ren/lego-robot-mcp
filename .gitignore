@@ -12,6 +12,9 @@ build/
 memory/
 output/
 
+# Backup of Claude Code auto-memory (see .claude/settings.local.json autoMemoryEnabled)
+.claude/memory-backup/
+
 # Test files
 tests/fixtures/*/annotated/
 
