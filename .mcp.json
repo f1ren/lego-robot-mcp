@@ -20,6 +20,16 @@
         "MCP_CONSOLIDATION_ENABLED": "true",
         "PYTHONUNBUFFERED": "1"
       }
+    },
+    "napc": {
+      "command": "/home/navatm/Projects/NAPC/.venv/bin/napc",
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+        "NAPC_CAPTURE_DIR": "/home/navatm/Projects/lego-robot-mcp/output/captures",
+        "NAPC_RUN_DIR": "/home/navatm/Projects/lego-robot-mcp/output/runs",
+        "NAPC_LOG_FILE": "/home/navatm/Projects/lego-robot-mcp/output/logs/napc_mcp_server.log"
+      }
     }
   }
 }
