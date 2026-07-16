@@ -746,13 +746,14 @@ class TestNavigationNoPath(unittest.TestCase):
     def test_plan_path_no_path_returns_unreachable_navplan(self):
         """plan_path should return a NavPlan with reachable=False when no path is found."""
         import numpy as np
-        from mcp_robot.navigation import ObstacleMap, plan_path
+        from mcp_robot.navigation import ObstacleMap, plan_path, _CSPACE_BUFFER_SCALE
 
         # Create a grid where start and goal are disconnected
         grid = np.zeros((60, 80), dtype=bool)
         grid[0, 0] = True
         grid[58, 78] = True
 
+        robot_radius_px = 5.0
         obs_map = ObstacleMap(
             free_mask=np.zeros((600, 800), dtype=np.uint8),
             grid=grid,
@@ -765,7 +766,8 @@ class TestNavigationNoPath(unittest.TestCase):
             target_px=(795, 595),     # maps to (59, 79)
             robot_grid=(0, 0),
             target_grid=(59, 79),
-            robot_radius_px=5.0,
+            robot_radius_px=robot_radius_px,
+            buffer_radius_px=robot_radius_px * _CSPACE_BUFFER_SCALE,
             target_radius_px=5.0,
         )
 
@@ -785,7 +787,7 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
     @staticmethod
     def _make_obs_map(forward):
         import numpy as np
-        from mcp_robot.navigation import ObstacleMap
+        from mcp_robot.navigation import ObstacleMap, _CSPACE_BUFFER_SCALE
         from mcp_robot.heading import Heading
 
         grid = np.ones((60, 80), dtype=bool)
@@ -796,6 +798,7 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
         raw_grid[30, 43:50] = False
         grid[30, 39:43] = False
 
+        robot_radius_px = 30.0
         obs_map = ObstacleMap(
             free_mask=np.zeros((600, 800), dtype=np.uint8),
             grid=grid,
@@ -808,7 +811,8 @@ class TestNavigationReverseFromObstacle(unittest.TestCase):
             target_px=(705, 305),      # maps to (30, 70), far to the east
             robot_grid=(30, 40),
             target_grid=(30, 70),
-            robot_radius_px=30.0,
+            robot_radius_px=robot_radius_px,
+            buffer_radius_px=robot_radius_px * _CSPACE_BUFFER_SCALE,
             target_radius_px=5.0,
         )
         heading = Heading(
@@ -861,7 +865,7 @@ class TestNavigationBufferDriftReplan(unittest.TestCase):
     @staticmethod
     def _make_obs_map():
         import numpy as np
-        from mcp_robot.navigation import ObstacleMap
+        from mcp_robot.navigation import ObstacleMap, _CSPACE_BUFFER_SCALE
         from mcp_robot.heading import Heading
 
         grid = np.ones((60, 80), dtype=bool)
@@ -873,6 +877,7 @@ class TestNavigationBufferDriftReplan(unittest.TestCase):
         # surrounded by buffer on every side.
         grid[29:32, 39:42] = False
 
+        robot_radius_px = 30.0
         obs_map = ObstacleMap(
             free_mask=np.zeros((600, 800), dtype=np.uint8),
             grid=grid,
@@ -885,7 +890,8 @@ class TestNavigationBufferDriftReplan(unittest.TestCase):
             target_px=(705, 305),      # maps to (30, 70), green C-space
             robot_grid=(30, 10),
             target_grid=(30, 70),
-            robot_radius_px=30.0,
+            robot_radius_px=robot_radius_px,
+            buffer_radius_px=robot_radius_px * _CSPACE_BUFFER_SCALE,
             target_radius_px=5.0,
         )
         heading = Heading(
