@@ -101,7 +101,7 @@ def test_locate_object_vlm_not_found_returns_none(fake_gemini_client, monkeypatc
     assert vision.locate_object_vlm(_tiny_bgr_image(), "blue cup") is None
 
 
-def test_locate_object_vlm_low_confidence_raises(fake_gemini_client, monkeypatch):
+def test_locate_object_vlm_low_confidence_returns_instance(fake_gemini_client, monkeypatch):
     monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
     payload = json.dumps({
         "found": True, "x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.4,
@@ -110,8 +110,11 @@ def test_locate_object_vlm_low_confidence_raises(fake_gemini_client, monkeypatch
     })
     fake_gemini_client([payload])
 
-    with pytest.raises(vision.LowConfidenceDetection):
-        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+    result = vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+    assert isinstance(result, vision.LowConfidenceDetection)
+    assert result.confidence == 0.5
+    assert result.description == "blue cup"
 
 
 def test_locate_object_vlm_parses_valid_response(fake_gemini_client, monkeypatch):

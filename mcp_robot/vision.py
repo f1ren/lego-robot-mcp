@@ -657,21 +657,25 @@ def _ollama_ask_with_images(
 _LOCATE_CONFIDENCE_THRESHOLD = 0.95
 
 
-class LowConfidenceDetection(Exception):
+class LowConfidenceDetection:
     """A candidate object was found by locate_object_vlm, but its confidence
     was at or below _LOCATE_CONFIDENCE_THRESHOLD.
 
-    Distinct from a plain "not found" (None) so callers can tell the MCP
-    caller the actual certainty achieved instead of claiming nothing was seen.
+    Returned like a normal result — the same way None means "not found" —
+    rather than raised: this is an expected outcome, not an error. Callers
+    should check for it with isinstance() so they can report the actual
+    certainty achieved instead of claiming nothing was seen.
     """
 
     def __init__(self, description: str, confidence: float, threshold: float = _LOCATE_CONFIDENCE_THRESHOLD):
         self.description = description
         self.confidence = confidence
         self.threshold = threshold
-        super().__init__(
-            f"Only {confidence:.0%} certainty was achieved for '{description}' — "
-            f"need at least {threshold:.0%} certainty to act."
+
+    def __str__(self) -> str:
+        return (
+            f"Only {self.confidence:.0%} certainty was achieved for '{self.description}' — "
+            f"need at least {self.threshold:.0%} certainty to act."
         )
 
 
@@ -716,7 +720,7 @@ class VQAResponseParseError(VQAFailure):
 def locate_object_vlm(
     bgr: np.ndarray,
     description: str,
-) -> tuple[tuple[int, int, int, int], float, str, np.ndarray, np.ndarray, float] | None:
+) -> tuple[tuple[int, int, int, int], float, str, np.ndarray, np.ndarray, float] | LowConfidenceDetection | None:
     """
     Ask Gemini Flash to locate an object and describe its color for CV refinement.
 
@@ -726,8 +730,9 @@ def locate_object_vlm(
       - hsv_lo / hsv_hi: OpenCV HSV lower/upper bounds (H 0–179, S 0–255, V 0–255)
       - expected_area_frac: approximate fraction of image pixels the object occupies
 
-    Returns None if the object is not found at all. Raises LowConfidenceDetection
-    if a candidate was found but confidence is at or below
+    Returns None if the object is not found at all. Returns a
+    LowConfidenceDetection instance (not raised — an expected outcome, same
+    as None) if a candidate was found but confidence is at or below
     _LOCATE_CONFIDENCE_THRESHOLD. Raises plain RuntimeError on API/config
     failures (no response obtained at all), or VQAResponseParseError when a
     response was obtained but couldn't be parsed into a usable result —
@@ -863,7 +868,7 @@ def locate_object_vlm(
     if confidence < _LOCATE_CONFIDENCE_THRESHOLD:
         log.info("locate_object_vlm: '%s' confidence %.2f at/below threshold %.2f — not acting",
                  description, confidence, _LOCATE_CONFIDENCE_THRESHOLD)
-        raise LowConfidenceDetection(description, confidence)
+        return LowConfidenceDetection(description, confidence)
     return (x1, y1, x2, y2), confidence, note, hsv_lo, hsv_hi, area_frac
 
 
@@ -1030,7 +1035,7 @@ def cv_refine_location(
 def locate_object_hybrid(
     bgr: np.ndarray,
     description: str,
-) -> tuple[tuple[int, int, int, int], tuple[int, int], float, str, tuple[int, int, int, int]] | None:
+) -> tuple[tuple[int, int, int, int], tuple[int, int], float, str, tuple[int, int, int, int]] | LowConfidenceDetection | None:
     """
     Locate an object using a VLM→CV hybrid pipeline.
 
@@ -1052,15 +1057,15 @@ def locate_object_hybrid(
     bbox and rough_bbox so they don't punch a hole entirely inside the object
     that a context-aware inpainter just reconstructs as more of that object.
 
-    Raises LowConfidenceDetection (propagated from locate_object_vlm) if a
+    Returns a LowConfidenceDetection instance (propagated from
+    locate_object_vlm, not raised — an expected outcome, same as None) if a
     candidate was found but below the confidence threshold required to act.
-    Raises VQAResponseParseError (also propagated) if Gemini's response
-    could not be parsed — callers must not treat that the same as "not
-    found".
+    Raises VQAResponseParseError (propagated) if Gemini's response could not
+    be parsed — callers must not treat that the same as "not found".
     """
     result = locate_object_vlm(bgr, description)
-    if result is None:
-        return None
+    if result is None or isinstance(result, LowConfidenceDetection):
+        return result
 
     rough_bbox, confidence, note, hsv_lo, hsv_hi, area_frac = result
 
