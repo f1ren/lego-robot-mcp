@@ -2716,14 +2716,18 @@ def consult_vqa_for_pddl_domain(
         with open(DOMAIN_FIXED_PATH, "w") as f:
             f.write(result.new_domain)
         log.info(
-            "consult_vqa_for_pddl_domain: new domain saved to %s (original %s untouched)",
-            DOMAIN_FIXED_PATH, DOMAIN_PATH,
+            "consult_vqa_for_pddl_domain: new domain saved to %s (original %s untouched):\n%s",
+            DOMAIN_FIXED_PATH, DOMAIN_PATH, result.new_domain,
         )
+
+    if result.problem_updated:
+        log.info("consult_vqa_for_pddl_domain: new problem:\n%s", result.new_problem)
 
     if result.updated_plan is not None:
         log.info(
-            "consult_vqa_for_pddl_domain: auto-replanned (problem source: %s)",
+            "consult_vqa_for_pddl_domain: auto-replanned (problem source: %s) → %d actions: %s",
             "VQA-refined problem" if result.problem_updated else "last plan_pddl call",
+            len(result.updated_plan), result.updated_plan,
         )
         _last_plan = result.updated_plan
         if result.problem_updated:
