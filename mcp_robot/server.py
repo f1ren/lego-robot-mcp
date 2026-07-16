@@ -1854,11 +1854,11 @@ def navigate_to(
                         parts.append(f"YOLO error: {exc}")
 
                 if target_obj is None and target_class_free_text:
-                    try:
-                        target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
-                    except vision.LowConfidenceDetection as exc:
-                        parts.append(str(exc))
-                        low_confidence_seen = str(exc)
+                    target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                    if isinstance(target_obj, vision.LowConfidenceDetection):
+                        parts.append(str(target_obj))
+                        low_confidence_seen = str(target_obj)
+                        target_obj = None
 
                 if target_obj is None:
                     if not config.SCAN_ENABLED:
@@ -1911,11 +1911,11 @@ def navigate_to(
                         except Exception:
                             pass
                     if target_obj is None and bgr is not None and target_class_free_text:
-                        try:
-                            target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
-                        except vision.LowConfidenceDetection as exc:
-                            step_logs.append(str(exc))
-                            low_confidence_seen = str(exc)
+                        target_obj = grasp_mod._vlm_detect(bgr, target_class_free_text)
+                        if isinstance(target_obj, vision.LowConfidenceDetection):
+                            step_logs.append(str(target_obj))
+                            low_confidence_seen = str(target_obj)
+                            target_obj = None
 
                     if target_obj is None:
                         step_logs.append(
@@ -2184,12 +2184,12 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
         parse_error: vision.VQAResponseParseError | None = None
         try:
             vlm_result = vision.locate_object_hybrid(bgr, description)
-        except vision.LowConfidenceDetection as exc:
-            vlm_result = None
-            low_confidence = exc
         except vision.VQAResponseParseError as exc:
             vlm_result = None
             parse_error = exc
+        if isinstance(vlm_result, vision.LowConfidenceDetection):
+            low_confidence = vlm_result
+            vlm_result = None
 
         if vlm_result is None:
             annotated_bgr = heading.annotate_bgr(bgr)
