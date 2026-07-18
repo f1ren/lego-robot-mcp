@@ -35,11 +35,6 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────────────
   locate_object               VLM-based localization of arbitrary objects (Gemini Flash)
 
-PDDL task planning (plan_pddl, consult_vqa_for_pddl_domain) lives on the
-separate `napc` MCP server (github.com/f1ren/NAPC, registered in .mcp.json),
-not here — get_front_camera_image/get_external_camera_image supply the image
-paths that server's consult_vqa_for_pddl_domain tool needs.
-
 Run with:
     python3 -m mcp_robot.server
 """
@@ -1638,7 +1633,7 @@ def scan_for_target(
     """
     Rotate up to 360° CW in 30° steps searching for the target using the
     front camera and YOLO. Call this when get_robot_state does not find
-    the target — before plan_pddl or navigate_to.
+    the target — before navigate_to.
 
     The arm is lowered before sweeping so it does not block the camera.
     On success the robot is left facing the target, ready for navigate_to.
@@ -2524,15 +2519,6 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
         return _ok({"message": "No segments found since given timestamp", "segment_count": 0})
     return _ok({"video_path": result.video_path, "segment_count": result.segment_count,
                 "total_duration_s": result.total_duration_s})
-
-
-# ── PDDL task planning ───────────────────────────────────────────────────────
-# plan_pddl and consult_vqa_for_pddl_domain now live entirely on the separate
-# `napc` MCP server (github.com/f1ren/NAPC, registered in .mcp.json) — this
-# repo no longer imports napc as a library. Get fresh images for a consult
-# call from get_front_camera_image/get_external_camera_image below (each
-# already returns a saved-file path in its response text) and pass those
-# paths to that server's consult_vqa_for_pddl_domain tool.
 
 
 # ── background streaming ──────────────────────────────────────────────────────
