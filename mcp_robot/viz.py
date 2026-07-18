@@ -1,13 +1,14 @@
 """
 Optional rerun.io visualization for camera frames and CV detections.
 
-Usage:
-    RERUN_ENABLED=1 .venv/bin/python3 -m mcp_robot.server
+Enabled by default:
+    .venv/bin/python3 -m mcp_robot.server
 
-    RERUN_MODE=spawn  (default) — launches the rerun desktop viewer
+    RERUN_ENABLED=   (empty) — disable rerun logging entirely
+    RERUN_MODE=spawn (default) — launches the rerun desktop viewer
     RERUN_MODE=serve            — serves a gRPC + web viewer (browser on :9090)
 
-Silently no-ops if rerun-sdk is not installed or RERUN_ENABLED is unset.
+Silently no-ops if rerun-sdk is not installed or RERUN_ENABLED is explicitly disabled.
 """
 from __future__ import annotations
 
