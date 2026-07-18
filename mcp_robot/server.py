@@ -1148,6 +1148,19 @@ def click_button(
          first if it isn't visible at all. This also measures the straight-
          line distance to the switch.
 
+    After the press (or after a failed alignment/press — see below), the
+    robot reverses step 1: lowers the arm then opens the gripper, restoring
+    grasp-ready pose. Also not VQA-verified, for the same reason as step 1.
+    This matters beyond tidiness: a PDDL action modeled on this tool (e.g.
+    toggle-lights) may not itself declare that pressing a button disturbs
+    arm/gripper state, in which case a planner would believe the robot is
+    still grasp-ready immediately after — restoring the pose here makes
+    that belief true regardless of what the PDDL model does or doesn't
+    know, instead of leaving the robot mid-press for whatever navigate/grasp
+    runs next. Runs in a `finally`, so it still happens if alignment or the
+    press itself fails — prep_for_press has already disturbed the pose by
+    that point either way.
+
     The press distance is computed from that measured distance — converted to
     wheel-encoder degrees via the same px->mm body-plate calibration
     navigate_to() uses for its own drive distances (see navigation.mm_per_px /
@@ -1202,43 +1215,54 @@ def click_button(
     except Exception as exc:
         return _err(f"click_button: prep_for_press failed: {exc}")
 
-    # 2. Square up to the switch: navigate_to if not visible, else a single
-    #    turn correction if off-angle beyond tolerance. Also yields the
-    #    freshest measured distance to the switch.
-    align_err, distance_mm = _square_up_to_target(
-        target_class_yolo, target_class_free_text, config.CLICK_ALIGN_TOLERANCE_DEG,
-    )
-    if align_err is not None:
-        return align_err
-
-    # 3. Convert measured distance to a press distance: clamp + margin, same
-    #    px->mm->wheel-degrees pipeline navigate_to uses (see docstring).
-    if distance_mm is None:
-        press_mm = config.CLICK_PRESS_FALLBACK_MM
-        log.info("click_button: distance unmeasured — using fallback press distance %.0fmm", press_mm)
-    else:
-        clamped_mm = max(config.CLICK_PRESS_MIN_MM, min(distance_mm, config.CLICK_PRESS_MAX_MM))
-        press_mm = clamped_mm + config.CLICK_PRESS_MARGIN_MM
-        log.info(
-            "click_button: measured distance=%.0fmm (clamped=%.0fmm) — press distance=%.0fmm (+%.0fmm margin)",
-            distance_mm, clamped_mm, press_mm, config.CLICK_PRESS_MARGIN_MM,
+    try:
+        # 2. Square up to the switch: navigate_to if not visible, else a single
+        #    turn correction if off-angle beyond tolerance. Also yields the
+        #    freshest measured distance to the switch.
+        align_err, distance_mm = _square_up_to_target(
+            target_class_yolo, target_class_free_text, config.CLICK_ALIGN_TOLERANCE_DEG,
         )
-    press_degrees = int(round(nav_mod.mm_to_wheel_degrees(press_mm)))
+        if align_err is not None:
+            return align_err
 
-    # 4. Press and release — single RPi script, one VQA call.
-    desc = f"click_button speed={speed} press_degrees={press_degrees}"
-    release_degrees = int(round(press_degrees * config.CLICK_RELEASE_FRACTION))
-    expected_str = expected if expected else (
-        f"robot drives forward ~{press_degrees}° wheel rotation (pressing button), "
-        f"then immediately reverses ~{release_degrees}° (releasing, clearing the switch)"
-    )
-    return _with_change_analysis(
-        desc, expected_str,
-        lambda: robot_mod.click_button(speed, press_degrees),
-        context=context,
-        vqa_cameras={"simpleipcamera"},
-        skip_vqa=not config.CLICK_BUTTON_VQA,
-    )
+        # 3. Convert measured distance to a press distance: clamp + margin, same
+        #    px->mm->wheel-degrees pipeline navigate_to uses (see docstring).
+        if distance_mm is None:
+            press_mm = config.CLICK_PRESS_FALLBACK_MM
+            log.info("click_button: distance unmeasured — using fallback press distance %.0fmm", press_mm)
+        else:
+            clamped_mm = max(config.CLICK_PRESS_MIN_MM, min(distance_mm, config.CLICK_PRESS_MAX_MM))
+            press_mm = clamped_mm + config.CLICK_PRESS_MARGIN_MM
+            log.info(
+                "click_button: measured distance=%.0fmm (clamped=%.0fmm) — press distance=%.0fmm (+%.0fmm margin)",
+                distance_mm, clamped_mm, press_mm, config.CLICK_PRESS_MARGIN_MM,
+            )
+        press_degrees = int(round(nav_mod.mm_to_wheel_degrees(press_mm)))
+
+        # 4. Press and release — single RPi script, one VQA call.
+        desc = f"click_button speed={speed} press_degrees={press_degrees}"
+        release_degrees = int(round(press_degrees * config.CLICK_RELEASE_FRACTION))
+        expected_str = expected if expected else (
+            f"robot drives forward ~{press_degrees}° wheel rotation (pressing button), "
+            f"then immediately reverses ~{release_degrees}° (releasing, clearing the switch)"
+        )
+        return _with_change_analysis(
+            desc, expected_str,
+            lambda: robot_mod.click_button(speed, press_degrees),
+            context=context,
+            vqa_cameras={"simpleipcamera"},
+            skip_vqa=not config.CLICK_BUTTON_VQA,
+        )
+    finally:
+        # 5. Lower the arm + open the gripper — restores grasp-ready pose.
+        #    Runs even on an early return above (alignment failure): prep_for_press
+        #    already disturbed the pose, so it needs undoing either way. Not
+        #    allowed to raise past this point — a cleanup failure shouldn't
+        #    mask whatever the try block already decided to return.
+        try:
+            robot_mod.restore_grasp_pose()
+        except Exception as exc:
+            log.error("click_button: restore_grasp_pose failed: %s", exc, exc_info=True)
 
 
 # ── arm ───────────────────────────────────────────────────────────────────────

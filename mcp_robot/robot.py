@@ -514,3 +514,23 @@ def prep_for_press(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
         "arm":     arm_result,
         "gripper": gripper_result,
     }
+
+
+def restore_grasp_pose(speed: int = config.DEFAULT_GRIPPER_SPEED) -> dict:
+    """Lower arm fully then open gripper — reverses prep_for_press once a
+    button/switch press is done.
+
+    Arm before gripper, matching open-gripper's arm-lowered precondition in
+    the PDDL domain (pddl/robot_domain.pddl) — so this leaves
+    (is-in-grasp-pose) true again, not just the two raw facts. Without this,
+    a PDDL action modeled on this tool (e.g. toggle-lights) that doesn't
+    itself retract is-in-grasp-pose would have the planner believe the robot
+    is still grasp-ready when the real arm/gripper were left mid-press.
+    """
+    arm_result     = lower_arm(speed=config.DEFAULT_ARM_SPEED)
+    gripper_result = control_gripper("open", speed=speed)
+    return {
+        "action":  "restore_grasp_pose",
+        "arm":     arm_result,
+        "gripper": gripper_result,
+    }
