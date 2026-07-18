@@ -405,13 +405,13 @@ OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
-# RERUN_ENABLED=1          enable rerun logging
+# Enabled by default. RERUN_ENABLED=   (empty) disables rerun logging
 # RERUN_MODE=spawn         launch the desktop viewer (default)
 # RERUN_MODE=serve         serve gRPC + web viewer
 # RERUN_CONNECT=1          connect to an already-running viewer (use in MCP server
 #                          when stream.py has already spawned the viewer)
 # RERUN_ADDR               gRPC URL for RERUN_CONNECT (default: rerun+http://127.0.0.1:9876)
-RERUN_ENABLED = bool(os.getenv("RERUN_ENABLED", ""))
+RERUN_ENABLED = bool(os.getenv("RERUN_ENABLED", "1"))
 RERUN_MODE    = os.getenv("RERUN_MODE", "spawn")
 RERUN_CONNECT = bool(os.getenv("RERUN_CONNECT", ""))
 RERUN_ADDR    = os.getenv("RERUN_ADDR", "rerun+http://127.0.0.1:9876")

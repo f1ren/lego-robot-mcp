@@ -999,21 +999,23 @@ def cv_refine_location(
             log.warning("cv_refine_location: no contours found in search region")
             return None
         # Nothing satisfied the area band at any radius. Prefer a contour that
-        # at least overlaps the rough bbox over the single largest raw blob in
-        # the widest window — the widest window can contain large, completely
-        # unrelated regions (e.g. a sunlit floor patch), and picking by size
-        # alone would pick one of those over a smaller, plausible, on-target
-        # blob that merely missed the area band.
+        # at least overlaps the rough bbox over giving up — the widest window
+        # can contain large, completely unrelated regions (e.g. a sunlit floor
+        # patch), so picking the single largest raw blob irrespective of
+        # position risks latching onto one of those instead of what the VLM
+        # actually pointed at. If nothing even overlaps the rough bbox, there
+        # is no safe candidate here — return None so the caller falls back to
+        # the VLM's rough bbox instead of a confidently-wrong CV refinement.
         overlapping = [c for c in last_contours
                        if _contour_overlaps_bbox(c, last_origin, rough_bbox)]
-        if overlapping:
-            log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; "
-                        "using largest overlapping rough bbox", exp_px)
-            best = max(overlapping, key=_cv2.contourArea)
-        else:
+        if not overlapping:
             log.warning("cv_refine_location: no contour in area range or overlapping rough bbox "
-                        "(exp=%.0fpx) at any radius; using largest raw blob", exp_px)
-            best = max(last_contours, key=_cv2.contourArea)
+                        "(exp=%.0fpx) at any radius; giving up (caller falls back to VLM rough bbox)",
+                        exp_px)
+            return None
+        log.warning("cv_refine_location: no contour in area range (exp=%.0fpx) at any radius; "
+                    "using largest overlapping rough bbox", exp_px)
+        best = max(overlapping, key=_cv2.contourArea)
         best_origin = last_origin
 
     sx1, sy1 = best_origin

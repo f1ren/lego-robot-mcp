@@ -117,5 +117,56 @@ class TestHeadingDirection(unittest.TestCase):
         self._assert_heading("heading/droidcam_cup_gripper_shadow.jpg", "SW")
 
 
+class TestHeadingBodyCenter(unittest.TestCase):
+    """Regression test for body_hull's fragment-clustering fix (see
+    mcp_robot/heading.py::_BODY_CLUSTER_RADIUS_FACTOR).
+
+    On 2026-07-18 the robot's yellow chassis was sliced into disjoint blobs by
+    the gripper/arm, PCB, and motor housings sitting on top of it. body_hull
+    used to cluster fragments by centroid-distance-to-the-single-largest-
+    fragment only, which dropped a whole legitimate chunk of chassis on the
+    left side (its centroid was ~170px from the seed's — just outside the old
+    radius, even though the two fragments' nearest edges were only ~114px
+    apart) and biased body_center toward the right wheel instead of the
+    chassis's true visual center, so the drawn arrow started off-center.
+    """
+
+    FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "heading" / "droidcam_split_yellow_body.jpg"
+
+    # Manually verified: the yellow chassis plate spans roughly this region in
+    # the raw frame. body_center must land inside it.
+    _CHASSIS_GROUND_TRUTH_BBOX = (470, 1020, 710, 1190)
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import body_hull, detect_heading
+        cls._detect = staticmethod(detect_heading)
+        cls._body_hull = staticmethod(body_hull)
+
+    def test_body_center_spans_both_chassis_fragments(self):
+        bgr = cv2.imread(str(self.FIXTURE))
+        self.assertIsNotNone(bgr, f"Could not load {self.FIXTURE}")
+
+        body = self._body_hull(bgr)
+        self.assertIsNotNone(body, "body_hull should detect the robot body")
+        x, y, w, h = cv2.boundingRect(body)
+        self.assertLess(
+            x, 550,
+            f"body hull left edge={x} — should extend into the left-side chassis fragment "
+            "(previously dropped for sitting just outside the seed-only cluster radius)",
+        )
+
+        heading = self._detect(bgr)
+        self.assertIsNotNone(heading, f"No heading detected in {self.FIXTURE}")
+        gx1, gy1, gx2, gy2 = self._CHASSIS_GROUND_TRUTH_BBOX
+        cx, cy = heading.body_center
+        self.assertTrue(
+            gx1 <= cx <= gx2 and gy1 <= cy <= gy2,
+            f"body_center {heading.body_center} should land within the chassis "
+            f"{self._CHASSIS_GROUND_TRUTH_BBOX} — if it's skewed to one edge, "
+            "clustering dropped a real fragment again",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

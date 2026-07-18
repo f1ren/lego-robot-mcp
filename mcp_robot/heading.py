@@ -52,6 +52,14 @@ _BLACK_S_MAX = 90
 _MIN_BODY_AREA_FRAC = 0.0025   # 0.25% of frame (handles partially occluded body)
 _MIN_GRIPPER_AREA_FRAC = 0.0005  # 0.05% of frame
 
+# Two yellow-body fragments are clustered together when their nearest edges
+# are within this factor × the smaller fragment's own bounding-box diagonal.
+# Scaling by the smaller side (not a single frame- or seed-wide radius) lets
+# two substantial fragments (e.g. chassis halves split by an occluder) bridge
+# a sizeable gap, while a tiny stray fragment (noise, a reflection) only
+# merges when it is genuinely touching something its own size.
+_BODY_CLUSTER_RADIUS_FACTOR = 1.6
+
 # Gripper search ROI: expand along the body's long axis (where the arm extends)
 # more aggressively than perpendicular, relative to the larger/smaller body dim.
 _ROI_EXPAND_ALONG = 1.5   # fraction of max(bw, bh) along the forward/backward axis
@@ -92,6 +100,18 @@ def _centroid(contour: np.ndarray) -> tuple[int, int] | None:
     return int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])
 
 
+def _min_contour_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Minimum Euclidean distance between any vertex of contour `a` and `b`.
+
+    Elongated/irregular blobs can have centroids much farther apart than
+    their nearest edges — nearest-edge distance is what actually reflects
+    whether two fragments are part of the same physical object.
+    """
+    pa = a.reshape(-1, 1, 2).astype(np.float32)
+    pb = b.reshape(1, -1, 2).astype(np.float32)
+    return float(np.sqrt(np.sum((pa - pb) ** 2, axis=2).min()))
+
+
 def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     """
     Locate the robot's yellow body in `bgr` and return its convex hull
@@ -124,17 +144,52 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     if seed_center is None:
         log.info("body_hull: largest yellow contour has degenerate (zero-area) centroid")
         return None
-    sx, sy, sw, sh = cv2.boundingRect(seed)
-    cluster_radius = float(np.hypot(sw, sh)) * 1.6
-    pts: list[np.ndarray] = [seed.reshape(-1, 2)]
+
+    candidates: list[np.ndarray] = [seed]
     for c in contours:
         if c is seed or cv2.contourArea(c) < 30:
             continue
-        cc = _centroid(c)
-        if cc is None:
-            continue
-        if np.hypot(cc[0] - seed_center[0], cc[1] - seed_center[1]) <= cluster_radius:
-            pts.append(c.reshape(-1, 2))
+        candidates.append(c)
+    diagonals = [float(np.hypot(*cv2.boundingRect(c)[2:])) for c in candidates]
+
+    # Union-find over nearest-edge distance between ALL pairs, not just
+    # distance-to-seed: dark occluders on top of the chassis (gripper/arm,
+    # PCB, motor housings) can slice the yellow plate into several disjoint
+    # contours whose two largest pieces have centroids farther apart than a
+    # single seed-based radius even though their nearest edges are close
+    # (both are elongated strips, not blobs centered on their own mass).
+    # Gating on distance-to-seed's centroid alone missed this and silently
+    # dropped a real chunk of the body, biasing the centroid toward whichever
+    # end the seed happened to be.
+    #
+    # The allowed gap for each pair scales with the SMALLER of the two
+    # fragments' own bounding-box diagonals (see _BODY_CLUSTER_RADIUS_FACTOR)
+    # rather than a single radius derived from the seed alone — otherwise a
+    # tiny, spatially unrelated speck (noise, a reflection) can hitch a ride
+    # by having one lucky point fall within the seed's generous radius, even
+    # though it is far larger than that speck's own scale would justify.
+    n = len(candidates)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pair_radius = _BODY_CLUSTER_RADIUS_FACTOR * min(diagonals[i], diagonals[j])
+            if _min_contour_distance(candidates[i], candidates[j]) <= pair_radius:
+                union(i, j)
+
+    seed_root = find(0)  # seed is always candidates[0]
+    pts = [candidates[i].reshape(-1, 2) for i in range(n) if find(i) == seed_root]
     body_pts = np.vstack(pts)
     body = cv2.convexHull(body_pts)
     area = cv2.contourArea(body)
