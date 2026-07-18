@@ -52,6 +52,25 @@ _BLACK_S_MAX = 90
 _MIN_BODY_AREA_FRAC = 0.0025   # 0.25% of frame (handles partially occluded body)
 _MIN_GRIPPER_AREA_FRAC = 0.0005  # 0.05% of frame
 
+# Maximum plausible yellow-body area, as a fraction of frame area. Across every
+# existing fixture (heading/navigation/grasp_readiness — 20 frames, several
+# camera orientations) the real chassis hull is always 1.1%-5.8% of the frame.
+# A sunlit/warm-toned floor or wall can pass the yellow HSV mask (see
+# YELLOW_HSV_LO/HI) as a much larger contiguous blob than the chassis itself,
+# especially when the chassis is fragmented by the gripper/arm/PCB sitting on
+# top of it (see _BODY_CLUSTER_RADIUS_FACTOR below) — 10% leaves ~2x headroom
+# over the largest legitimate sample while rejecting that kind of false
+# positive outright (observed case: 26% of frame, 2026-07-18).
+_MAX_BODY_AREA_FRAC = 0.10
+
+# When the largest yellow contour produces an implausible (too small or too
+# large) cluster, retry seeding from the next-largest contour instead of
+# giving up immediately — the true chassis is not always the single largest
+# yellow contour in the frame (a false-positive floor/wall patch can outsize
+# it), but it is reliably among the largest few. Bounds worst-case cost since
+# each retry re-runs the O(n^2) pairwise clustering below.
+_MAX_SEED_RETRIES = 8
+
 # Two yellow-body fragments are clustered together when their nearest edges
 # are within this factor × the smaller fragment's own bounding-box diagonal.
 # Scaling by the smaller side (not a single frame- or seed-wide radius) lets
@@ -112,39 +131,27 @@ def _min_contour_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sqrt(np.sum((pa - pb) ** 2, axis=2).min()))
 
 
-def body_hull(bgr: np.ndarray) -> np.ndarray | None:
+def _cluster_from_seed(seed: np.ndarray, contours: list[np.ndarray]) -> np.ndarray:
     """
-    Locate the robot's yellow body in `bgr` and return its convex hull
-    (Nx1x2 int32 contour points), or None if no yellow body is found or
-    it's too small to be the robot.
+    Build a convex hull by transitively clustering `contours` around `seed`.
 
-    Locates the body by clustering nearby yellow contours into one shape so
-    callers get a reliable centroid + ROI. This hull is NOT used by
-    `detect_heading` to compute the heading axis (Hough lines do that) —
-    using minAreaRect on the combined hull is unreliable when oblique camera
-    angles make the visible yellow region L-shaped.
+    Union-find over nearest-edge distance between ALL pairs, not just
+    distance-to-seed: dark occluders on top of the chassis (gripper/arm,
+    PCB, motor housings) can slice the yellow plate into several disjoint
+    contours whose two largest pieces have centroids farther apart than a
+    single seed-based radius even though their nearest edges are close
+    (both are elongated strips, not blobs centered on their own mass).
+    Gating on distance-to-seed's centroid alone missed this and silently
+    dropped a real chunk of the body, biasing the centroid toward whichever
+    end the seed happened to be.
+
+    The allowed gap for each pair scales with the SMALLER of the two
+    fragments' own bounding-box diagonals (see _BODY_CLUSTER_RADIUS_FACTOR)
+    rather than a single radius derived from the seed alone — otherwise a
+    tiny, spatially unrelated speck (noise, a reflection) can hitch a ride
+    by having one lucky point fall within the seed's generous radius, even
+    though it is far larger than that speck's own scale would justify.
     """
-    if bgr is None or bgr.size == 0:
-        return None
-    h, w = bgr.shape[:2]
-    frame_area = h * w
-
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
-    yellow_mask = cv2.morphologyEx(
-        yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
-    )
-
-    contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        log.info("body_hull: no yellow contours found in frame")
-        return None
-    seed = max(contours, key=cv2.contourArea)
-    seed_center = _centroid(seed)
-    if seed_center is None:
-        log.info("body_hull: largest yellow contour has degenerate (zero-area) centroid")
-        return None
-
     candidates: list[np.ndarray] = [seed]
     for c in contours:
         if c is seed or cv2.contourArea(c) < 30:
@@ -152,22 +159,6 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
         candidates.append(c)
     diagonals = [float(np.hypot(*cv2.boundingRect(c)[2:])) for c in candidates]
 
-    # Union-find over nearest-edge distance between ALL pairs, not just
-    # distance-to-seed: dark occluders on top of the chassis (gripper/arm,
-    # PCB, motor housings) can slice the yellow plate into several disjoint
-    # contours whose two largest pieces have centroids farther apart than a
-    # single seed-based radius even though their nearest edges are close
-    # (both are elongated strips, not blobs centered on their own mass).
-    # Gating on distance-to-seed's centroid alone missed this and silently
-    # dropped a real chunk of the body, biasing the centroid toward whichever
-    # end the seed happened to be.
-    #
-    # The allowed gap for each pair scales with the SMALLER of the two
-    # fragments' own bounding-box diagonals (see _BODY_CLUSTER_RADIUS_FACTOR)
-    # rather than a single radius derived from the seed alone — otherwise a
-    # tiny, spatially unrelated speck (noise, a reflection) can hitch a ride
-    # by having one lucky point fall within the seed's generous radius, even
-    # though it is far larger than that speck's own scale would justify.
     n = len(candidates)
     parent = list(range(n))
 
@@ -190,18 +181,82 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
 
     seed_root = find(0)  # seed is always candidates[0]
     pts = [candidates[i].reshape(-1, 2) for i in range(n) if find(i) == seed_root]
-    body_pts = np.vstack(pts)
-    body = cv2.convexHull(body_pts)
-    area = cv2.contourArea(body)
-    min_area = _MIN_BODY_AREA_FRAC * frame_area
-    if area < min_area:
-        log.info(
-            "body_hull: yellow blob too small (%.0fpx < %.0fpx min, %.2f%% of frame) — "
-            "robot may be out of frame, far away, or occluded",
-            area, min_area, 100.0 * area / frame_area,
-        )
+    return cv2.convexHull(np.vstack(pts))
+
+
+def body_hull(bgr: np.ndarray) -> np.ndarray | None:
+    """
+    Locate the robot's yellow body in `bgr` and return its convex hull
+    (Nx1x2 int32 contour points), or None if no yellow body is found or
+    it's too small or too large to plausibly be the robot.
+
+    Locates the body by clustering nearby yellow contours into one shape so
+    callers get a reliable centroid + ROI. This hull is NOT used by
+    `detect_heading` to compute the heading axis (Hough lines do that) —
+    using minAreaRect on the combined hull is unreliable when oblique camera
+    angles make the visible yellow region L-shaped.
+
+    The single largest yellow contour is not always the chassis — a
+    sunlit/warm-toned floor or wall can pass the yellow mask as a bigger
+    contiguous blob than the (possibly occluder-fragmented) chassis itself.
+    Clustering is retried from progressively smaller seed contours (up to
+    _MAX_SEED_RETRIES) until one produces a plausibly-sized hull (see
+    _MIN_BODY_AREA_FRAC / _MAX_BODY_AREA_FRAC), so a single oversized false
+    positive doesn't blot out a real, smaller robot elsewhere in frame.
+    """
+    if bgr is None or bgr.size == 0:
         return None
-    return body
+    h, w = bgr.shape[:2]
+    frame_area = h * w
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    yellow_mask = cv2.morphologyEx(
+        yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+
+    contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        log.info("body_hull: no yellow contours found in frame")
+        return None
+
+    min_area = _MIN_BODY_AREA_FRAC * frame_area
+    max_area = _MAX_BODY_AREA_FRAC * frame_area
+    seed_candidates = sorted(
+        (c for c in contours if cv2.contourArea(c) >= 30),
+        key=cv2.contourArea, reverse=True,
+    )[:_MAX_SEED_RETRIES]
+    if not seed_candidates:
+        log.info("body_hull: no yellow contour reaches the minimum 30px seed area")
+        return None
+
+    for rank, seed in enumerate(seed_candidates):
+        if _centroid(seed) is None:
+            continue
+        body = _cluster_from_seed(seed, contours)
+        area = cv2.contourArea(body)
+        if area < min_area:
+            log.info(
+                "body_hull: seed rank %d cluster too small (%.0fpx < %.0fpx min, %.2f%% of frame) — trying next seed",
+                rank, area, min_area, 100.0 * area / frame_area,
+            )
+            continue
+        if area > max_area:
+            log.info(
+                "body_hull: seed rank %d cluster implausibly large (%.0fpx > %.0fpx max, %.1f%% of frame) — "
+                "likely a false-positive yellow surface (floor/wall), trying next seed",
+                rank, area, max_area, 100.0 * area / frame_area,
+            )
+            continue
+        return body
+
+    log.info(
+        "body_hull: no plausible yellow cluster found after trying %d seed candidate(s) — "
+        "robot may be out of frame, far away, occluded, or the scene has a large "
+        "yellow-ish false positive (floor/wall) with no smaller genuine chassis fragment",
+        len(seed_candidates),
+    )
+    return None
 
 
 def detect_heading(bgr: np.ndarray) -> Heading | None:
@@ -301,11 +356,17 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
         np.array([179, _BLACK_S_MAX, _BLACK_V_MAX], dtype=np.uint8),
     )
     # Suppress black pixels that overlap the yellow body itself — the gripper
-    # is what extends *beyond* the body.
-    body_mask_full = np.zeros((h, w), dtype=np.uint8)
-    cv2.drawContours(body_mask_full, [body], -1, 255, thickness=cv2.FILLED)
-    body_mask_dilated = cv2.dilate(body_mask_full, np.ones((9, 9), np.uint8))
-    body_in_roi = body_mask_dilated[y0:y1, x0:x1]
+    # is what extends *beyond* the body. Uses the raw color-thresholded
+    # yellow_mask here, NOT body's convex hull: the hull fills in any concave
+    # notch in the chassis's true silhouette (e.g. where the arm/gripper
+    # mount sits recessed between two chassis lobes), and that filled-in area
+    # reads as "body" despite not being yellow at all. When the gripper is
+    # tucked into that notch rather than clearly protruding past the hull,
+    # suppressing by the hull erases the real gripper pixels along with the
+    # genuine body ones, leaving only its two jaw-tips — each individually
+    # under _MIN_GRIPPER_AREA_FRAC and too far apart to link into one blob.
+    yellow_dilated_full = cv2.dilate(yellow_mask, np.ones((9, 9), np.uint8))
+    body_in_roi = yellow_dilated_full[y0:y1, x0:x1]
     black_mask = cv2.bitwise_and(black_mask, cv2.bitwise_not(body_in_roi))
     black_mask = cv2.morphologyEx(
         black_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
