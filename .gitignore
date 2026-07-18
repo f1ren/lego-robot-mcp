@@ -18,11 +18,6 @@ output/
 # Test files
 tests/fixtures/*/annotated/
 
-
-# VQA-suggested domain fix (consult_vqa_for_pddl_domain); overrides
-# robot_domain.pddl for plan_pddl when present — delete to reset
-pddl/robot_domain_fixed.pddl
-
 # Models
 yolo11n.pt
 
