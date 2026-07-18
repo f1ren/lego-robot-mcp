@@ -103,5 +103,50 @@ class TestHybridLocate(unittest.TestCase):
         )
 
 
+class TestCvRefineLocationFallback(unittest.TestCase):
+    """Regression test for the zero-overlap last-resort branch in
+    cv_refine_location (mcp_robot/vision.py) — distinct from the background-merge
+    fix above.  Feeds the exact VLM output logged in production on
+    light_switch_cabinet.jpg directly to cv_refine_location, so this runs
+    offline (no live VLM call, not marked `live`).
+
+    On 2026-07-18 the VLM correctly placed rough_bbox=[525,637,648,700] on a
+    wall light switch, but its proposed HSV range (warm hue, near-zero
+    saturation floor) also matches this frame's sunlit wood floor/panel. No
+    contour anywhere in the search region satisfied the area band, nor even
+    merely overlapped the rough bbox — cv_refine_location used to fall back to
+    the single largest raw blob in the widest window with no positional
+    constraint at all, landing on a 50k-pixel patch of floor next to the robot
+    instead of the switch. It must now return None so locate_object_hybrid
+    falls back to the VLM's (correct) rough bbox instead.
+    """
+
+    FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "grasp_readiness" / "light_switch_cabinet.jpg"
+
+    # Exact values logged by locate_object_vlm for this frame — replayed here
+    # instead of calling Gemini again so this test is deterministic and free.
+    _ROUGH_BBOX = (525, 637, 648, 700)
+    _HSV_LO = (15, 10, 200)
+    _HSV_HI = (40, 255, 255)
+    _AREA_FRAC = 0.0080
+
+    def test_no_overlapping_contour_returns_none_not_wrong_blob(self):
+        import numpy as np
+
+        from mcp_robot import vision
+
+        bgr = cv2.imread(str(self.FIXTURE))
+        self.assertIsNotNone(bgr, f"Could not load {self.FIXTURE}")
+
+        hsv_lo = np.array(self._HSV_LO, dtype=np.uint8)
+        hsv_hi = np.array(self._HSV_HI, dtype=np.uint8)
+        refined = vision.cv_refine_location(bgr, self._ROUGH_BBOX, hsv_lo, hsv_hi, self._AREA_FRAC)
+        self.assertIsNone(
+            refined,
+            f"cv_refine_location should give up (None) when no contour overlaps the rough "
+            f"bbox anywhere, not confidently return an unrelated blob; got {refined}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

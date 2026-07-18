@@ -1,10 +1,11 @@
 """
 Live camera stream → rerun viewer.
 
-Usage:
-    RERUN_ENABLED=1 .venv/bin/python3 -m mcp_robot.stream
-    RERUN_ENABLED=1 .venv/bin/python3 -m mcp_robot.stream --fps 3
-    RERUN_ENABLED=1 RERUN_MODE=serve .venv/bin/python3 -m mcp_robot.stream
+Rerun is enabled by default. Usage:
+    .venv/bin/python3 -m mcp_robot.stream
+    .venv/bin/python3 -m mcp_robot.stream --fps 3
+    RERUN_MODE=serve .venv/bin/python3 -m mcp_robot.stream
+    RERUN_ENABLED= .venv/bin/python3 -m mcp_robot.stream   # (empty) disable rerun
 
 The rerun binary in the venv (.venv/bin/rerun) is used automatically.
 Ctrl-C to stop.
