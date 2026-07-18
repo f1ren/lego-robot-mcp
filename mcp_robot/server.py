@@ -2544,14 +2544,15 @@ def plan_pddl(problem_pddl: str) -> dict:
     The robot domain (pddl/robot_domain.pddl, or pddl/robot_domain_fixed.pddl
     when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
     defines seven actions:
-      - navigate         ?from ?to         → navigate_to  [requires arm-lowered + gripper-open —
+      - navigate         ?from ?to         → navigate_to  [requires is-in-grasp-pose —
                                               this is the approach leg toward a grasp target]
       - navigate-holding ?from ?to ?object → navigate_to  [requires holding ?object — the
                                               transport leg after grasp, before place]
-      - open-gripper                       → control_gripper(open)  [requires arm-lowered]
+      - open-gripper                       → control_gripper(open)  [requires arm-lowered;
+                                              the only action that asserts is-in-grasp-pose]
       - lower-arm                          → lower_arm
       - lift-arm         ?object           → lift_arm  [requires holding ?object + arm-lowered]
-      - grasp            ?object ?location → control_gripper(close)  [gripper+arm must be ready]
+      - grasp            ?object ?location → control_gripper(close)  [requires is-in-grasp-pose]
       - place            ?object ?location → put  (opens gripper + raises arm)
 
     You supply only the *problem* as a PDDL string.  It must declare:
@@ -2559,14 +2560,20 @@ def plan_pddl(problem_pddl: str) -> dict:
       - (:init ...)    — robot-at, object-at, gripper-empty, adjacent pairs
       - (:goal ...)    — desired end state
 
-    Convention — NEVER assert (arm-lowered) or (gripper-open) in (:init), even
-    if the robot's physical state has them true.  Omitting them forces the planner
-    to always emit lower-arm and open-gripper before every grasp, which matches
-    the CLAUDE.md safety rules ("always open/lower regardless of observed state").
-    This is also structurally enforced: `navigate`'s precondition requires
-    arm-lowered + gripper-open, and `open-gripper`'s precondition requires
-    arm-lowered — so the planner cannot reach a grasp target without first
-    lowering the arm and then opening the gripper, in that order.
+    Convention — NEVER assert (arm-lowered), (gripper-open), or
+    (is-in-grasp-pose) in (:init), even if the robot's physical state has
+    them true.  Omitting them forces the planner to always emit lower-arm
+    and open-gripper before every grasp, which matches the CLAUDE.md safety
+    rules ("always open/lower regardless of observed state"). This is also
+    structurally enforced: `navigate`'s and `grasp`'s preconditions require
+    is-in-grasp-pose, which only `open-gripper` asserts (and which itself
+    requires arm-lowered) — so the planner cannot reach a grasp target
+    without first lowering the arm and then opening the gripper, in that
+    order. Any action that disturbs arm/gripper posture (raises the arm,
+    closes the gripper for a non-grasp reason, etc.) must retract
+    is-in-grasp-pose in its own :effect — see the domain file's convention
+    comment on `navigate` — otherwise the planner won't know to re-run
+    lower-arm/open-gripper before the next navigate or grasp.
 
     Example problem (move a cup from the table to the sink):
 
