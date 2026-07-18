@@ -34,7 +34,11 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   Vision / localization
   ─────────────────────
   locate_object               VLM-based localization of arbitrary objects (Gemini Flash)
-  consult_vqa_for_pddl_domain VQA consultation on PDDL domain gaps; saves new domain if suggested
+
+PDDL task planning (plan_pddl, consult_vqa_for_pddl_domain) lives on the
+separate `napc` MCP server (github.com/f1ren/NAPC, registered in .mcp.json),
+not here — get_front_camera_image/get_external_camera_image supply the image
+paths that server's consult_vqa_for_pddl_domain tool needs.
 
 Run with:
     python3 -m mcp_robot.server
@@ -78,18 +82,6 @@ _last_target_distance_px: float | None = None
 _last_target_robot_radius_px: float | None = None
 _last_target_yolo: str = ""
 _last_target_free_text: str = ""
-
-# ── last PDDL plan tracker ───────────────────────────────────────────────────
-# Stored by plan_pddl after every solve() call, including an empty result —
-# that's itself one of the two documented triggers for
-# consult_vqa_for_pddl_domain, which reads this to show the VQA model the
-# plan the robot was actually following. None means plan_pddl has not been
-# called yet this session, distinct from [] meaning it ran and found no plan.
-_last_plan: list[str] | None = None
-# The problem_pddl string that produced _last_plan. consult_vqa_for_pddl_domain
-# needs the original problem text (not just the grounded plan) to show the VQA
-# and to auto-replan once a fix is applied — None until plan_pddl is first called.
-_last_problem_pddl: str | None = None
 
 # ── initialization tracker ────────────────────────────────────────────────────
 
@@ -707,6 +699,12 @@ def turn_to(
             "pass target_class_yolo/target_class_free_text, or call "
             "navigate_to()/click_button() first."
         )
+    if yolo and not free:
+        return _err(
+            "turn_to: target_class_free_text must be non-empty when target_class_yolo is set "
+            "(otherwise the VLM fallback is silently skipped if YOLO finds nothing) — pass "
+            "both explicitly, or pass neither to reuse the last navigate_to()/click_button() target."
+        )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
 
@@ -841,6 +839,12 @@ def drive_to(
             "drive_to: no target specified and no prior target on record — "
             "pass target_class_yolo/target_class_free_text, or call "
             "navigate_to()/click_button() first."
+        )
+    if yolo and not free:
+        return _err(
+            "drive_to: target_class_free_text must be non-empty when target_class_yolo is set "
+            "(otherwise the VLM fallback is silently skipped if YOLO finds nothing) — pass "
+            "both explicitly, or pass neither to reuse the last navigate_to()/click_button() target."
         )
     if not (config.SPEED_MIN <= abs(speed) <= config.SPEED_MAX):
         return _err(f"speed must be between {config.SPEED_MIN} and {config.SPEED_MAX} (abs).")
@@ -2389,7 +2393,7 @@ def capture_external_video_clip(
 @mcp.tool()
 def get_robot_state(
     target_class_yolo: str,
-    target_class_free_text: str = "",
+    target_class_free_text: str,
 ) -> list[ImageContent | TextContent]:
     """
     One-shot state snapshot: all motor positions + live frames from both
@@ -2408,11 +2412,20 @@ def get_robot_state(
         target_class_free_text: Free-text description for Gemini Flash when YOLO
                                 finds nothing (e.g. "light switch", "door handle").
                                 The detected object's angle from the robot's heading
-                                is returned so you know how much to turn.
+                                is returned so you know how much to turn. No default —
+                                REQUIRED whenever target_class_yolo is non-empty (the
+                                VLM fallback is silently skipped otherwise); pass ""
+                                for both to skip object search and just check state.
     """
     global _state_call_count, _last_target_distance_px, _last_target_robot_radius_px
     global _last_target_yolo, _last_target_free_text
     log.info("[TOOL] get_robot_state yolo=%r free_text=%r", target_class_yolo, target_class_free_text)
+    if target_class_yolo and not target_class_free_text:
+        return [TextContent(type="text", text=(
+            "ERROR: target_class_free_text must be non-empty when target_class_yolo is set — "
+            "otherwise the VLM fallback is silently skipped if YOLO finds nothing. "
+            "Pass both, or pass target_class_yolo=\"\" too to skip object search entirely."
+        ))]
     try:
         _state_call_count += 1
         content: list[ImageContent | TextContent] = []
@@ -2514,259 +2527,12 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
 
 
 # ── PDDL task planning ───────────────────────────────────────────────────────
-# The actual STRIPS solving and VQA-diagnose-and-replan loop live in
-# napc (extracted from this file — see
-# github.com/f1ren/NAPC). Only what's genuinely
-# robot-specific stays here: the on-disk domain-file convention, camera
-# capture, and video-subtitle logging.
-
-_PDDL_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "pddl",
-)
-DOMAIN_PATH = os.path.join(_PDDL_DIR, "robot_domain.pddl")
-# Experimental override written by consult_vqa_for_pddl_domain. When present,
-# plan_pddl uses this instead of DOMAIN_PATH so the original, git-tracked
-# domain is never mutated. Gitignored; delete the file to fall back to
-# DOMAIN_PATH.
-DOMAIN_FIXED_PATH = os.path.join(_PDDL_DIR, "robot_domain_fixed.pddl")
-
-
-def _active_domain_path() -> str:
-    return DOMAIN_FIXED_PATH if os.path.exists(DOMAIN_FIXED_PATH) else DOMAIN_PATH
-
-
-@mcp.tool()
-def plan_pddl(problem_pddl: str) -> dict:
-    """
-    Run the PDDL task planner and return a grounded action sequence.
-
-    The robot domain (pddl/robot_domain.pddl, or pddl/robot_domain_fixed.pddl
-    when a VQA-suggested fix is active — see consult_vqa_for_pddl_domain)
-    defines seven actions:
-      - navigate         ?from ?to         → navigate_to  [requires is-in-grasp-pose —
-                                              this is the approach leg toward a grasp target]
-      - navigate-holding ?from ?to ?object → navigate_to  [requires holding ?object — the
-                                              transport leg after grasp, before place]
-      - open-gripper                       → control_gripper(open)  [requires arm-lowered;
-                                              the only action that asserts is-in-grasp-pose]
-      - lower-arm                          → lower_arm
-      - lift-arm         ?object           → lift_arm  [requires holding ?object + arm-lowered]
-      - grasp            ?object ?location → control_gripper(close)  [requires is-in-grasp-pose]
-      - place            ?object ?location → put  (opens gripper + raises arm)
-
-    You supply only the *problem* as a PDDL string.  It must declare:
-      - (:objects ...) — all location and object instances (untyped)
-      - (:init ...)    — robot-at, object-at, gripper-empty, adjacent pairs
-      - (:goal ...)    — desired end state
-
-    Convention — NEVER assert (arm-lowered), (gripper-open), or
-    (is-in-grasp-pose) in (:init), even if the robot's physical state has
-    them true.  Omitting them forces the planner to always emit lower-arm
-    and open-gripper before every grasp, which matches the CLAUDE.md safety
-    rules ("always open/lower regardless of observed state"). This is also
-    structurally enforced: `navigate`'s and `grasp`'s preconditions require
-    is-in-grasp-pose, which only `open-gripper` asserts (and which itself
-    requires arm-lowered) — so the planner cannot reach a grasp target
-    without first lowering the arm and then opening the gripper, in that
-    order. Any action that disturbs arm/gripper posture (raises the arm,
-    closes the gripper for a non-grasp reason, etc.) must retract
-    is-in-grasp-pose in its own :effect — see the domain file's convention
-    comment on `navigate` — otherwise the planner won't know to re-run
-    lower-arm/open-gripper before the next navigate or grasp.
-
-    Example problem (move a cup from the table to the sink):
-
-        (define (problem move-cup)
-          (:domain lego-robot)
-          (:objects loc-start loc-table loc-sink cup)
-          (:init
-            (robot-at loc-start)
-            (object-at cup loc-table)
-            (gripper-empty)
-            (adjacent loc-start loc-table)
-            (adjacent loc-table loc-start)
-            (adjacent loc-table loc-sink)
-            (adjacent loc-sink loc-table)
-          )
-          (:goal (object-at cup loc-sink))
-        )
-
-    Expected plan for the example above:
-        (lower-arm)
-        (open-gripper)
-        (navigate loc-start loc-table)
-        (grasp cup loc-table)
-        (navigate-holding loc-table loc-sink cup)
-        (place cup loc-sink)
-
-    Returns {"plan": ["(lower-arm)", "(open-gripper)", "(navigate loc-start loc-table)", ...]}
-    or {"plan": []} when no solution exists (check initial state / goal consistency).
-    After receiving the plan, execute each step with the corresponding MCP tool —
-    both `navigate` and `navigate-holding` map to navigate_to.
-
-    Raises an error if pyperplan is not installed or the domain file is missing.
-
-    The problem_pddl passed here is retained (as long as this call succeeds)
-    for consult_vqa_for_pddl_domain, which uses it to show the VQA the problem
-    alongside the domain and to auto-replan once a fix is applied.
-    """
-    global _last_plan, _last_problem_pddl
-    log.info("[TOOL] plan_pddl problem:\n%s", problem_pddl)
-    domain_path = _active_domain_path()
-    if not os.path.exists(domain_path):
-        return _err(f"PDDL domain file not found: {domain_path}")
-    with open(domain_path) as f:
-        domain_text = f.read()
-
-    from napc import solve
-    try:
-        actions = solve(domain_text, problem_pddl)
-    except ImportError:
-        return _err("pyperplan is not installed — run: pip install pyperplan")
-    log.info("[TOOL] plan_pddl → %d actions: %s", len(actions), actions)
-    _last_plan = actions
-    _last_problem_pddl = problem_pddl
-    return _ok({"plan": actions})
-
-
-@mcp.tool()
-def consult_vqa_for_pddl_domain(
-    failure_context: str,
-    sub_observation: str,
-    sub_action: str,
-) -> dict:
-    """
-    Consult the VQA model when a plan step fails or plan_pddl returns an empty plan.
-
-    Captures the current robot view and external camera, reads the active domain
-    (pddl/robot_domain_fixed.pddl if present, else pddl/robot_domain.pddl) and
-    both the problem PDDL and grounded plan from the most recent plan_pddl call,
-    then asks the question in napc.counselor.DEFAULT_QUESTION
-    (also the prompt tests/vqa/pddl_consult_test.py replays against saved images
-    so wording changes can be tried without a connected robot).
-
-    The VQA may fix the domain (general actions/predicates), the problem (this
-    task's objects/init/goal), or both — whichever block(s) are present in its
-    response are extracted and applied. A new domain is saved to
-    pddl/robot_domain_fixed.pddl (pddl/robot_domain.pddl, the git-tracked
-    original, is never modified). A new problem is used for the replan below
-    but is NOT persisted anywhere — re-supply it to any later plan_pddl call.
-
-    This tool then immediately replans via napc.consult(),
-    which re-solves against whatever domain/problem are now active — so the
-    caller never has to remember that as a separate step. "directive" and
-    "updated_plan" are the primary output and are placed first in the response
-    for that reason; "vqa_response" and the rest are supporting detail, not
-    the required next action.
-
-    NOTE: pddl/robot_domain_fixed.pddl is gitignored and never committed.
-    Delete it (rm pddl/robot_domain_fixed.pddl) to return to the original
-    domain for a repeat experiment.
-
-    Args:
-        failure_context: 1-3 sentences on what was tried and why it failed.
-        sub_observation: ~4-word video subtitle: what was just observed
-                         (e.g. "No cup found"). REQUIRED — this is the most
-                         important diagnostic moment to narrate, so unlike
-                         motor tools' subtitle params it has no default.
-        sub_action:      ~4-word video subtitle: what's happening now
-                         (e.g. "Consulting PDDL domain"). REQUIRED.
-
-    This call has no motion to tag, so it is rendered as a ~3s frozen-frame
-    scene in the compiled merged video (see recorder.SegmentRecorder.log_thought).
-
-    Returns:
-        directive       — required next action, in plain imperative language
-        updated_plan    — plan from auto-replanning against the fix, or null
-                           if no problem PDDL was available to replan with
-        plan_error      — present only if the auto-replan itself failed
-        vqa_response    — raw VQA model text
-        domain_updated  — True if a new domain was extracted and saved to disk
-        new_domain      — new domain text if domain_updated, else null
-        problem_updated — True if a new problem was extracted from the response
-        new_problem     — new problem text if problem_updated, else null
-    """
-    global _last_plan, _last_problem_pddl
-
-    log.info("[TOOL] consult_vqa_for_pddl_domain context=%r", failure_context)
-    if not sub_observation.strip() or not sub_action.strip():
-        return _err("sub_observation and sub_action must both be non-empty.")
-
-    with open(_active_domain_path()) as f:
-        domain_text = f.read()
-
-    # Capture both cameras. Unannotated: this is a general "what's going on"
-    # question, not a heading/grasp decision, and no single target class applies.
-    front = cam_mod.capture_still()
-    ext = cam_mod.capture_simpleipcamera_still(target_class_yolo="", annotate=False)
-
-    from mcp_robot.recorder import get_recorder
-    get_recorder().log_thought(
-        sub_observation, sub_action,
-        {"pi_camera": front["frame"], "simpleipcamera": ext["frame"]},
-    )
-
-    # napc's images are raw bytes (camera frames here are
-    # base64, per capture_still/capture_simpleipcamera_still's return shape).
-    images = [
-        ("pi_camera", base64.b64decode(front["frame"])),
-        ("simpleipcamera", base64.b64decode(ext["frame"])),
-    ]
-
-    def _ask(prompt: str, imgs: list[tuple[str, bytes]]) -> str:
-        # vision.ask_with_images expects base64 — re-encode at this boundary
-        # rather than changing vision.py's long-standing convention.
-        b64_images = [(label, base64.b64encode(data).decode()) for label, data in imgs]
-        return vision.ask_with_images(prompt, b64_images)
-
-    from napc import consult
-    result = consult(
-        domain_text=domain_text,
-        problem_text=_last_problem_pddl,
-        plan=_last_plan,
-        failure_context=failure_context,
-        images=images,
-        ask=_ask,
-    )
-
-    if result.domain_updated:
-        with open(DOMAIN_FIXED_PATH, "w") as f:
-            f.write(result.new_domain)
-        log.info(
-            "consult_vqa_for_pddl_domain: new domain saved to %s (original %s untouched):\n%s",
-            DOMAIN_FIXED_PATH, DOMAIN_PATH, result.new_domain,
-        )
-
-    if result.problem_updated:
-        log.info("consult_vqa_for_pddl_domain: new problem:\n%s", result.new_problem)
-
-    if result.updated_plan is not None:
-        log.info(
-            "consult_vqa_for_pddl_domain: auto-replanned (problem source: %s) → %d actions: %s",
-            "VQA-refined problem" if result.problem_updated else "last plan_pddl call",
-            len(result.updated_plan), result.updated_plan,
-        )
-        _last_plan = result.updated_plan
-        if result.problem_updated:
-            _last_problem_pddl = result.new_problem
-    elif result.plan_error is not None:
-        log.info("consult_vqa_for_pddl_domain: auto-replan failed: %s", result.plan_error)
-    else:
-        log.info("consult_vqa_for_pddl_domain: no problem_pddl on record — auto-replan skipped")
-
-    response = {
-        "directive": result.directive,
-        "updated_plan": result.updated_plan,
-        "vqa_response": result.model_response,
-        "domain_updated": result.domain_updated,
-        "new_domain": result.new_domain,
-        "problem_updated": result.problem_updated,
-        "new_problem": result.new_problem,
-    }
-    if result.plan_error is not None:
-        response["plan_error"] = result.plan_error
-    return _ok(response)
+# plan_pddl and consult_vqa_for_pddl_domain now live entirely on the separate
+# `napc` MCP server (github.com/f1ren/NAPC, registered in .mcp.json) — this
+# repo no longer imports napc as a library. Get fresh images for a consult
+# call from get_front_camera_image/get_external_camera_image below (each
+# already returns a saved-file path in its response text) and pass those
+# paths to that server's consult_vqa_for_pddl_domain tool.
 
 
 # ── background streaming ──────────────────────────────────────────────────────

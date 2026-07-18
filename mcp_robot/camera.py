@@ -799,10 +799,20 @@ def capture_simpleipcamera_still(
                 target_class_yolo, target_class_free_text,
             )
         else:
+            yolo_attempted = bool(target_class_yolo)
+            vlm_attempted = bool(target_class_free_text)
+            if yolo_attempted and vlm_attempted:
+                detail = "YOLO + VLM fallback both missed"
+            elif yolo_attempted:
+                detail = "YOLO missed; VLM fallback NOT attempted (target_class_free_text empty)"
+            elif vlm_attempted:
+                detail = "VLM fallback missed; YOLO NOT attempted (target_class_yolo empty)"
+            else:
+                detail = "no search attempted — target_class_yolo and target_class_free_text both empty"
             log.info(
                 "Heading analysis: yolo=%r free_text=%r — heading OK, but no matching object found "
-                "(YOLO + VLM fallback both missed); heading arrow only",
-                target_class_yolo, target_class_free_text,
+                "(%s); heading arrow only",
+                target_class_yolo, target_class_free_text, detail,
             )
         return annotated_b64, angle_deg, note, dist_px, robot_radius_px, body_area_px
 

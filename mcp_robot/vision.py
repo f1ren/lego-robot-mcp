@@ -27,13 +27,6 @@ _CAMERA_LABELS = {
     "simpleipcamera":  "external cam — third-person view (overhead or side angle showing the whole robot)",
 }
 
-# The consult_vqa_for_pddl_domain question prompt used to live here as
-# CONSULT_DOMAIN_QUESTION; it's now napc.counselor's
-# DEFAULT_QUESTION (github.com/f1ren/NAPC) — the only
-# copy, used internally by that package's consult(), which server.py's
-# consult_vqa_for_pddl_domain tool calls into. Nothing in this repo imports
-# DEFAULT_QUESTION directly.
-
 _VIDEO_PROMPT = (
     "You are analysing a 4-motor Lego robot (left wheel, right wheel, arm, "
     "gripper). The gripper defines the robot's front.\n"
