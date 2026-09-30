@@ -14,6 +14,19 @@
     (arm-raised)
     (gripper-open)
     (is-in-grasp-pose)
+
+    ; Waste disposal — "dispose of this properly" is the goal (disposed <item>).
+    ; Bins are cups tilted 45°, mouth up, so the robot can release a held item
+    ; into one with its arm raised — see drop-into-bin.
+    ; Static facts, declared in the problem (:init) for every bin and item.
+    ; Which stream a bin takes (e.g. blue = paper) is a scene fact read off
+    ; its label/color, not a domain rule. Declare bins with bin-at, never
+    ; object-at — grasp would then be able to pick one up.
+    (bin-at ?b ?l)
+    (waste-type ?o ?w)   ; e.g. (waste-type paper-ball paper)
+    (bin-accepts ?b ?w)  ; e.g. (bin-accepts bin-blue paper)
+    (in-bin ?o ?b)
+    (disposed ?o)        ; ?o went into a bin that accepts its waste stream
   )
 
   ; Move to approach an object to grasp.  Requires (is-in-grasp-pose) rather
@@ -101,5 +114,35 @@
     :precondition (and (robot-at ?l) (holding ?o))
     :effect (and (object-at ?o ?l) (not (holding ?o)) (gripper-empty)
                  (gripper-open) (not (arm-lowered)))
+  )
+
+  ; Dispose of the held item: next to the bin with the arm raised, release it
+  ; into the tilted cup's mouth. Only a bin that accepts the item's waste
+  ; stream qualifies — the "properly" in "dispose of this properly".
+  ; (arm-raised) is only reachable through lift-arm, which re-closes the
+  ; gripper with hold torque before raising, so the item can't slip out on
+  ; the way. Convention: never assert (arm-raised) in (:init), so the plan
+  ; always includes lower-arm + lift-arm — lift_arm raises a fixed amount
+  ; from fully lowered, so that pair is what guarantees the release height.
+  ; The final approach leg (?from -> the bin's location ?to) is part of this
+  ; action on purpose, so the arm is up BEFORE the robot heads for the bin —
+  ; the disposal counterpart of navigate requiring is-in-grasp-pose. Raising
+  ; it only on arrival could swing the loaded gripper into the cup or its
+  ; rack. A separate approach action would need a "lined up with bin ?b"
+  ; fluent that lift-arm/lower-arm/navigate-holding have no ?b to retract,
+  ; and the default pyperplan search is satisficing, so a non-minimal plan
+  ; could reuse a stale one.
+  ; Execution: navigate_to the bin, drive_to until the gripper is at the
+  ; cup's mouth, control_gripper open. Not put — put also raises the arm by
+  ; its full ARM_DOWN_DEG - ARM_UP_DEG travel, and here it is already up.
+  (:action drop-into-bin
+    :parameters (?from ?to ?o ?b ?w)
+    :precondition (and (robot-at ?from) (adjacent ?from ?to) (bin-at ?b ?to)
+                       (holding ?o) (arm-raised)
+                       (waste-type ?o ?w) (bin-accepts ?b ?w))
+    :effect (and (not (robot-at ?from)) (robot-at ?to)
+                 (not (holding ?o)) (gripper-empty) (gripper-open)
+                 (not (is-in-grasp-pose))
+                 (in-bin ?o ?b) (disposed ?o))
   )
 )
