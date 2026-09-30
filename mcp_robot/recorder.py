@@ -78,6 +78,17 @@ SEGMENT_RECALIB_SUSTAIN_S seconds — long enough to rule out a transient like
 the arm/gripper sweeping through frame — that camera's calibration is reset
 and re-runs exactly like it did at stream start, and whatever segment was
 open is force-closed so it doesn't straddle the old and new noise floors.
+
+Caller-bounded stream segments
+──────────────────────────────
+Not every stream worth recording comes from a camera cache. navigate_to's
+tracking overlay (planned path, robot/target markers and the live robot
+trail, streamed to Rerun while the motors run) is rendered frame by frame by
+its caller, which knows exactly when the interesting window starts and
+stops. open_stream_segment/write_stream_frame/close_stream_segment record
+such a stream as its own "camera" in the same segment dir and manifest,
+skipping the calibration and motion detection on_frame() needs for raw
+footage, so tag_range() and the video compiler treat it like any camera.
 """
 from __future__ import annotations
 
@@ -206,6 +217,9 @@ class SegmentRecorder:
         self.fps_by_camera = fps_by_camera or {
             "simpleipcamera": config.SEGMENT_FPS_SIMPLEIPCAMERA,
             "pi_camera": config.SEGMENT_FPS_PI,
+            # Rendered from SimpleIPCamera frames (see server._nav_track_motor),
+            # so it can't arrive faster than that camera does.
+            "nav_overlay": config.SEGMENT_FPS_SIMPLEIPCAMERA,
         }
         self.recent_ring = recent_ring
         self.calib_enabled = calib_enabled
@@ -597,6 +611,50 @@ class SegmentRecorder:
                 state.recent_closed.append(seg)
             any_ok = True
         return any_ok
+
+    # ── caller-bounded stream segments ───────────────────────────────────────
+
+    def open_stream_segment(self, camera: str, ts: float) -> _Segment:
+        """Start a segment for a rendered stream whose start/end the caller
+        controls (see module docstring, "Caller-bounded stream segments").
+        Feed it with write_stream_frame() and finish it with
+        close_stream_segment(); nothing reaches the manifest before then.
+
+        Like log_thought(), the segment belongs to the calling thread and is
+        written outside self._lock, so encoding a frame never stalls the
+        camera threads' on_frame(); the lock is only taken briefly in
+        close_stream_segment() to publish the finished segment."""
+        path = os.path.join(self.segment_dir, f"{camera}_{ts:.3f}.mp4")
+        return _Segment(camera=camera, start_ts=ts, path=path)
+
+    def write_stream_frame(self, seg: _Segment, bgr: np.ndarray, ts: float) -> None:
+        """Append one already-rendered BGR frame to a stream segment."""
+        self._write_decoded_frame(seg, bgr, ts)
+
+    def close_stream_segment(self, seg: _Segment) -> None:
+        """Finish a stream segment: publish it to the manifest and to
+        recent_closed (so tag_range() finds it), then remux it to its
+        measured frame rate like a camera segment. A segment that never
+        received a frame leaves no trace."""
+        if seg.writer is not None:
+            seg.writer.release()
+            seg.writer = None
+        if seg.frame_count == 0:
+            return
+        seg.end_ts = seg.last_written_ts
+        seg.closed = True
+        log.info(
+            "recorder: %s closing stream segment %s (%d frames over %.2fs)",
+            seg.camera, os.path.basename(seg.path), seg.frame_count,
+            seg.last_written_ts - seg.first_written_ts,
+        )
+        with self._lock:
+            self._append_manifest(seg)
+            state = self._cameras.setdefault(
+                seg.camera, _CameraState(recent_closed=deque(maxlen=self.recent_ring))
+            )
+            state.recent_closed.append(seg)
+        self._maybe_remux(seg)
 
     # ── manifest I/O (always called while holding self._lock) ──────────────
 

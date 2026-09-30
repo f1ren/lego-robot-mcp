@@ -858,6 +858,81 @@ class TestSegmentRecorder(unittest.TestCase):
         self.assertEqual(subs[0], ("No cup found", "Consulting PDDL domain"))
         self.assertEqual(subs[1], ("Still stuck", "Re-planning"))
 
+    # ── 24: a caller-bounded stream segment is written, then published ──────
+
+    def test_stream_segment_records_frames_and_manifest(self):
+        import numpy as np
+        rec = self._make_recorder(fps_by_camera={"nav_overlay": 10.0})
+        frame = np.full((64, 64, 3), 100, dtype=np.uint8)
+
+        seg = rec.open_stream_segment("nav_overlay", 1000.0)
+        for i in range(5):
+            rec.write_stream_frame(seg, frame, round(1000.0 + i * 0.1, 3))
+        self.assertEqual(_read_manifest(rec.manifest_path), [], "nothing is published before close")
+        rec.close_stream_segment(seg)
+
+        records = _read_manifest(rec.manifest_path)
+        self.assertEqual(len(records), 1)
+        row = records[0]
+        self.assertEqual(row["camera"], "nav_overlay")
+        self.assertEqual((row["start_ts"], row["end_ts"], row["frame_count"]), (1000.0, 1000.4, 5))
+        self.assertEqual(_frame_count(row["path"]), 5)
+        self.assertIs(rec._cameras["nav_overlay"].recent_closed[-1], seg)
+
+    # ── 25: a stream segment that never received a frame leaves no trace ────
+
+    def test_empty_stream_segment_leaves_no_trace(self):
+        rec = self._make_recorder(fps_by_camera={"nav_overlay": 10.0})
+        seg = rec.open_stream_segment("nav_overlay", 1000.0)
+        rec.close_stream_segment(seg)
+
+        self.assertFalse(os.path.exists(rec.manifest_path))
+        self.assertFalse(os.path.exists(seg.path))
+        self.assertNotIn("nav_overlay", rec._cameras)
+
+    # ── 26: stream segments are remuxed, tagged and compiled like cameras ───
+
+    def test_stream_segments_remux_tag_and_compile(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg not available")
+        import numpy as np
+
+        # Declared 30fps but frames arrive at 10fps, like a tracking overlay
+        # whose per-frame CV work can't keep up with the camera.
+        rec = self._make_recorder(fps_by_camera={"nav_overlay": 30.0})
+        frame = np.full((64, 64, 3), 100, dtype=np.uint8)
+
+        segs = []
+        for step_t0 in (1000.0, 1002.0):  # two navigate_to steps
+            seg = rec.open_stream_segment("nav_overlay", step_t0)
+            for i in range(4):
+                rec.write_stream_frame(seg, frame, round(step_t0 + i * 0.1, 3))
+            rec.close_stream_segment(seg)
+            segs.append(seg)
+
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", segs[0].path],
+            capture_output=True, text=True,
+        )
+        num, den = out.stdout.strip().split("/")
+        self.assertAlmostEqual(float(num) / float(den), 10.0, delta=0.5)
+
+        ok = rec.tag_range("nav_overlay", 1000.0, 1002.3,
+                            {"tool": "navigate_to cup", "sub_observation": "Cup spotted",
+                             "sub_action": "Navigating to cup"})
+        self.assertTrue(ok)
+        records = _read_manifest(rec.manifest_path)
+        self.assertEqual([r["tool"] for r in records], ["navigate_to cup"] * 2)
+        self.assertEqual([r["sub_action"] for r in records], ["Navigating to cup"] * 2)
+
+        from mcp_robot.video_compiler import compile_task_video
+        result = compile_task_video(since="999", manifest_path=rec.manifest_path,
+                                    camera="nav_overlay", out_dir=self.tmpdir)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.segment_count, 2)
+        self.assertEqual(_frame_count(result.video_path), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

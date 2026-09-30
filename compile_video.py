@@ -8,6 +8,7 @@ Usage:
     ./compile_video.py 20260507_121641
     ./compile_video.py 1746613200.0
     ./compile_video.py 1746613200.0 --camera pi_camera
+    ./compile_video.py 1746613200.0 --camera nav_overlay
     ./compile_video.py 1746613200.0 --camera merged
 """
 import argparse
@@ -22,9 +23,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser(description="Compile a task video from recorded motion segments.")
     parser.add_argument("since", help="Start timestamp (log format, folder format, or UNIX float)")
-    parser.add_argument("--camera", choices=["simpleipcamera", "pi_camera", "merged"], default="simpleipcamera",
-                        help="Camera whose segments to compile, or 'merged' to tile both cameras "
-                             "plus subtitles into one video (default: simpleipcamera)")
+    parser.add_argument("--camera", choices=["simpleipcamera", "pi_camera", "nav_overlay", "merged"],
+                        default="simpleipcamera",
+                        help="Camera whose segments to compile ('nav_overlay' = navigate_to's "
+                             "tracking overlay), or 'merged' to tile both cameras plus subtitles "
+                             "into one video (default: simpleipcamera)")
     args = parser.parse_args()
 
     if args.camera == "merged":

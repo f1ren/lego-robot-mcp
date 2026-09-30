@@ -1561,11 +1561,20 @@ def _nav_track_motor(
     """Background thread for navigate_to: stream SimpleIPCamera frames with CV
     robot-position tracking overlaid on the planned path to Rerun.
 
+    The same frames (minus Rerun's caption) are also recorded as one
+    "nav_overlay" segment per call, next to the camera segments, so
+    compile_video can turn them into a video (see
+    recorder.SegmentRecorder.open_stream_segment).
+
     Called while motors are running; replaces VQA for step verification.
     """
+    from mcp_robot.recorder import get_recorder
+    rec = get_recorder()
     trail: list[tuple[int, int]] = []
+    seg = None
 
     def _on_frame(bgr: np.ndarray, ts: float) -> None:
+        nonlocal seg
         robot_px = nav_mod.detect_robot_px(bgr)
         if robot_px is not None:
             trail.append(robot_px)
@@ -1573,8 +1582,15 @@ def _nav_track_motor(
                 trail.pop(0)
         tracking = nav_mod.draw_tracking_overlay(base_overlay, trail)
         viz.log_nav_tracking(tracking, ts, reason="Tracking motion")
+        if seg is None:
+            seg = rec.open_stream_segment("nav_overlay", ts)
+        rec.write_stream_frame(seg, tracking, ts)
 
-    cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
+    try:
+        cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
+    finally:
+        if seg is not None:
+            rec.close_stream_segment(seg)
 
 
 def _scan_for_target(
@@ -2166,7 +2182,7 @@ def navigate_to(
         nav_meta = {"tool": f"navigate_to {target_class_yolo}",
                     "sub_observation": sub_observation or None,
                     "sub_action": sub_action or None}
-        for cam in ("simpleipcamera", "pi_camera"):
+        for cam in ("simpleipcamera", "pi_camera", "nav_overlay"):
             rec.tag_range(cam, nav_t_start, time.time(), nav_meta)
 
     return content
@@ -2525,6 +2541,8 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
         since:  UNIX timestamp as a string (e.g. "1746613200.0"), or a legacy
                 "YYYY-MM-DD HH:MM:SS[,ms]" / "YYYYMMDD_HHMMSS" string.
         camera: "simpleipcamera" (default) or "pi_camera" for a single-camera clip,
+                "nav_overlay" for navigate_to's tracking overlay (planned path,
+                robot/target markers, live robot trail) during each step's motion,
                 or "merged" to tile both cameras plus a subtitle card
                 (observation, then action) into one video: subtitle
                 top-left, Pi camera bottom-left, SimpleIPCamera full-height right.
