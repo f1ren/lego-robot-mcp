@@ -28,22 +28,24 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
    - **Do NOT manually replicate `scan_for_target` when it is disabled.** If `scan_for_target` returns "The user did not allow scan by rotation", do not work around this by chaining repeated `turn` calls + camera checks. That is the same action and equally prohibited. The server enforces this: cumulative rotation from `turn` calls exceeding `SCAN_TOTAL_DEG / 2` without a forward `drive` or `navigate_to` will hard-fail with an error. If you cannot locate the target without scanning, report it and stop.
    - **Always supply a non-empty `target_class_free_text` on the very first `navigate_to` call**, even when `target_class_yolo` is also set. Don't pass `""` and wait for a YOLO-only attempt to fail before adding a free-text fallback — that wastes a step and risks deriving the description later from a stale/annotated frame. Describe the target's color/shape/material as seen in the **raw camera frame**, never from a debug/overlay image (e.g. `step_NN_g_nav_overlay.jpg`'s obstacle-mask tint can make objects look the wrong color).
 
-# Scene text (signs, labels) & NAPC advisories
+# Visual signals (signs, labels) & replanning
 
-The lego-robot server reads text off both camera streams on its own. It reads a view only once it has been still for about 0.6 s, is lit well enough and sharp, and differs from the last view it read. Only text containing a word not seen before this session is passed on. That text goes to NAPC through `output/napc_events/`, which is this server's `SCENE_EVENTS_DIR` and napc's `NAPC_EVENTS_DIR`. NAPC judges it against its active domain, problem and plan in the background. If the text changes what the plan should do (e.g. a sign saying which bin takes paper), NAPC recommends a halt, adapts the domain/problem, and replans. Its verdicts arrive as **`napc_advisory` on every lego-robot tool result**. Act on it before anything else in that result:
+Neil (the lego-robot server) reads text off both camera streams on its own. It reads a view only once it has been still for about 0.6 s, is lit well enough and sharp, and differs from the last view it read. Text containing a word not seen before this session is a **visual signal**. Neil knows nothing about NAPC: judging a signal and replanning is your job, as the only caller of both servers. Each signal reaches you twice over:
+- as one JSON line appended to `output/signals/neil.jsonl` (`SIGNALS_OUTBOX`), for a background monitor;
+- as `visual_signals` on the next lego-robot tool result.
 
-1. **`halt: true`** (`action` starts with `HALT`): stop executing the current plan right away and issue no further motor commands for it. `navigate_to`, the scans, and `drive_to`'s second leg already stop by themselves ("Navigation HALTED"). Then call napc **`await_advisory(finding_id=..., completed_steps=k)`**, which blocks until the new plan is ready.
-2. **`status: "replanning"` without a halt, or `status: "new_plan"`:** finish the step you are on, then call `await_advisory` the same way.
-3. **`await_advisory` returns `status: "new_plan"`:** continue with its `plan`. It already starts from where the robot is, because NAPC applied your `k` completed steps to the adapted problem. Pass its `problem_pddl` to any later `plan_pddl` call. A problem that contradicts the text gets re-checked, and NAPC will advise again.
-4. **Other statuses:**
-   - `unchanged`: continue the current plan.
-   - `failed`: keep the robot halted and follow the `action`/`directive` (see **Troubleshoot**).
-   - `napc_silent`: NAPC did not answer. Judge the text yourself from the attached image paths, and if it matters call napc `report_scene_text` or `consult_vqa_for_pddl_domain`.
-   - A halt with a `note` saying NAPC may have stopped: check napc `get_advisories`. Only if napc is really gone, drop the halt with `scene_text_status(dismiss=[finding_id])`.
+Until a tool result has carried a signal, Neil pauses. Multi-step motions (`navigate_to`, the scans, `drive_to`'s second leg) stop at their next step ("Navigation PAUSED"), and motor commands return `ok: false, paused: true` with the signal instead of moving.
 
-`k` = the number of steps of the plan NAPC holds (your last `plan_pddl`) whose tool calls actually finished and were verified. A step cut short by the halt is **not** completed.
+1. **At the start of every task, start the background monitor**, and start it again whenever it expires:
+   `Monitor(command="tail -n 0 -F /home/navatm/Projects/lego-robot-mcp/output/signals/neil.jsonl", description="Neil visual signals", timeout_ms=1800000)`
+   Its events arrive between your tool calls, never during one. That's why Neil pauses itself mid-motion.
+2. **On a signal, from the monitor or a tool result, decide whether it changes what the plan should do.** Look at its `frame` with Read: the OCR strings can be split, merged or misread. Its `context_frame` is the other camera at the same moment.
+   - **It doesn't matter:** carry on. Re-issue a command that paused. After a monitor event, call `scene_text_status` first: its result carries the signal, so your next motor command won't pause on it.
+   - **It changes the plan:** keep Neil stopped and call napc **`replan_with_observation(observation=<what it says and what it refers to>, images=[{label, path}, ...], completed_steps=k)`**. It is synchronous and takes about 15–20 s. Continue with the `plan` it returns, which already starts from where Neil is. Pass its `problem_pddl` to any later `plan_pddl`.
 
-`plan_pddl` responses list `scene_notes`: text read earlier that NAPC judged relevant. Write your problem so it agrees with them. `scene_text_status` (lego-robot) and `get_advisories` (napc) show everything read and judged so far. To have text already in view read again, call `scene_text_status(reset_seen=True)`.
+`k` = the number of steps of NAPC's current plan (your last `plan_pddl`) whose tool calls actually finished and were verified. A step cut short by a pause is **not** completed.
+
+`plan_pddl` echoes earlier observations under `observations`. Keep your problem consistent with them. `scene_text_status` shows what was read. To have text already in view read again, call `scene_text_status(reset_seen=True)`.
 
 # Troubleshoot
 
@@ -66,7 +68,7 @@ The lego-robot server reads text off both camera streams on its own. It reads a 
 7. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
 8. **Prefer slower, longer motions over fast, short ones.** High speeds cause the robot to jitter and overshoot, making outcomes harder to control and verify. Slower and larger moves also produce clearer visual changes, making them easier for the Visual Temporal Reasoning model to assess correctly.
 9. **Minimum motor speed is 15.** Never pass a speed below 15 to any motor tool. Below this threshold motion is too slow to be reliably detected by the CV pipeline, making it impossible to verify whether the action succeeded.
-10. **A `napc_advisory` in any tool result comes first.** It means the cameras read text that NAPC judged to change the plan. Follow **Scene text & NAPC advisories** above before your next motor command.
+10. **A visual signal comes first.** This covers `visual_signals` in a tool result, a PAUSED result, or a background monitor event. Follow **Visual signals & replanning** above before your next motor command.
 11. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
 
 # Experience Memory Workflow

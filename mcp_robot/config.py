@@ -370,15 +370,18 @@ SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", str(_OUTPUT_DIR / "snapshots"))
 
 # ── Scene text (mcp_robot/scene_text.py) ─────────────────────────────────────
 # Reads new text (signs, labels) off the live camera streams once a view is
-# still and clear, and hands previously-unseen text to NAPC; NAPC's advisories
-# come back through SCENE_EVENTS_DIR and ride along on every tool result.
-# SCENE_TEXT_ENABLED=  (empty) turns the whole thing off.
+# still and clear, and raises previously-unseen text to the coordinator as a
+# visual signal. SCENE_TEXT_ENABLED=  (empty) turns the whole thing off.
 SCENE_TEXT_ENABLED = bool(os.getenv("SCENE_TEXT_ENABLED", "1"))
 SCENE_TEXT_CAMERAS = tuple(c.strip() for c in os.getenv("SCENE_TEXT_CAMERAS", "pi_camera,simpleipcamera").split(",") if c.strip())
-# Must match the napc server's NAPC_EVENTS_DIR (see .mcp.json).
-SCENE_EVENTS_DIR = os.getenv("SCENE_EVENTS_DIR", str(_OUTPUT_DIR / "napc_events"))
-# Frames (and OCR overlays) behind each finding.
+# One JSON line per visual signal — tail it in the background (see CLAUDE.md).
+SIGNALS_OUTBOX = os.getenv("SIGNALS_OUTBOX", str(_OUTPUT_DIR / "signals" / "neil.jsonl"))
+# Frames (and OCR overlays) behind each signal.
 SCENE_TEXT_DIR = os.getenv("SCENE_TEXT_DIR", str(_OUTPUT_DIR / "scene_text"))
+# While a signal no tool result has carried yet is pending, multi-step motions
+# stop at their next step and motor commands don't start. SCENE_TEXT_PAUSE=
+# (empty) keeps the signals but never pauses.
+SCENE_TEXT_PAUSE = bool(os.getenv("SCENE_TEXT_PAUSE", "1"))
 # Frames are sampled at most this often per camera for the still/changed test.
 SCENE_TEXT_SAMPLE_INTERVAL_S = float(os.getenv("SCENE_TEXT_SAMPLE_INTERVAL_S", "0.2"))
 # A view counts as still once it has stayed still this long.
@@ -407,12 +410,6 @@ SCENE_TEXT_BORDER_PX = int(os.getenv("SCENE_TEXT_BORDER_PX", "3"))
 # (difflib ratio) — absorbs OCR noise like "Plastlc" vs "Plastic".
 SCENE_TEXT_MATCH_RATIO = float(os.getenv("SCENE_TEXT_MATCH_RATIO", "0.8"))
 SCENE_TEXT_OCR_THREADS = int(os.getenv("SCENE_TEXT_OCR_THREADS", "4"))
-# A finding NAPC hasn't answered after this long is surfaced as-is, so the
-# coordinator still learns about the text if the napc server isn't watching.
-SCENE_TEXT_NAPC_TIMEOUT_S = float(os.getenv("SCENE_TEXT_NAPC_TIMEOUT_S", "30"))
-# A halt advisory not updated for this long stops blocking motion (NAPC
-# probably died mid-replan); it is still reported.
-SCENE_TEXT_HALT_MAX_AGE_S = float(os.getenv("SCENE_TEXT_HALT_MAX_AGE_S", "300"))
 
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"

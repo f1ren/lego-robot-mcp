@@ -1,7 +1,6 @@
 """
 Scene text: notice new text (signs, labels, warnings) in the live camera
-streams, hand it to NAPC — the separate planning MCP server — and surface
-NAPC's advisories (halt / new plan) to the coordinator (the MCP caller).
+streams and raise it to the coordinator (the MCP caller) as a visual signal.
 
     camera frame ──► SceneTextWatcher.on_frame        (camera thread — cheap)
                        every SCENE_TEXT_SAMPLE_INTERVAL_S: 1/4-scale grayscale
@@ -14,19 +13,22 @@ NAPC's advisories (halt / new plan) to the coordinator (the MCP caller).
                      (RapidOCR, ~0.2s on CPU) → drop low-confidence and
                      edge-truncated lines → any word not seen before?
                        ▼
-                     finding: frames → SCENE_TEXT_DIR,
-                              JSON   → SCENE_EVENTS_DIR/findings/<id>.json
+                     visual signal: frames → SCENE_TEXT_DIR,
+                                    one JSON line → SIGNALS_OUTBOX
                        ▼
-                     NAPC judges it against the active plan (triage → halt?
-                     → adapt domain/problem → replan) and writes
-                     SCENE_EVENTS_DIR/advisories/<id>.json
-                       ▼
-                     AdvisoryBoard.collect() → "napc_advisory" in every tool
-                     result; navigate_to/scans stop early while a halt stands
+                     SignalBox — the coordinator hears about it twice over:
+                       - background: tailing SIGNALS_OUTBOX (Claude Code's
+                         Monitor tool) delivers it between tool calls;
+                       - in-band: the next tool result carries it as
+                         "visual_signals", and until one has, the robot is
+                         paused — multi-step motions stop at their next step
+                         and no motor command starts.
 
-The two servers share nothing but that directory (see NAPC's
-napc/scene_hints.py FILE PROTOCOL): neither is an MCP client of the other,
-and the coordinator stays the one that decides and acts.
+Deciding whether a signal matters, and replanning if it does, is the
+coordinator's job, not this server's: it knows the task, and it talks to the
+planner. The pause exists because the coordinator can't act while a long
+tool call (navigate_to) is still running, and a signal read while the robot
+is stopped must not be missed if the background tail isn't running.
 
 Only still views are read — text in a moving frame is blurred and OCR
 guesses on it — and only views that changed since the last read, so a
@@ -43,6 +45,7 @@ import queue
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -57,10 +60,6 @@ CAMERA_DESCRIPTIONS = {
     "pi_camera": "front camera on the robot (robot's-eye view, facing where the gripper points)",
     "simpleipcamera": "external camera overlooking the robot and its surroundings",
 }
-
-# NAPC advisory statuses (napc/scene_hints.py) the coordinator must act on.
-_ACTIONABLE = {"replanning", "new_plan", "unchanged", "failed"}
-_ACTIVE = {"queued", "triaging", "replanning"}
 
 
 # ── OCR ──────────────────────────────────────────────────────────────────────
@@ -224,7 +223,7 @@ class SceneTextWatcher:
     cameras: tuple[str, ...] = config.SCENE_TEXT_CAMERAS
     registry: SeenTextRegistry = field(default_factory=SeenTextRegistry)
     reader: Callable[[np.ndarray], list[TextLine]] = read_text
-    emit: Callable[[dict], None] | None = None  # default: post_finding
+    emit: Callable[[dict], None] | None = None  # default: get_signals().add
     context_frame: Callable[[str], dict | None] = _latest_frame
     sample_interval_s: float = config.SCENE_TEXT_SAMPLE_INTERVAL_S
     stable_s: float = config.SCENE_TEXT_STABLE_S
@@ -311,237 +310,113 @@ class SceneTextWatcher:
             if not new:
                 return
             self.registry.remember(lines)
-            finding = self._make_finding(camera, frame_b64, ts, bgr, lines, new)
-            (self.emit or post_finding)(finding)
+            signal = self._make_signal(camera, frame_b64, ts, bgr, lines, new)
+            (self.emit or get_signals().add)(signal)
         except Exception:
             log.exception("scene_text: reading %s failed", camera)
         finally:
             state.busy = False
 
-    def _make_finding(self, camera, frame_b64, ts, bgr, lines, new) -> dict:
+    def _make_signal(self, camera, frame_b64, ts, bgr, lines, new) -> dict:
         import cv2
-        # Stamped with this host's clock, not the frame's: Pi frame timestamps
-        # come from the Pi's own clock, and NAPC compares a finding's "ts"
-        # against its own start time to skip leftovers from earlier sessions.
+        # Stamped with this host's clock, not the frame's (Pi frame timestamps
+        # come from the Pi's own clock).
         now = time.time()
-        stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(now)) + f"{int(now % 1 * 1000):03d}"
-        finding_id = f"{stamp}-{camera}"
+        signal_id = time.strftime("%Y%m%dT%H%M%S", time.localtime(now)) + f"{int(now % 1 * 1000):03d}-{camera}"
         os.makedirs(self.image_dir, exist_ok=True)
-        images = []
 
-        path = os.path.join(self.image_dir, f"{finding_id}.jpg")
-        with open(path, "wb") as fh:
+        frame_path = os.path.join(self.image_dir, f"{signal_id}.jpg")
+        with open(frame_path, "wb") as fh:
             fh.write(base64.b64decode(frame_b64))
-        images.append({"label": camera, "path": path,
-                       "description": f"{CAMERA_DESCRIPTIONS.get(camera, camera)} — the text was read in this view"})
 
-        # For people reviewing findings, not for NAPC: the boxes would cover the text.
+        # For reviewing what was read (red = new); send the plain frame to a
+        # model, since the boxes cover the text.
+        overlay_path = os.path.join(self.image_dir, f"{signal_id}_ocr.jpg")
         overlay = bgr.copy()
         for line in lines:
-            pts = np.array(line.box, dtype=np.int32)
-            cv2.polylines(overlay, [pts], True, (0, 0, 255) if line in new else (0, 200, 0), 2)
-        cv2.imwrite(os.path.join(self.image_dir, f"{finding_id}_ocr.jpg"), overlay)
+            cv2.polylines(overlay, [np.array(line.box, dtype=np.int32)], True,
+                          (0, 0, 255) if line in new else (0, 200, 0), 2)
+        cv2.imwrite(overlay_path, overlay)
 
-        for other in CAMERA_DESCRIPTIONS:
-            if other == camera:
-                continue
-            frame = self.context_frame(other)
-            if frame and frame.get("frame"):
-                other_path = os.path.join(self.image_dir, f"{finding_id}_{other}.jpg")
-                with open(other_path, "wb") as fh:
-                    fh.write(base64.b64decode(frame["frame"]))
-                images.append({"label": other, "path": other_path,
-                               "description": f"{CAMERA_DESCRIPTIONS[other]} — context, same moment"})
+        context_path = None
+        other = next((c for c in CAMERA_DESCRIPTIONS if c != camera), None)
+        frame = self.context_frame(other) if other else None
+        if frame and frame.get("frame"):
+            context_path = os.path.join(self.image_dir, f"{signal_id}_{other}.jpg")
+            with open(context_path, "wb") as fh:
+                fh.write(base64.b64decode(frame["frame"]))
 
         return {
-            "schema": 1,
-            "finding_id": finding_id,
+            "from": "neil",
+            "type": "visual_signal",
+            "id": signal_id,
+            "time": time.strftime("%H:%M:%S", time.localtime(now)),
+            "camera": camera,
+            "texts": [line.text for line in new],  # the lines with a word not seen before
+            "all_texts": [line.text for line in lines],
+            "frame": frame_path,
+            "context_frame": context_path,  # the other camera, same moment
+            "ocr_overlay": overlay_path,
             "ts": now,
             "frame_ts": ts,
-            "source": "lego-robot",
-            "camera": camera,
-            "texts": [line.text for line in new],
-            "all_texts": [line.to_dict() for line in lines],
-            "images": images,
         }
 
 
-# ── NAPC mailbox ─────────────────────────────────────────────────────────────
+# ── signals ──────────────────────────────────────────────────────────────────
 
-def _atomic_write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, indent=1))
-    os.replace(tmp, path)
+class SignalBox:
+    """Visual signals for the coordinator. Each is appended as one JSON line
+    to the outbox — a background `tail -F` of it (Claude Code's Monitor)
+    delivers it between tool calls — and stays pending until a tool result
+    has carried it (take()). While any is pending the robot is paused: see
+    the module docstring."""
 
-
-class AdvisoryBoard:
-    """Reads NAPC's advisories back from SCENE_EVENTS_DIR/advisories and
-    decides which to put in front of the coordinator, on which tool result.
-
-    Each advisory update (its "seq") is surfaced once, except a standing
-    halt, which rides on every result until NAPC moves past it — a halt
-    matters until it is lifted, not only when first announced."""
-
-    def __init__(self, events_dir: str = config.SCENE_EVENTS_DIR,
-                 napc_timeout_s: float = config.SCENE_TEXT_NAPC_TIMEOUT_S,
-                 halt_max_age_s: float = config.SCENE_TEXT_HALT_MAX_AGE_S,
-                 clock: Callable[[], float] = time.time) -> None:
-        self.events_dir = Path(events_dir)
-        self.napc_timeout_s = napc_timeout_s
-        self.halt_max_age_s = halt_max_age_s
-        self._clock = clock
-        self._started_at = clock()
-        self._posted: dict[str, dict] = {}  # findings this process sent
-        self._delivered: dict[str, int] = {}  # finding_id -> seq surfaced
-        self._dismissed: dict[str, int] = {}  # finding_id -> seq the coordinator dismissed
-        self._unanswered_reported: set[str] = set()
-        self._cache: dict[str, tuple[int, dict]] = {}
+    def __init__(self, outbox: str = config.SIGNALS_OUTBOX, recent: int = 20) -> None:
+        self.outbox = Path(outbox)
+        self._pending: list[dict] = []
+        self._recent: deque[dict] = deque(maxlen=recent)
         self._lock = threading.Lock()
 
-    def post(self, finding: dict) -> None:
-        _atomic_write_json(self.events_dir / "findings" / f"{finding['finding_id']}.json", finding)
+    def add(self, signal: dict) -> None:
         with self._lock:
-            self._posted[finding["finding_id"]] = finding
-        log.info("scene_text: finding %s → NAPC: %s", finding["finding_id"], finding["texts"])
-
-    def _advisories(self) -> dict[str, dict]:
-        """Advisories for findings this process sent, or updated since it started."""
-        found = {}
+            self._pending.append(signal)
+            self._recent.append(signal)
         try:
-            paths = list((self.events_dir / "advisories").glob("*.json"))
+            self.outbox.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.outbox, "a") as fh:  # one write per line, so a tail never sees half of one
+                fh.write(json.dumps(signal) + "\n")
         except OSError:
-            return found
-        for path in paths:
-            try:
-                mtime = path.stat().st_mtime_ns
-                cached = self._cache.get(path.name)
-                if cached is None or cached[0] != mtime:
-                    cached = (mtime, json.loads(path.read_text()))
-                    self._cache[path.name] = cached
-            except (OSError, ValueError):
-                continue
-            advisory = cached[1]
-            fid = advisory.get("finding_id", path.stem)
-            if self._dismissed.get(fid) == advisory.get("seq"):
-                continue
-            if fid in self._posted or advisory.get("updated_at", 0) >= self._started_at:
-                found[fid] = advisory
-        return found
+            log.exception("scene_text: could not append to %s", self.outbox)
+        log.info("scene_text: visual signal %s from %s: %s", signal["id"], signal["camera"], signal["texts"])
 
-    def dismiss(self, finding_ids: list[str]) -> list[str]:
-        """Stop surfacing (and halting on) these advisories as they stand now —
-        the escape hatch for a halt NAPC will never lift (e.g. it stopped
-        mid-replan). A later update from NAPC brings an advisory back."""
+    def pending(self) -> list[dict]:
         with self._lock:
-            current = self._advisories()
-            for fid in finding_ids:
-                if fid in current:
-                    self._dismissed[fid] = current[fid].get("seq")
-            return [fid for fid in finding_ids if fid in self._dismissed]
+            return list(self._pending)
 
-    def halt_advisory(self) -> dict | None:
-        """The standing halt, if NAPC is replanning and recommends halting."""
-        now = self._clock()
+    def take(self) -> list[dict]:
+        """The pending signals, now counted as shown to the coordinator."""
         with self._lock:
-            for advisory in self._advisories().values():
-                if (advisory.get("status") in _ACTIVE and advisory.get("halt")
-                        and not advisory.get("acknowledged")
-                        and now - advisory.get("updated_at", now) <= self.halt_max_age_s):
-                    return advisory
-        return None
+            taken, self._pending = self._pending, []
+            return taken
 
-    def collect(self) -> list[dict]:
-        """Advisories to show the coordinator on this tool result."""
-        now = self._clock()
-        entries = []
+    def recent(self) -> list[dict]:
         with self._lock:
-            advisories = self._advisories()
-            for fid, advisory in sorted(advisories.items(), key=lambda kv: kv[1].get("updated_at", 0)):
-                status, seq = advisory.get("status"), advisory.get("seq")
-                if advisory.get("acknowledged") or status not in _ACTIONABLE:
-                    continue
-                standing_halt = status == "replanning" and advisory.get("halt")
-                if standing_halt or self._delivered.get(fid) != seq:
-                    self._delivered[fid] = seq
-                    entries.append(self._format(advisory, stale=now - advisory.get("updated_at", now) > self.halt_max_age_s))
-            for fid, finding in self._posted.items():
-                if fid in advisories or fid in self._unanswered_reported or now - finding["ts"] < self.napc_timeout_s:
-                    continue
-                self._unanswered_reported.add(fid)
-                entries.append({
-                    "finding_id": fid, "status": "napc_silent", "texts": finding["texts"],
-                    "camera": finding["camera"],
-                    "images": [i["path"] for i in finding["images"]],
-                    "message": f"The {finding['camera']} camera read new text {finding['texts']}, but NAPC has not "
-                               f"judged it after {self.napc_timeout_s:.0f}s (is the napc server running with "
-                               "NAPC_EVENTS_DIR set?). Judge yourself whether it matters for the current plan; "
-                               "if so, call napc report_scene_text or consult_vqa_for_pddl_domain with the images.",
-                })
-        return entries
-
-    @staticmethod
-    def _format(advisory: dict, stale: bool = False) -> dict:
-        status = advisory.get("status")
-        fid = advisory.get("finding_id")
-        entry = {
-            "finding_id": fid,
-            "status": status,
-            "halt": bool(advisory.get("halt")) and status == "replanning",
-            "texts": advisory.get("texts"),
-            "camera": advisory.get("camera"),
-            "summary": advisory.get("summary"),
-        }
-        if status == "replanning" and advisory.get("halt"):
-            entry["action"] = (f"HALT: stop executing the current plan now — NAPC is replanning because of this "
-                               f"text. Then call napc await_advisory(finding_id={fid!r}, completed_steps=<steps of "
-                               "your current plan fully completed>) and continue with the plan it returns.")
-        elif status == "replanning":
-            entry["action"] = (f"Finish the current step, then call napc await_advisory(finding_id={fid!r}, "
-                               "completed_steps=<steps of your current plan fully completed>) — NAPC is replanning "
-                               "because of this text.")
-        elif status == "new_plan":
-            entry["action"] = (f"NAPC replanned because of this text. Call napc await_advisory(finding_id={fid!r}, "
-                               "completed_steps=<steps of your current plan fully completed>) to get the new plan "
-                               "resumed from where you are, and continue with it.")
-        elif status == "unchanged":
-            entry["action"] = "NAPC found nothing to change for this text — continue your current plan."
-        else:  # failed
-            entry["action"] = advisory.get("message") or "NAPC could not evaluate this text."
-            entry["error"] = advisory.get("error")
-        if stale:
-            entry["note"] = ("NAPC has not updated this advisory for a long time — it may have stopped. Check napc "
-                             f"get_advisories; if it is dead, scene_text_status(dismiss=[{fid!r}]) drops it.")
-        return entry
-
-    def status(self) -> dict:
-        with self._lock:
-            return {
-                "events_dir": str(self.events_dir),
-                "findings_sent": [{"finding_id": f, "texts": d["texts"], "camera": d["camera"]}
-                                  for f, d in self._posted.items()],
-                "advisories": [{k: a.get(k) for k in ("finding_id", "status", "halt", "texts", "summary")}
-                               for a in self._advisories().values()],
-            }
+            return list(self._recent)
 
 
 # ── module singletons + hooks used by camera.py / server.py ──────────────────
 
 _singleton_lock = threading.Lock()
-_board: AdvisoryBoard | None = None
+_signals: SignalBox | None = None
 _watcher: SceneTextWatcher | None = None
 
 
-def get_board() -> AdvisoryBoard:
-    global _board
+def get_signals() -> SignalBox:
+    global _signals
     with _singleton_lock:
-        if _board is None:
-            _board = AdvisoryBoard()
-        return _board
-
-
-def post_finding(finding: dict) -> None:
-    get_board().post(finding)
+        if _signals is None:
+            _signals = SignalBox()
+        return _signals
 
 
 def get_watcher() -> SceneTextWatcher | None:
@@ -553,7 +428,7 @@ def get_watcher() -> SceneTextWatcher | None:
     with _singleton_lock:
         if _watcher is None:
             _watcher = SceneTextWatcher()
-            log.info("scene_text: watching %s → %s", ", ".join(_watcher.cameras), config.SCENE_EVENTS_DIR)
+            log.info("scene_text: watching %s → %s", ", ".join(_watcher.cameras), config.SIGNALS_OUTBOX)
         return _watcher
 
 
@@ -567,31 +442,41 @@ def on_frame(camera: str, frame_b64: str, ts: float) -> None:
         log.exception("scene_text.on_frame failed")
 
 
-def halt_advisory() -> dict | None:
-    try:
-        return get_board().halt_advisory()
-    except Exception:
-        log.exception("scene_text: reading advisories failed")
-        return None
+def should_pause() -> bool:
+    """A visual signal is waiting to be shown to the coordinator (and
+    pausing is on) — motion must stop, or not start."""
+    return config.SCENE_TEXT_PAUSE and bool(get_signals().pending())
 
 
-def attach_advisories(result):
-    """Put pending NAPC advisories in front of a tool's result — first, so
-    they are read before anything else in it."""
-    try:
-        entries = get_board().collect()
-    except Exception:
-        log.exception("scene_text: collecting advisories failed")
+_PAUSE_MESSAGE = (
+    "PAUSED — the cameras read new text (visual_signals below; look at each `frame`). "
+    "Decide whether it changes what the plan should do. If not, re-issue this command to proceed."
+)
+
+
+def paused_result(returns_list: bool):
+    """The result of a motor command that didn't run because a visual
+    signal was pending — carrying the signals, which counts as showing them."""
+    body = {"ok": False, "paused": True, "error": _PAUSE_MESSAGE, "visual_signals": get_signals().take()}
+    if returns_list:
+        from mcp.types import TextContent
+        return [TextContent(type="text", text=json.dumps(body, indent=1))]
+    return body
+
+
+def attach_signals(result):
+    """Put visual signals no result has carried yet in front of a tool's
+    result — first, so they are read before anything else in it."""
+    if not isinstance(result, (dict, list, str)):
+        return result  # nowhere to put them — they stay pending for the next result
+    signals = get_signals().take()
+    if not signals:
         return result
-    if not entries:
-        return result
-    log.info("scene_text: surfacing %s", [(e["finding_id"], e["status"]) for e in entries])
     if isinstance(result, dict):
-        return {"napc_advisory": entries, **result}
-    text = "NAPC ADVISORY — act on this before anything else below:\n" + json.dumps(entries, indent=1)
+        return {"visual_signals": signals, **result}
+    text = "NEW VISUAL SIGNAL — the cameras read new text; look at each `frame`:\n" + json.dumps(signals, indent=1)
     if isinstance(result, list):
         from mcp.types import TextContent
         return [TextContent(type="text", text=text), *result]
-    if isinstance(result, str):
-        return f"{text}\n\n{result}"
-    return result
+    return f"{text}\n\n{result}"
+
