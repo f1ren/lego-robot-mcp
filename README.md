@@ -68,7 +68,13 @@ export GEMINI_API_KEY=...                               # .mcp.json reads it fro
 ```
 
 PDDL planning runs on a separate MCP server, [NAPC](https://github.com/f1ren/NAPC). Install it as its README describes.
-`.mcp.json` contains absolute paths from the author's machine (the `napc` command and the memory DB). Change them to yours.
+`.mcp.json` contains absolute paths from the author's machine (the `napc` command, the memory DB, and the NAPC output paths). Change them to yours.
+
+## Scene text
+
+While a task runs, the server reads new text in both camera streams, such as a sign saying which bin takes paper. It only reads a view that is still, clear, and changed since the last read. It passes on only text containing a word it hasn't seen before. That text goes to NAPC, which checks it against the current plan. If the text changes what the plan should do, NAPC recommends halting, adapts the PDDL domain/problem, and replans. Its advisories show up as `napc_advisory` in every tool result of this server.
+
+The two servers exchange findings and advisories through one directory: `SCENE_EVENTS_DIR` here and `NAPC_EVENTS_DIR` for napc, both `output/napc_events` in `.mcp.json`. The frames behind each finding, with an `_ocr.jpg` overlay of what was read, are saved in `output/scene_text/`. The settings are the `SCENE_TEXT_*` entries in `mcp_robot/config.py`. See [mcp_robot/scene_text.py](mcp_robot/scene_text.py) for the design.
 
 ## Usage
 

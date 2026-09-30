@@ -28,6 +28,23 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
    - **Do NOT manually replicate `scan_for_target` when it is disabled.** If `scan_for_target` returns "The user did not allow scan by rotation", do not work around this by chaining repeated `turn` calls + camera checks. That is the same action and equally prohibited. The server enforces this: cumulative rotation from `turn` calls exceeding `SCAN_TOTAL_DEG / 2` without a forward `drive` or `navigate_to` will hard-fail with an error. If you cannot locate the target without scanning, report it and stop.
    - **Always supply a non-empty `target_class_free_text` on the very first `navigate_to` call**, even when `target_class_yolo` is also set. Don't pass `""` and wait for a YOLO-only attempt to fail before adding a free-text fallback — that wastes a step and risks deriving the description later from a stale/annotated frame. Describe the target's color/shape/material as seen in the **raw camera frame**, never from a debug/overlay image (e.g. `step_NN_g_nav_overlay.jpg`'s obstacle-mask tint can make objects look the wrong color).
 
+# Scene text (signs, labels) & NAPC advisories
+
+The lego-robot server reads text off both camera streams on its own. It reads a view only once it has been still for about 0.6 s, is lit well enough and sharp, and differs from the last view it read. Only text containing a word not seen before this session is passed on. That text goes to NAPC through `output/napc_events/`, which is this server's `SCENE_EVENTS_DIR` and napc's `NAPC_EVENTS_DIR`. NAPC judges it against its active domain, problem and plan in the background. If the text changes what the plan should do (e.g. a sign saying which bin takes paper), NAPC recommends a halt, adapts the domain/problem, and replans. Its verdicts arrive as **`napc_advisory` on every lego-robot tool result**. Act on it before anything else in that result:
+
+1. **`halt: true`** (`action` starts with `HALT`): stop executing the current plan right away and issue no further motor commands for it. `navigate_to`, the scans, and `drive_to`'s second leg already stop by themselves ("Navigation HALTED"). Then call napc **`await_advisory(finding_id=..., completed_steps=k)`**, which blocks until the new plan is ready.
+2. **`status: "replanning"` without a halt, or `status: "new_plan"`:** finish the step you are on, then call `await_advisory` the same way.
+3. **`await_advisory` returns `status: "new_plan"`:** continue with its `plan`. It already starts from where the robot is, because NAPC applied your `k` completed steps to the adapted problem. Pass its `problem_pddl` to any later `plan_pddl` call. A problem that contradicts the text gets re-checked, and NAPC will advise again.
+4. **Other statuses:**
+   - `unchanged`: continue the current plan.
+   - `failed`: keep the robot halted and follow the `action`/`directive` (see **Troubleshoot**).
+   - `napc_silent`: NAPC did not answer. Judge the text yourself from the attached image paths, and if it matters call napc `report_scene_text` or `consult_vqa_for_pddl_domain`.
+   - A halt with a `note` saying NAPC may have stopped: check napc `get_advisories`. Only if napc is really gone, drop the halt with `scene_text_status(dismiss=[finding_id])`.
+
+`k` = the number of steps of the plan NAPC holds (your last `plan_pddl`) whose tool calls actually finished and were verified. A step cut short by the halt is **not** completed.
+
+`plan_pddl` responses list `scene_notes`: text read earlier that NAPC judged relevant. Write your problem so it agrees with them. `scene_text_status` (lego-robot) and `get_advisories` (napc) show everything read and judged so far. To have text already in view read again, call `scene_text_status(reset_seen=True)`.
+
 # Troubleshoot
 
 **Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` (on the separate `napc` MCP server — see above) before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. First call this server's own `get_front_camera_image` and `get_external_camera_image` to get fresh stills — each already returns a saved file path in its response text — then pass both as `images=[{"label": "pi_camera", "path": ...}, {"label": "simpleipcamera", "path": ...}]` on the `napc` server's tool, along with a 1–3 sentence `failure_context` describing what was tried and why it failed. It attaches the current domain and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"* (There's no `sub_observation`/`sub_action` for this call and no video-subtitle scene for it — that only applies to this server's own motor tools, see rule 8 below.)
@@ -49,7 +66,8 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 7. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
 8. **Prefer slower, longer motions over fast, short ones.** High speeds cause the robot to jitter and overshoot, making outcomes harder to control and verify. Slower and larger moves also produce clearer visual changes, making them easier for the Visual Temporal Reasoning model to assess correctly.
 9. **Minimum motor speed is 15.** Never pass a speed below 15 to any motor tool. Below this threshold motion is too slow to be reliably detected by the CV pipeline, making it impossible to verify whether the action succeeded.
-10. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
+10. **A `napc_advisory` in any tool result comes first.** It means the cameras read text that NAPC judged to change the plan. Follow **Scene text & NAPC advisories** above before your next motor command.
+11. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
 
 # Experience Memory Workflow
 

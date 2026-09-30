@@ -368,6 +368,52 @@ LOG_FILE = os.getenv("LOG_FILE", str(_OUTPUT_DIR / "logs" / "mcp_server.log"))
 # Set SNAPSHOT_DIR="" to disable saving.
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", str(_OUTPUT_DIR / "snapshots"))
 
+# ── Scene text (mcp_robot/scene_text.py) ─────────────────────────────────────
+# Reads new text (signs, labels) off the live camera streams once a view is
+# still and clear, and hands previously-unseen text to NAPC; NAPC's advisories
+# come back through SCENE_EVENTS_DIR and ride along on every tool result.
+# SCENE_TEXT_ENABLED=  (empty) turns the whole thing off.
+SCENE_TEXT_ENABLED = bool(os.getenv("SCENE_TEXT_ENABLED", "1"))
+SCENE_TEXT_CAMERAS = tuple(c.strip() for c in os.getenv("SCENE_TEXT_CAMERAS", "pi_camera,simpleipcamera").split(",") if c.strip())
+# Must match the napc server's NAPC_EVENTS_DIR (see .mcp.json).
+SCENE_EVENTS_DIR = os.getenv("SCENE_EVENTS_DIR", str(_OUTPUT_DIR / "napc_events"))
+# Frames (and OCR overlays) behind each finding.
+SCENE_TEXT_DIR = os.getenv("SCENE_TEXT_DIR", str(_OUTPUT_DIR / "scene_text"))
+# Frames are sampled at most this often per camera for the still/changed test.
+SCENE_TEXT_SAMPLE_INTERVAL_S = float(os.getenv("SCENE_TEXT_SAMPLE_INTERVAL_S", "0.2"))
+# A view counts as still once it has stayed still this long.
+SCENE_TEXT_STABLE_S = float(os.getenv("SCENE_TEXT_STABLE_S", "0.6"))
+# Still/changed tests compare blurred 160x120 grayscale thumbnails: a pixel
+# "changed" if it moved by more than PIXEL_DELTA grey levels. Measured on the
+# Pi camera's recorded segments (2026-09-30): a still view changes <0.5% of
+# pixels between samples (auto-exposure drift moves the mean, not this), a
+# slow pan 2-7% between consecutive frames — and more between samples 0.2s apart.
+SCENE_TEXT_PIXEL_DELTA = int(os.getenv("SCENE_TEXT_PIXEL_DELTA", "12"))
+SCENE_TEXT_MOTION_FRAC = float(os.getenv("SCENE_TEXT_MOTION_FRAC", "0.01"))
+# A still view is read only if it differs this much from the last view read.
+SCENE_TEXT_CHANGE_FRAC = float(os.getenv("SCENE_TEXT_CHANGE_FRAC", "0.03"))
+# "Clear" frame: mean brightness in range, Laplacian variance (on a 640px-wide
+# copy) at least MIN_SHARPNESS. The dim room's Pi frames with a readable sign
+# measured brightness ~45 and sharpness ~22, so the floor stays low.
+SCENE_TEXT_MIN_BRIGHTNESS = float(os.getenv("SCENE_TEXT_MIN_BRIGHTNESS", "20"))
+SCENE_TEXT_MAX_BRIGHTNESS = float(os.getenv("SCENE_TEXT_MAX_BRIGHTNESS", "235"))
+SCENE_TEXT_MIN_SHARPNESS = float(os.getenv("SCENE_TEXT_MIN_SHARPNESS", "8"))
+# OCR lines below this confidence are dropped (icons read as "#" scored ~0.55,
+# real sign words 0.92-0.99), as are lines within BORDER_PX of the frame edge:
+# text cut off by the edge reads as a partial word ("Pap", "lastic").
+SCENE_TEXT_MIN_SCORE = float(os.getenv("SCENE_TEXT_MIN_SCORE", "0.7"))
+SCENE_TEXT_BORDER_PX = int(os.getenv("SCENE_TEXT_BORDER_PX", "3"))
+# A word counts as already seen if it matches a seen word this closely
+# (difflib ratio) — absorbs OCR noise like "Plastlc" vs "Plastic".
+SCENE_TEXT_MATCH_RATIO = float(os.getenv("SCENE_TEXT_MATCH_RATIO", "0.8"))
+SCENE_TEXT_OCR_THREADS = int(os.getenv("SCENE_TEXT_OCR_THREADS", "4"))
+# A finding NAPC hasn't answered after this long is surfaced as-is, so the
+# coordinator still learns about the text if the napc server isn't watching.
+SCENE_TEXT_NAPC_TIMEOUT_S = float(os.getenv("SCENE_TEXT_NAPC_TIMEOUT_S", "30"))
+# A halt advisory not updated for this long stops blocking motion (NAPC
+# probably died mid-replan); it is still reported.
+SCENE_TEXT_HALT_MAX_AGE_S = float(os.getenv("SCENE_TEXT_HALT_MAX_AGE_S", "300"))
+
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"
 #   auto = try Gemini first, fall back to Ollama on failure/quota exhaustion

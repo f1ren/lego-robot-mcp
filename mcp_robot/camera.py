@@ -96,6 +96,8 @@ class _PiFrameCache:
                 self._buf.pop(0)
         from mcp_robot.recorder import get_recorder
         get_recorder().on_frame("pi_camera", frame_b64, ts, cache=self)
+        from mcp_robot import scene_text
+        scene_text.on_frame("pi_camera", frame_b64, ts)
 
     def latest(self) -> dict | None:
         with self._lock:
@@ -154,6 +156,8 @@ class _SimpleIPCameraFrameCache:
                 self._buf.pop(0)
         from mcp_robot.recorder import get_recorder
         get_recorder().on_frame("simpleipcamera", frame_b64, ts, cache=self)
+        from mcp_robot import scene_text
+        scene_text.on_frame("simpleipcamera", frame_b64, ts)
 
     def latest(self) -> dict | None:
         with self._lock:
