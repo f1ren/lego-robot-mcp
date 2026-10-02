@@ -6,6 +6,10 @@ The robot has a yellow LEGO body whose chassis presents many long parallel
 edges (brick rows, top and bottom panel edges). Those edges all run along the
 body's "forward" axis. We:
   1. Color-mask the yellow body to localize it and define a search ROI.
+     Other yellow objects (e.g. a yellow cup) also pass the mask, so the
+     plausible yellow clusters are ranked by how many small enclosed holes
+     they contain — the chassis is built from Technic plates with a precise
+     hole grid, while cups/walls/floor patches are smooth.
   2. Run a Hough line transform on Canny edges inside that ROI; the dominant
      line orientation gives the forward axis (modulo 180°).
   3. Disambiguate front-vs-back by detecting the dark gripper-and-arm
@@ -18,6 +22,7 @@ reliable than optical-flow tracking, which suffers from motor jitter.
 Public API:
     detect_heading(bgr) -> Heading | None
     body_hull(bgr) -> np.ndarray | None      # convex hull of the robot's yellow body
+    body_candidates(bgr) -> list[np.ndarray] # all plausible body hulls, most chassis-like first
     annotate_jpeg_b64(b64) -> str            # returns annotated b64 (or original)
     annotate_jpeg_bytes(buf) -> bytes        # returns annotated bytes (or original)
 """
@@ -78,6 +83,15 @@ _MAX_SEED_RETRIES = 8
 # a sizeable gap, while a tiny stray fragment (noise, a reflection) only
 # merges when it is genuinely touching something its own size.
 _BODY_CLUSTER_RADIUS_FACTOR = 1.6
+
+# Technic-plate holes: non-yellow regions fully enclosed by the (unopened)
+# yellow mask, in this size range as a fraction of frame area (~2-200 px at
+# 720x1280). A chassis cluster has tens of them; a yellow cup has ~0-4
+# (measured 2026-10-02: robot 43 vs cup 4 in the same frame). Used only to
+# RANK plausible clusters — not as a hard threshold, since blur/distance can
+# leave the chassis with few resolved holes (droidcam_current.jpg: 11).
+_HOLE_MIN_AREA_FRAC = 2.0 / 921600
+_HOLE_MAX_AREA_FRAC = 200.0 / 921600
 
 # Gripper search ROI: expand along the body's long axis (where the arm extends)
 # more aggressively than perpendicular, relative to the larger/smaller body dim.
@@ -184,11 +198,51 @@ def _cluster_from_seed(seed: np.ndarray, contours: list[np.ndarray]) -> np.ndarr
     return cv2.convexHull(np.vstack(pts))
 
 
+def _hole_centroids(raw_yellow_mask: np.ndarray, frame_area: int) -> np.ndarray:
+    """Centroids (Nx2 float32) of small non-yellow holes enclosed by yellow.
+
+    Uses the raw mask: the 3x3 MORPH_OPEN applied elsewhere erodes the thin
+    yellow walls between neighbouring plate holes and merges them away.
+    """
+    contours, hier = cv2.findContours(raw_yellow_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return np.empty((0, 2), np.float32)
+    lo, hi = _HOLE_MIN_AREA_FRAC * frame_area, _HOLE_MAX_AREA_FRAC * frame_area
+    pts = []
+    for c, (_, _, _, parent) in zip(contours, hier[0]):
+        if parent == -1:
+            continue  # outer boundary, not a hole
+        if not lo <= cv2.contourArea(c) <= hi:
+            continue
+        x, y, cw, ch = cv2.boundingRect(c)
+        pts.append((x + cw / 2.0, y + ch / 2.0))
+    return np.array(pts, np.float32).reshape(-1, 2)
+
+
+def _count_holes_in(hull: np.ndarray, holes: np.ndarray) -> int:
+    return sum(
+        cv2.pointPolygonTest(hull, (float(px), float(py)), False) >= 0
+        for px, py in holes
+    )
+
+
 def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     """
     Locate the robot's yellow body in `bgr` and return its convex hull
     (Nx1x2 int32 contour points), or None if no yellow body is found or
     it's too small or too large to plausibly be the robot.
+
+    Returns the most chassis-like of body_candidates() — see there.
+    """
+    candidates = body_candidates(bgr)
+    return candidates[0] if candidates else None
+
+
+def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
+    """
+    Return every plausibly-sized yellow cluster's convex hull, most
+    chassis-like (most enclosed Technic-plate holes) first. Ties keep the
+    seed-size order. Empty list if none.
 
     Locates the body by clustering nearby yellow contours into one shape so
     callers get a reliable centroid + ROI. This hull is NOT used by
@@ -200,25 +254,29 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     sunlit/warm-toned floor or wall can pass the yellow mask as a bigger
     contiguous blob than the (possibly occluder-fragmented) chassis itself.
     Clustering is retried from progressively smaller seed contours (up to
-    _MAX_SEED_RETRIES) until one produces a plausibly-sized hull (see
+    _MAX_SEED_RETRIES), keeping each plausibly-sized hull (see
     _MIN_BODY_AREA_FRAC / _MAX_BODY_AREA_FRAC), so a single oversized false
     positive doesn't blot out a real, smaller robot elsewhere in frame.
+
+    Size alone can't separate the chassis from a smooth yellow object of
+    similar size (a yellow cup outsized every chassis fragment on
+    2026-10-02 and was returned as "the body"), hence the hole ranking.
     """
     if bgr is None or bgr.size == 0:
-        return None
+        return []
     h, w = bgr.shape[:2]
     frame_area = h * w
 
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    raw_yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
     yellow_mask = cv2.morphologyEx(
-        yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+        raw_yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
 
     contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         log.info("body_hull: no yellow contours found in frame")
-        return None
+        return []
 
     min_area = _MIN_BODY_AREA_FRAC * frame_area
     max_area = _MAX_BODY_AREA_FRAC * frame_area
@@ -228,10 +286,17 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     )[:_MAX_SEED_RETRIES]
     if not seed_candidates:
         log.info("body_hull: no yellow contour reaches the minimum 30px seed area")
-        return None
+        return []
 
+    holes = _hole_centroids(raw_yellow_mask, frame_area)
+    plausible: list[tuple[int, int, np.ndarray]] = []  # (holes, rank, hull)
     for rank, seed in enumerate(seed_candidates):
-        if _centroid(seed) is None:
+        seed_c = _centroid(seed)
+        if seed_c is None:
+            continue
+        # A smaller seed already swallowed by an accepted cluster yields
+        # the same cluster again — skip the O(n^2) re-clustering.
+        if any(cv2.pointPolygonTest(p[2], seed_c, False) >= 0 for p in plausible):
             continue
         body = _cluster_from_seed(seed, contours)
         area = cv2.contourArea(body)
@@ -248,15 +313,24 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
                 rank, area, max_area, 100.0 * area / frame_area,
             )
             continue
-        return body
+        plausible.append((_count_holes_in(body, holes), rank, body))
 
-    log.info(
-        "body_hull: no plausible yellow cluster found after trying %d seed candidate(s) — "
-        "robot may be out of frame, far away, occluded, or the scene has a large "
-        "yellow-ish false positive (floor/wall) with no smaller genuine chassis fragment",
-        len(seed_candidates),
-    )
-    return None
+    if not plausible:
+        log.info(
+            "body_hull: no plausible yellow cluster found after trying %d seed candidate(s) — "
+            "robot may be out of frame, far away, occluded, or the scene has a large "
+            "yellow-ish false positive (floor/wall) with no smaller genuine chassis fragment",
+            len(seed_candidates),
+        )
+        return []
+    plausible.sort(key=lambda p: (-p[0], p[1]))
+    if len(plausible) > 1:
+        log.info(
+            "body_hull: %d plausible yellow clusters, ranked by plate holes: %s",
+            len(plausible),
+            ", ".join(f"{_centroid(p[2])}={p[0]} holes" for p in plausible),
+        )
+    return [p[2] for p in plausible]
 
 
 def detect_heading(bgr: np.ndarray) -> Heading | None:
@@ -277,10 +351,26 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     )
 
     # ── 1. Find the yellow body ───────────────────────────────────────────
-    body = body_hull(bgr)
-    if body is None:
+    # Try each plausible yellow cluster, most chassis-like first. A cluster
+    # that yields no forward axis or no adjacent gripper isn't the robot
+    # (e.g. a yellow cup) — move on rather than give up on the frame.
+    candidates = body_candidates(bgr)
+    if not candidates:
         log.info("detect_heading: aborting — no robot body detected (see body_hull log above)")
         return None
+    for body in candidates:
+        heading = _heading_for_body(bgr, hsv, yellow_mask, body)
+        if heading is not None:
+            return heading
+    return None
+
+
+def _heading_for_body(
+    bgr: np.ndarray, hsv: np.ndarray, yellow_mask: np.ndarray, body: np.ndarray,
+) -> Heading | None:
+    """Forward heading assuming `body` is the robot's chassis hull, or None."""
+    h, w = bgr.shape[:2]
+    frame_area = h * w
     body_center = _centroid(body)
     if body_center is None:
         log.info("detect_heading: body hull found but centroid degenerate (zero-area moments)")

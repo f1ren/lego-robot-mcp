@@ -257,5 +257,59 @@ class TestBodyHullRejectsFloorFalsePositive(unittest.TestCase):
         )
 
 
+class TestYellowCupNotMistakenForBody(unittest.TestCase):
+    """Regression for body_candidates' Technic-hole ranking (2026-10-02).
+
+    A tilted yellow cup (waste bin) on the right of the frame is a single
+    smooth 8.2k px yellow contour — larger than any fragment of the robot's
+    chassis, which the PCB and black parts split into pieces. Size-ordered
+    seeding returned the cup as "the body", no gripper was found next to it,
+    and detect_heading returned None, breaking navigate_to/turn_to/drive_to
+    and the grasp-readiness gate. The chassis plates have a dense hole grid
+    (~31 enclosed holes here) while the cup has ~3, so ranking by holes
+    picks the chassis; detect_heading also falls through to the next
+    candidate when one yields no gripper.
+    """
+
+    FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "heading" / "droidcam_yellow_cup_bin.jpg"
+
+    # Manually verified regions in the raw 720x1280 frame.
+    _CHASSIS_BBOX = (90, 740, 290, 880)
+    _CUP_BBOX = (530, 660, 655, 760)
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import body_hull, detect_heading
+        cls._body_hull = staticmethod(body_hull)
+        cls._detect = staticmethod(detect_heading)
+
+    def _center_in(self, pt, bbox):
+        x1, y1, x2, y2 = bbox
+        return x1 <= pt[0] <= x2 and y1 <= pt[1] <= y2
+
+    def test_body_hull_is_chassis_not_cup(self):
+        bgr = cv2.imread(str(self.FIXTURE))
+        self.assertIsNotNone(bgr, f"Could not load {self.FIXTURE}")
+        body = self._body_hull(bgr)
+        self.assertIsNotNone(body, "body_hull should detect the robot body")
+        x, y, bw, bh = cv2.boundingRect(body)
+        center = (x + bw / 2, y + bh / 2)
+        self.assertFalse(self._center_in(center, self._CUP_BBOX), "body_hull picked the yellow cup")
+        self.assertTrue(
+            self._center_in(center, self._CHASSIS_BBOX),
+            f"hull center {center} should land on the chassis {self._CHASSIS_BBOX}",
+        )
+
+    def test_heading_north(self):
+        bgr = cv2.imread(str(self.FIXTURE))
+        heading = self._detect(bgr)
+        self.assertIsNotNone(heading, "detect_heading returned None — yellow cup taken as body again?")
+        self.assertTrue(self._center_in(heading.body_center, self._CHASSIS_BBOX))
+        dx, dy = heading.forward
+        angle = math.degrees(math.atan2(-dy, dx))
+        labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+        self.assertEqual(labels[round(angle / 45) % 8], "N", f"forward={dx:.3f},{dy:.3f}")
+
+
 if __name__ == "__main__":
     unittest.main()
