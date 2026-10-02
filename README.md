@@ -68,7 +68,15 @@ export GEMINI_API_KEY=...                               # .mcp.json reads it fro
 ```
 
 PDDL planning runs on a separate MCP server, [NAPC](https://github.com/f1ren/NAPC). Install it as its README describes.
-`.mcp.json` contains absolute paths from the author's machine (the `napc` command and the memory DB). Change them to yours.
+`.mcp.json` contains absolute paths from the author's machine (the `napc` command, the memory DB, and the NAPC output paths). Change them to yours.
+
+## Scene text
+
+While a task runs, the server reads new text in both camera streams, such as a sign saying which bin takes paper. It only reads a view that is still, clear, and changed since the last read. Text containing a word it hasn't seen before becomes a **visual signal**. The signal is appended to `output/signals/neil.jsonl`, which Claude Code tails in the background, and carried by the next tool result as `visual_signals`. Until a result has carried it, the robot pauses: multi-step motions stop at their next step, and motor commands return PAUSED without moving.
+
+Claude Code decides whether the text matters. If it does, Claude Code asks NAPC to adapt the plan (`replan_with_observation`). The robot server never talks to NAPC.
+
+The frames behind each signal, with an `_ocr.jpg` overlay of what was read, are saved in `output/scene_text/`. The settings are the `SCENE_TEXT_*` and `SIGNALS_OUTBOX` entries in `mcp_robot/config.py`. See [mcp_robot/scene_text.py](mcp_robot/scene_text.py) for the design.
 
 ## Usage
 

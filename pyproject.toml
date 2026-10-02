@@ -19,6 +19,7 @@ dependencies = [
     "torchvision==0.26.0",
     "ultralytics==8.4.53",
     "transformers==4.57.6",
+    "rapidocr_onnxruntime==1.4.4",
 ]
 
 [project.optional-dependencies]

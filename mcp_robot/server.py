@@ -35,6 +35,14 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────────────
   locate_object               VLM-based localization of arbitrary objects (Gemini Flash)
 
+  Scene text
+  ──────────
+  scene_text_status           Text read off the camera streams so far, and recent visual signals
+
+New text the cameras read is a visual signal (see mcp_robot/scene_text.py):
+appended to SIGNALS_OUTBOX for a background tail, and carried by the next
+tool result as "visual_signals" — until one has, motor commands pause.
+
 Run with:
     python3 -m mcp_robot.server
 """
@@ -42,6 +50,8 @@ from __future__ import annotations
 
 import atexit
 import base64
+import functools
+import inspect
 import logging
 import os
 import threading
@@ -55,7 +65,7 @@ from mcp.types import ImageContent, TextContent
 
 import mcp_robot.camera as cam_mod
 import mcp_robot.robot  as robot_mod
-from mcp_robot import config, heading, viz, vision
+from mcp_robot import config, heading, scene_text, viz, vision
 from mcp_robot import grasp_readiness as grasp_mod
 from mcp_robot import navigation as nav_mod
 
@@ -112,9 +122,40 @@ mcp = FastMCP(
         "Use get_front_camera_image / get_external_camera_image / "
         "capture_front_video_clip / capture_external_video_clip / get_robot_state "
         "when you explicitly need to see the scene. "
-        "Stop and report to the user if a motor or camera tool raises an error."
+        "Stop and report to the user if a motor or camera tool raises an error. "
+        "The cameras are also read for new text (signs, labels): each new text is a "
+        f"visual signal, appended to {config.SIGNALS_OUTBOX} (tail it in the background) "
+        "and carried by the next tool result as `visual_signals`. Until a result has "
+        "carried it, the robot pauses: multi-step motions stop at their next step and "
+        "motor commands return PAUSED without moving — decide whether the text matters, "
+        "then re-issue the command."
     ),
 )
+
+
+def _tool(motor: bool = False):
+    """mcp.tool(), plus visual signals (new text the cameras read) attached
+    to the result — see scene_text.attach_signals. A motor tool also
+    doesn't run while a signal no result has carried yet is pending: it
+    returns PAUSED with the signal instead, so the robot never acts on a
+    plan the coordinator hasn't re-checked against what was just read.
+
+    Only the MCP-registered copy does this; the module keeps the plain
+    function, so a tool calling another internally (click_button →
+    navigate_to) neither pauses on nor uses up a signal meant for the
+    coordinator."""
+    def decorator(fn):
+        returns_list = "list" in str(inspect.signature(fn).return_annotation)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if motor and scene_text.should_pause():
+                log.info("[TOOL] %s paused — visual signal pending", fn.__name__)
+                return scene_text.paused_result(returns_list)
+            return scene_text.attach_signals(fn(*args, **kwargs))
+        mcp.tool()(wrapper)
+        return fn
+    return decorator
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -464,7 +505,7 @@ def _with_change_analysis(
 
 # ── motor primitives ──────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool()
 def get_motor_positions() -> dict:
     """Return current position (degrees) for all four motor ports."""
     log.info("[TOOL] get_motor_positions")
@@ -474,7 +515,7 @@ def get_motor_positions() -> dict:
         return _err(str(exc))
 
 
-@mcp.tool()
+@_tool(motor=True)
 def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", context: str = "",
                sub_observation: str = "", sub_action: str = "") -> dict:
     """
@@ -531,7 +572,7 @@ def move_motor(port: str, degrees: int, speed: int = 20, expected: str = "", con
 
 # ── wheel driving ─────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool(motor=True)
 def drive(
     left_speed: int,
     right_speed: int,
@@ -581,7 +622,7 @@ def drive(
     )
 
 
-@mcp.tool()
+@_tool(motor=True)
 def turn(
     body_degrees: float,
     speed: int = 20,
@@ -635,7 +676,7 @@ def turn(
     )
 
 
-@mcp.tool()
+@_tool(motor=True)
 def turn_to(
     target_class_yolo: str = "",
     target_class_free_text: str = "",
@@ -745,7 +786,7 @@ def turn_to(
     return result
 
 
-@mcp.tool()
+@_tool(motor=True)
 def drive_to(
     target_class_yolo: str = "",
     target_class_free_text: str = "",
@@ -969,6 +1010,9 @@ def drive_to(
         )
         return first_result
 
+    if scene_text.should_pause():
+        return _stop_after_first("Second drive skipped — PAUSED: the cameras read new text (see visual_signals).")
+
     # ── Auto-refine: re-measure from the closer range and drive the rest ──────
     # Capped at one refinement (2 drives total) — auto-loop convenience, not
     # an unbounded closed loop (that's navigate_to's job). If the second
@@ -1127,7 +1171,7 @@ def _square_up_to_target(
     return None, distance_mm
 
 
-@mcp.tool()
+@_tool(motor=True)
 def click_button(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1267,7 +1311,7 @@ def click_button(
 
 # ── arm ───────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool(motor=True)
 def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
@@ -1309,7 +1353,7 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED, expected: str 
     )
 
 
-@mcp.tool()
+@_tool(motor=True)
 def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context: str = "",
               sub_observation: str = "", sub_action: str = "") -> dict:
     """
@@ -1347,7 +1391,7 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context
     )
 
 
-@mcp.tool()
+@_tool(motor=True)
 def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
@@ -1396,7 +1440,7 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
 
 # ── gripper ───────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool(motor=True)
 def control_gripper(
     action: str,
     target_class_yolo: str,
@@ -1483,7 +1527,7 @@ def control_gripper(
 # ── compound actions ──────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@_tool(motor=True)
 def put() -> dict:
     """
     High-level PUT: open gripper then raise arm. Captures before/after
@@ -1503,7 +1547,7 @@ def put() -> dict:
 
 # ── grasp readiness ───────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool()
 def check_grasp_readiness(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1577,6 +1621,23 @@ def _nav_track_motor(
     cam_mod.stream_simpleipcamera_bgr(_on_frame, stop_event)
 
 
+class _VisualSignalPause(Exception):
+    """The cameras read new text mid-motion — raised between the motions of
+    a multi-motion tool so it stops at the next step instead of finishing a
+    step the text may make wrong (the coordinator can't intervene until the
+    tool returns)."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__(f"paused — the cameras read new text {texts} (see visual_signals)")
+
+
+def _check_visual_signal() -> None:
+    if scene_text.should_pause():
+        texts = [t for s in scene_text.get_signals().pending() for t in s["texts"]]
+        log.info("[scene_text] pausing mid-motion on visual signal %s", texts)
+        raise _VisualSignalPause(texts)
+
+
 def _scan_for_target(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1601,6 +1662,7 @@ def _scan_for_target(
     rotated_so_far = 0
     for i in range(n_steps):
         if i > 0:
+            _check_visual_signal()
             robot_mod.turn(float(step_deg), config.SCAN_SPEED)
             rotated_so_far += step_deg
             logs.append(f"Scan step {i + 1}/{n_steps}: rotated +{step_deg}° CW "
@@ -1647,7 +1709,7 @@ def _scan_for_target(
     return False, frames_b64, logs
 
 
-@mcp.tool()
+@_tool(motor=True)
 def scan_for_target(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1693,6 +1755,8 @@ def scan_for_target(
                 "Consider repositioning the robot or verifying the target class."
             )))
         return content
+    except _VisualSignalPause as pause:
+        return [TextContent(type="text", text=f"Scan {pause}. Re-issue the scan to continue if the text doesn't matter.")]
     except Exception as exc:
         log.error("[TOOL] scan_for_target error: %s", exc, exc_info=True)
         return [TextContent(type="text", text=f"ERROR: {exc}")]
@@ -1761,7 +1825,7 @@ def _execute_final_turn(
                   "(residual heading error after large turn)")
 
 
-@mcp.tool()
+@_tool(motor=True)
 def navigate_to(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -1837,6 +1901,7 @@ def navigate_to(
     try:
         for step in range(max_steps):
             parts: list[str] = [f"=== Step {step + 1}/{max_steps} ==="]
+            _check_visual_signal()  # again before moving (step 9) — a step takes seconds
 
             # ── 1. Capture external frame + heading ───────────────────────
             try:
@@ -2056,7 +2121,8 @@ def navigate_to(
                 outcome = "path_blocked"
                 break
 
-            # ── 9. Execute next step ──────────────────────────────────────
+            # ── 9. Execute next step (unless new text was just read) ──────
+            _check_visual_signal()
             turn_deg, drive_deg, reverse = nav_mod.commands_for_step(obs_map, plan, h_result)
             direction_label = "reverse" if reverse else "forward"
             parts.append(f"Commands: turn={turn_deg:+.0f}°, drive={drive_deg:.0f}° (wheel, {direction_label})")
@@ -2110,6 +2176,9 @@ def navigate_to(
             if turn_msg is not None:
                 step_logs.append(f"{turn_msg} (max_steps reached)")
 
+    except _VisualSignalPause as pause:
+        step_logs.append(f"PAUSED: {pause}")
+        outcome = "paused_on_visual_signal"
     except Exception as exc:
         log.error("[TOOL] navigate_to error: %s", exc, exc_info=True)
         step_logs.append(f"ERROR: {exc}")
@@ -2140,6 +2209,9 @@ def navigate_to(
         ),
         "heading_not_detected": "Navigation aborted — robot heading could not be detected (yellow body not visible).",
         "camera_error":         "Navigation aborted — camera error.",
+        "paused_on_visual_signal": ("Navigation PAUSED — the cameras read new text (see visual_signals). "
+                                    "Decide whether it changes the plan; if not, call navigate_to again "
+                                    "(it replans from where the robot is now)."),
         "error":                "Navigation aborted — unexpected error.",
         "max_steps_reached":    f"Navigation incomplete — max_steps ({max_steps}) reached without reaching target.",
     }.get(outcome, outcome)
@@ -2174,7 +2246,7 @@ def navigate_to(
 
 # ── VLM object localization ───────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool()
 def locate_object(description: str) -> list[ImageContent | TextContent]:
     """
     Locate an arbitrary object using Gemini Flash vision localization.
@@ -2299,7 +2371,7 @@ def locate_object(description: str) -> list[ImageContent | TextContent]:
 
 # ── camera ────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool()
 def get_front_camera_image() -> list[ImageContent | TextContent]:
     """
     Capture a single still frame from the Pi Camera (front/robot-eye view).
@@ -2322,7 +2394,7 @@ def get_front_camera_image() -> list[ImageContent | TextContent]:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
-@mcp.tool()
+@_tool()
 def get_external_camera_image() -> list[ImageContent | TextContent]:
     """
     Capture a single still frame from the SimpleIPCamera (third-person/overhead view).
@@ -2342,7 +2414,7 @@ def get_external_camera_image() -> list[ImageContent | TextContent]:
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
-@mcp.tool()
+@_tool()
 def capture_front_video_clip(
     duration_s: float = 2.0,
     fps: float = 2.0,
@@ -2374,7 +2446,7 @@ def capture_front_video_clip(
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
-@mcp.tool()
+@_tool()
 def capture_external_video_clip(
     duration_s: float = 2.0,
     fps: float = 2.0,
@@ -2409,7 +2481,7 @@ def capture_external_video_clip(
         return [TextContent(type="text", text=f"ERROR: {exc}")]
 
 
-@mcp.tool()
+@_tool()
 def get_robot_state(
     target_class_yolo: str,
     target_class_free_text: str,
@@ -2512,7 +2584,7 @@ def get_robot_state(
 
 # ── task video ────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_tool()
 def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
     """
     Compile a video by concatenating recorded motion segments since a given
@@ -2546,6 +2618,41 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
 
 
 # ── background streaming ──────────────────────────────────────────────────────
+
+@_tool()
+def scene_text_status(reset_seen: bool = False) -> dict:
+    """
+    What the camera streams' text reader has seen: every word read so far
+    this session and the recent visual signals (new text). Like any tool
+    result, this one carries signals no result has shown yet — calling it
+    after a background signal event marks that signal as seen, so the next
+    motor command doesn't pause on it.
+
+    Text is read automatically whenever a camera's view is still, clear, and
+    changed since the last read; only text with a previously-unseen word
+    becomes a signal.
+
+    Args:
+        reset_seen: forget the words seen so far, so text already in view
+                    counts as new again (e.g. when starting an unrelated task).
+    """
+    log.info("[TOOL] scene_text_status reset_seen=%r", reset_seen)
+    watcher = scene_text.get_watcher()
+    status = {
+        "enabled": watcher is not None,
+        "ocr_available": scene_text.ocr_available() if watcher is not None else False,
+        "cameras": list(watcher.cameras) if watcher else [],
+        "views_read": watcher.reads if watcher else 0,
+        "seen_words": watcher.registry.snapshot() if watcher else [],
+        "outbox": config.SIGNALS_OUTBOX,
+        "recent_signals": [{k: s[k] for k in ("id", "time", "camera", "texts", "frame")}
+                           for s in scene_text.get_signals().recent()],
+    }
+    if reset_seen and watcher is not None:
+        watcher.reset()
+        status["reset"] = True
+    return _ok(status)
+
 
 def _run_pi_camera() -> None:
     reported = [False]

@@ -28,6 +28,25 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
    - **Do NOT manually replicate `scan_for_target` when it is disabled.** If `scan_for_target` returns "The user did not allow scan by rotation", do not work around this by chaining repeated `turn` calls + camera checks. That is the same action and equally prohibited. The server enforces this: cumulative rotation from `turn` calls exceeding `SCAN_TOTAL_DEG / 2` without a forward `drive` or `navigate_to` will hard-fail with an error. If you cannot locate the target without scanning, report it and stop.
    - **Always supply a non-empty `target_class_free_text` on the very first `navigate_to` call**, even when `target_class_yolo` is also set. Don't pass `""` and wait for a YOLO-only attempt to fail before adding a free-text fallback — that wastes a step and risks deriving the description later from a stale/annotated frame. Describe the target's color/shape/material as seen in the **raw camera frame**, never from a debug/overlay image (e.g. `step_NN_g_nav_overlay.jpg`'s obstacle-mask tint can make objects look the wrong color).
 
+# Visual signals (signs, labels) & replanning
+
+Neil (the lego-robot server) reads text off both camera streams on its own. It reads a view only once it has been still for about 0.6 s, is lit well enough and sharp, and differs from the last view it read. Text containing a word not seen before this session is a **visual signal**. Neil knows nothing about NAPC: judging a signal and replanning is your job, as the only caller of both servers. Each signal reaches you twice over:
+- as one JSON line appended to `output/signals/neil.jsonl` (`SIGNALS_OUTBOX`), for a background monitor;
+- as `visual_signals` on the next lego-robot tool result.
+
+Until a tool result has carried a signal, Neil pauses. Multi-step motions (`navigate_to`, the scans, `drive_to`'s second leg) stop at their next step ("Navigation PAUSED"), and motor commands return `ok: false, paused: true` with the signal instead of moving.
+
+1. **At the start of every task, start the background monitor**, and start it again whenever it expires:
+   `Monitor(command="tail -n 0 -F /home/navatm/Projects/lego-robot-mcp/output/signals/neil.jsonl", description="Neil visual signals", timeout_ms=1800000)`
+   Its events arrive between your tool calls, never during one. That's why Neil pauses itself mid-motion.
+2. **On a signal, from the monitor or a tool result, decide whether it changes what the plan should do.** Look at its `frame` with Read: the OCR strings can be split, merged or misread. Its `context_frame` is the other camera at the same moment.
+   - **It doesn't matter:** carry on. Re-issue a command that paused. After a monitor event, call `scene_text_status` first: its result carries the signal, so your next motor command won't pause on it.
+   - **It changes the plan:** keep Neil stopped and call napc **`replan_with_observation(observation=<what it says and what it refers to>, images=[{label, path}, ...], completed_steps=k)`**. It is synchronous and takes about 15–20 s. Continue with the `plan` it returns, which already starts from where Neil is. Pass its `problem_pddl` to any later `plan_pddl`.
+
+`k` = the number of steps of NAPC's current plan (your last `plan_pddl`) whose tool calls actually finished and were verified. A step cut short by a pause is **not** completed.
+
+`plan_pddl` echoes earlier observations under `observations`. Keep your problem consistent with them. `scene_text_status` shows what was read. To have text already in view read again, call `scene_text_status(reset_seen=True)`.
+
 # Troubleshoot
 
 **Whenever you are stuck with no clear path forward, call `consult_vqa_for_pddl_domain` (on the separate `napc` MCP server — see above) before consulting the user.** This is the default response to any dead end. Never ask the user for help without trying this first. First call this server's own `get_front_camera_image` and `get_external_camera_image` to get fresh stills — each already returns a saved file path in its response text — then pass both as `images=[{"label": "pi_camera", "path": ...}, {"label": "simpleipcamera", "path": ...}]` on the `napc` server's tool, along with a 1–3 sentence `failure_context` describing what was tried and why it failed. It attaches the current domain and asks the VQA: *"What seems to be the problem? Is there anything missing from the domain formalization?"* (There's no `sub_observation`/`sub_action` for this call and no video-subtitle scene for it — that only applies to this server's own motor tools, see rule 8 below.)
@@ -49,7 +68,8 @@ It controls a 4 motor lego robot connected to a Raspberry Pi via the BuildHat HA
 7. If you need a new primitive function, or any kind of function that you belive will be useful in the future (forward, backward, etc.), code it first, verify it works, and then proceed.
 8. **Prefer slower, longer motions over fast, short ones.** High speeds cause the robot to jitter and overshoot, making outcomes harder to control and verify. Slower and larger moves also produce clearer visual changes, making them easier for the Visual Temporal Reasoning model to assess correctly.
 9. **Minimum motor speed is 15.** Never pass a speed below 15 to any motor tool. Below this threshold motion is too slow to be reliably detected by the CV pipeline, making it impossible to verify whether the action succeeded.
-10. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
+10. **A visual signal comes first.** This covers `visual_signals` in a tool result, a PAUSED result, or a background monitor event. Follow **Visual signals & replanning** above before your next motor command.
+11. **Always fill `sub_observation` and `sub_action`** on every motor tool call (`drive`, `turn`, `move_arm`, `lower_arm`, `control_gripper`, `move_motor`, `navigate_to`, `scan_for_target`). These become video subtitles. Each must be ~4 words max. `sub_observation`: what was just observed or what the user asked (e.g. "Cup detected ahead"). `sub_action`: what the robot is doing right now (e.g. "Driving toward cup").
 
 # Experience Memory Workflow
 
