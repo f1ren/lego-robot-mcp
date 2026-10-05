@@ -418,7 +418,8 @@ VISION_BACKEND = os.getenv("VISION_BACKEND", "auto")
 
 # ── Gemini vision (Robotics-ER) ──────────────────────────────────────────────
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL          = os.getenv("GEMINI_MODEL",          "gemini-robotics-er-1.6-preview")
+# ER 1.6 was shut down 2026-08-31; its ID now 404s on every API version.
+GEMINI_MODEL          = os.getenv("GEMINI_MODEL",          "gemini-robotics-er-2-preview")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
 # Model used for free-text object localization (locate_object tool / VLM fallback).
