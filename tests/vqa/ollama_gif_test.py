@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Send PROMPT_TEXT + robot-rotating.gif to local Qwen3-VL via Ollama.
+Send PROMPT_TEXT + robot-rotating.gif to a local multimodal model (Gemma 4 by
+default) via Ollama.
 
 GIF frames are extracted and passed as sequential images (Ollama images= field).
 
 Usage:
-  python qwen3_gif_test.py
-  OLLAMA_HOST=http://localhost:11434 OLLAMA_MODEL=qwen3-vl python qwen3_gif_test.py
+  python ollama_gif_test.py
+  OLLAMA_HOST=http://localhost:11434 OLLAMA_MODEL=qwen3-vl:32b-thinking python ollama_gif_test.py
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import sys
 from pathlib import Path
 
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
 GIF_PATH     = Path(__file__).parent / "robot-rotating.gif"
 
 PROMPT_TEXT = (
