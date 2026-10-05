@@ -32,12 +32,59 @@ _HAT_RESET_CMD = (
 )
 
 
+# Prepended to every script while any motor is held (see RPiClient.hold_motor).
+# Each run_python script is its own process with its own buildhat session,
+# and buildhat's exit path cuts power to every port: BuildHAT.shutdown (a
+# weakref.finalize/atexit hook) sends "pwm ; coast ; off" to all four ports,
+# and Device.__del__ sends "off" for each Motor the script created. Left
+# alone, any unrelated call (drive, navigate_to, get_robot_state...) would
+# therefore drop a held gripper's object. The patch skips __del__'s "off" for
+# held ports, and re-sends their open-loop PWM right after shutdown's
+# all-port coast — a few ms gap, rather than filtering shutdown's command
+# string, so it doesn't depend on that string's exact format.
+# Open-loop PWM (not a PID position hold) because PID feedback comes from the
+# port's selected sensor mode, which every new script re-selects on init.
+_HOLD_PREAMBLE = """\
+import buildhat.serinterface as _bh_si, buildhat.devices as _bh_dev
+_BH_HELD = {held!r}  # BuildHAT port index -> PWM to keep applied
+_bh_orig_shutdown = _bh_si.BuildHAT.shutdown
+def _bh_shutdown(self):
+    _bh_orig_shutdown(self)
+    for _p, _v in _BH_HELD.items():
+        self.write(f"port {{_p}} ; pwm ; set {{_v}}\\r".encode())
+_bh_si.BuildHAT.shutdown = _bh_shutdown
+_bh_orig_del = _bh_dev.Device.__del__
+def _bh_del(self):
+    if getattr(self, "port", None) not in _BH_HELD:
+        _bh_orig_del(self)
+_bh_dev.Device.__del__ = _bh_del
+"""
+
+
 class RPiClient:
     def __init__(self, host: str = config.RPI_HOST, user: str = config.RPI_USER):
         self.host = host
         self.user = user
         self._ssh: paramiko.SSHClient | None = None
         self._lock = threading.Lock()
+        # BuildHAT port letter -> PWM (-1..1) kept applied across scripts.
+        self._held: dict[str, float] = {}
+
+    # ── motor hold across scripts ────────────────────────────────────────────
+
+    def hold_motor(self, port: str, pwm: float) -> None:
+        """Keep *port* driven at open-loop *pwm* after every later script
+        exits, until release_motor(port). Only affects scripts run after this
+        call; the caller is responsible for actually starting the PWM."""
+        self._held[port] = pwm
+
+    def release_motor(self, port: str) -> None:
+        """Stop re-asserting *port*'s hold. Doesn't itself touch the motor —
+        the next script's normal exit coasts it."""
+        self._held.pop(port, None)
+
+    def is_held(self, port: str) -> bool:
+        return port in self._held
 
     # ── connection ────────────────────────────────────────────────────────────
 
@@ -85,7 +132,7 @@ class RPiClient:
             self._reset_hat()
             return self._run_python_once(script, timeout)
 
-    def _run_python_once(self, script: str, timeout: int) -> dict:
+    def _build_script(self, script: str) -> str:
         # Wrap the script so any uncaught exception is emitted as JSON to stdout
         # (otherwise it would silently vanish if stderr is suppressed).
         # We also redirect C-level fd-2 so libcamera INFO noise doesn't corrupt output.
@@ -104,8 +151,13 @@ class RPiClient:
                 except Exception:
                     pass
         """)
-        full_script = wrapper + indented + "\n" + footer
+        if self._held:
+            held = {ord(p) - ord("A"): v for p, v in self._held.items()}
+            wrapper += textwrap.indent(_HOLD_PREAMBLE.format(held=held), "    ")
+        return wrapper + indented + "\n" + footer
 
+    def _run_python_once(self, script: str, timeout: int) -> dict:
+        full_script = self._build_script(script)
         with self._lock:
             ssh = self._ensure_connected()
             stdin, stdout, stderr = ssh.exec_command("python3 -", timeout=timeout)

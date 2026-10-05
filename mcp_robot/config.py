@@ -86,12 +86,17 @@ ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
 # (lower_arm/move_arm are unaffected and keep DEFAULT_ARM_SPEED).
 LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
 
-# lift_arm closes the gripper (holding torque) before raising the arm, then
-# releases the hold torque after this many seconds — long enough to observe
-# whether a grasped object stays put through the lift and a brief settle
-# before the fingers are allowed to coast. See
-# mcp_robot.robot._GRASP_HOLD_AND_LIFT.
+# lift_arm closes the gripper (holding torque) before raising the arm, holds
+# both for this many seconds, then lets the arm coast while switching the
+# gripper to the carry hold below. See mcp_robot.robot._GRASP_HOLD_AND_LIFT.
 LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
+
+# Open-loop PWM (0..1, closing direction) the gripper motor is kept driven at
+# from lift_arm until the gripper is next moved (control_gripper open / put),
+# across every tool call in between — an unpowered gripper is back-driven
+# open by the held object. Kept below the 0.7 power limit buildhat sets on
+# every Motor so a stalled motor isn't left at full power through a carry.
+GRIPPER_HOLD_PWM = float(os.getenv("GRIPPER_HOLD_PWM", "0.4"))
 
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined

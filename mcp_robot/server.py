@@ -17,7 +17,7 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
-  lift_arm               Close gripper (hold torque), lift arm to home/retracted position, hold, release gripper
+  lift_arm               Close gripper (hold torque), lift arm to home/retracted position; gripper stays powered until next opened
   control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
@@ -1396,13 +1396,17 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Grasp-safe arm lift: closes the gripper with holding torque, raises the
-    arm fully to the home/retracted position, holds briefly, then releases
-    the gripper's hold torque. All four steps run inside a single script on
-    the RPi (see mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque
-    stays actively applied by the BuildHAT firmware for the whole raise +
-    settle window — this is what stops a grasped object (e.g. a cup) from
-    slipping out while the arm moves. Captures before/after images and
-    returns a Gemini-generated `change_description`.
+    arm fully to the home/retracted position and holds briefly. The close +
+    raise run inside a single script on the RPi (see
+    mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque stays actively
+    applied by the BuildHAT firmware for the whole raise + settle window —
+    this is what stops a grasped object (e.g. a cup) from slipping out while
+    the arm moves. The gripper then STAYS POWERED (closing) through every
+    later tool call — navigate_to, drive, turn, ... — so the object can be
+    carried, and is only released by the next gripper move:
+    control_gripper("open") or put cut its power just before opening.
+    get_motor_positions reports this as `gripper_held`. Captures before/after
+    images and returns a Gemini-generated `change_description`.
 
     Args:
         speed:    Arm motor speed, 5-15 (default 5 — 66% of DEFAULT_ARM_SPEED,
@@ -1422,12 +1426,12 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
     expected_str = expected if expected else (
         "gripper jaws close fully (grasps anything between them), arm raises fully to "
         f"home position (~{config.ARM_UP_DEG}°, i.e. ~{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° "
-        "up from fully lowered) while the gripper holds, then the gripper releases its hold "
-        "torque — fingers remain at the closed position, they do not reopen"
+        "up from fully lowered) while the gripper holds; the gripper stays closed and keeps "
+        "holding — fingers do not reopen and any grasped object stays in the gripper"
     )
     return _with_change_analysis(
         f"close gripper with hold, lift arm fully to home position at speed {speed}, "
-        "hold, then release gripper hold",
+        "hold; gripper stays powered closed",
         expected_str,
         lambda: robot_mod.lift_arm(speed),
         context=context,

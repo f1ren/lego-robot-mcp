@@ -73,7 +73,10 @@ print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightm
 # SSH round-trip, one process) so the HAT firmware is guaranteed to still be
 # actively applying hold torque for the entire arm-raise + settle window —
 # splitting this across multiple run_python calls would risk a gap between
-# calls where nothing is driving the gripper motor at all.
+# calls where nothing is driving the gripper motor at all. The gripper then
+# switches to open-loop PWM instead of coasting, and lift_arm registers it
+# with RPiClient.hold_motor so this and every later script's exit keeps it
+# driven until release_gripper_hold().
 _GRASP_HOLD_AND_LIFT = """
 import json
 import time
@@ -93,7 +96,7 @@ arm_end = arm.get_position()
 
 time.sleep({hold_seconds})
 
-gripper.coast()
+gripper.pwm({gripper_hold_pwm})
 arm.coast()
 gripper_end = gripper.get_position()
 
@@ -125,6 +128,15 @@ from buildhat import MotorPair
 pair = MotorPair({left_port!r}, {right_port!r})
 pair.stop()
 print(json.dumps({{"ok": True, "left": pair._leftmotor.get_position(), "right": pair._rightmotor.get_position()}}))
+"""
+
+_COAST_MOTOR = """
+import json
+from buildhat import Motor
+
+m = Motor({port!r})
+m.coast()
+print(json.dumps({{"ok": True, "position": m.get_position()}}))
 """
 
 _DRIVE_WHEELS_BY_DEGREES = """
@@ -200,6 +212,7 @@ def get_all_positions() -> dict:
         "right_wheel": raw.get(config.PORT_RIGHT_WHEEL),
         "arm":         raw.get(config.PORT_ARM),
         "gripper":     raw.get(config.PORT_GRIPPER),
+        "gripper_held": gripper_held(),
         "ports":       raw,
     }
     return positions
@@ -215,6 +228,10 @@ _PORT_TO_NAME = {
 
 def move_motor(port: str, degrees: int, speed: int) -> dict:
     """Move a single motor by *degrees* at *speed*. Returns start/end positions."""
+    if port == config.PORT_GRIPPER:
+        # Any gripper move ends a carry hold: cut its power first, otherwise
+        # the end of this very script would re-apply the closing PWM.
+        release_gripper_hold()
     result = get_client().run_python(
         _MOVE_SINGLE_MOTOR.format(port=port, degrees=degrees, speed=speed),
         timeout=max(30, abs(degrees) // 10 + 5),
@@ -404,8 +421,12 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
 
 def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
     """Close the gripper with holding torque, lift the arm fully to the
-    home/retracted position, hold for config.LIFT_ARM_HOLD_SECONDS, then
-    release the gripper's hold torque. Runs as a single RPi script (see
+    home/retracted position, hold for config.LIFT_ARM_HOLD_SECONDS, then let
+    the arm coast and leave the gripper powered (config.GRIPPER_HOLD_PWM)
+    so a lifted object can be carried and dropped. The gripper stays powered
+    across later tool calls until the gripper is next moved (control_gripper
+    open, put), which cuts the power just before opening — see
+    release_gripper_hold(). The close + raise run as a single RPi script (see
     _GRASP_HOLD_AND_LIFT) so the gripper stays under active hold for the
     whole arm-raise + settle window instead of coasting the instant the
     close finishes. Named to match the PDDL domain's lift-arm action
@@ -419,23 +440,56 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
     global _gripper_state
     arm_deg = config.ARM_DOWN_DEG - config.ARM_UP_DEG
     gripper_deg = config.GRIPPER_CLOSED_DEG
-    result = get_client().run_python(
-        _GRASP_HOLD_AND_LIFT.format(
-            gripper_port=config.PORT_GRIPPER,
-            gripper_degrees=gripper_deg,
-            gripper_speed=config.DEFAULT_GRIPPER_SPEED,
-            arm_port=config.PORT_ARM,
-            arm_degrees=arm_deg,
-            arm_speed=speed,
-            hold_seconds=config.LIFT_ARM_HOLD_SECONDS,
-        ),
-        timeout=max(30, gripper_deg // 10 + arm_deg // 10 + int(config.LIFT_ARM_HOLD_SECONDS) + 15),
-    )
-    _gripper_state = "close"  # fingers stay at the closed position even though hold torque was released
+    client = get_client()
+    # Registered before the script runs: its own exit must already keep the
+    # gripper powered. An earlier hold is deliberately not released first —
+    # the script's close takes the motor over directly, with no unpowered gap.
+    client.hold_motor(config.PORT_GRIPPER, config.GRIPPER_HOLD_PWM)
+    try:
+        result = client.run_python(
+            _GRASP_HOLD_AND_LIFT.format(
+                gripper_port=config.PORT_GRIPPER,
+                gripper_degrees=gripper_deg,
+                gripper_speed=config.DEFAULT_GRIPPER_SPEED,
+                arm_port=config.PORT_ARM,
+                arm_degrees=arm_deg,
+                arm_speed=speed,
+                hold_seconds=config.LIFT_ARM_HOLD_SECONDS,
+                gripper_hold_pwm=config.GRIPPER_HOLD_PWM,
+            ),
+            timeout=max(30, gripper_deg // 10 + arm_deg // 10 + int(config.LIFT_ARM_HOLD_SECONDS) + 15),
+        )
+    except Exception:
+        # Don't leave a stalled gripper powered after a failed lift.
+        try:
+            release_gripper_hold()
+        except Exception:
+            log.exception("lift_arm: failed to release gripper hold after error")
+        raise
+    _gripper_state = "close"
     log.info(
-        "lift_arm: closed gripper (delta=%s), held %ss while raising arm (delta=%s), released gripper hold",
+        "lift_arm: closed gripper (delta=%s), held %ss while raising arm (delta=%s), "
+        "gripper left powered at PWM %s until next opened",
         result.get("gripper_delta"), config.LIFT_ARM_HOLD_SECONDS, result.get("arm_delta"),
+        config.GRIPPER_HOLD_PWM,
     )
+    return result
+
+
+def gripper_held() -> bool:
+    """True while lift_arm's carry hold keeps the gripper motor powered."""
+    return get_client().is_held(config.PORT_GRIPPER)
+
+
+def release_gripper_hold() -> dict:
+    """Cut the gripper's carry-hold power (fingers stay where they are; the
+    held object is then free to push them open). No-op if not holding."""
+    client = get_client()
+    if not client.is_held(config.PORT_GRIPPER):
+        return {"ok": True, "note": "gripper not held"}
+    client.release_motor(config.PORT_GRIPPER)
+    result = client.run_python(_COAST_MOTOR.format(port=config.PORT_GRIPPER))
+    log.info("release_gripper_hold: gripper power cut (position=%s)", result.get("position"))
     return result
 
 
