@@ -20,5 +20,6 @@ tests/fixtures/*/annotated/
 
 # Models
 yolo11n.pt
+yoloe-*.pt
 
 certs/
