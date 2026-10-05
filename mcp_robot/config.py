@@ -223,7 +223,7 @@ CAMERA_WARMUP  = float(os.getenv("CAMERA_WARMUP", "0.8"))  # seconds
 POST_ACTION_SETTLE = float(os.getenv("POST_ACTION_SETTLE", "0.5"))  # settle delay before after-capture
 
 # ── SimpleIPCamera ────────────────────────────────────────────────────────────
-SIMPLEIPCAMERA_URL         = os.getenv("SIMPLEIPCAMERA_URL", "http://192.168.8.176:8080/stream.mjpeg")
+SIMPLEIPCAMERA_URL         = os.getenv("SIMPLEIPCAMERA_URL", "http://192.168.8.81:8080/stream.mjpeg")
 SIMPLEIPCAMERA_ROTATION    = int(os.getenv("SIMPLEIPCAMERA_ROTATION", "90"))  # CW degrees: 0, 90, 180, 270
 # Target capture rate for SimpleIPCamera during action execution and video compilation.
 # Set to SimpleIPCamera's native ceiling (~30 fps) — the per-action VQA cost is unaffected
