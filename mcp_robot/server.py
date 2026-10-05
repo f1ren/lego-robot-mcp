@@ -1462,7 +1462,7 @@ def control_gripper(
     Args:
         action:                 "open" or "close".
         target_class_yolo:      YOLO class for the grasp-readiness gate
-                                (e.g. "cup", "ball", "any"). REQUIRED for
+                                (e.g. "cup", "paper ball", "any"). REQUIRED for
                                 "close" — must be non-empty.
         target_class_free_text: Free-text description for Gemini Flash
                                 (e.g. "red rubber ball"). REQUIRED for
@@ -1568,6 +1568,8 @@ def check_grasp_readiness(
         target_class_yolo:      YOLO class to look for. Supported values:
                                   "cup"    — cup / bowl / bottle / vase
                                   "ball"   — sports ball / orange / apple
+                                  "paper ball" — crumpled white paper ball
+                                             (YOLOE; "ball" won't find it)
                                   "bottle" — bottle / cup / vase
                                   "any"    — most-forward object of any class
                                 REQUIRED — must be non-empty.
@@ -1729,7 +1731,7 @@ def scan_for_target(
     On success the robot is left facing the target, ready for navigate_to.
 
     Args:
-        target_class_yolo:      YOLO class to detect (e.g. "cup", "ball").
+        target_class_yolo:      YOLO class to detect (e.g. "cup", "paper ball").
         target_class_free_text: Free-text description used only for logs.
         sub_observation:        ~4-word subtitle: what was just observed.
         sub_action:             ~4-word subtitle: what the robot is doing.
@@ -1871,7 +1873,8 @@ def navigate_to(
 
     Args:
         target_class_yolo:      YOLO class for the target (e.g. "cup", "ball",
-                                "bottle", "any"). REQUIRED — must be non-empty.
+                                "paper ball", "bottle", "any"). REQUIRED — must
+                                be non-empty.
         target_class_free_text: Free-text description for Gemini Flash fallback
                                 when YOLO finds nothing (e.g. "light switch").
                                 REQUIRED — must be non-empty. Prefer a
@@ -2500,6 +2503,8 @@ def get_robot_state(
                                 camera frame. Supported values:
                                   "cup"    → cup, bowl, bottle, vase
                                   "ball"   → sports ball, orange, apple
+                                  "paper ball" → crumpled white paper ball
+                                             (YOLOE; "ball" won't find it)
                                   "bottle" → bottle, cup, vase
                                   "any"    → most-forward object of any class
                                 No default — state explicitly what you're

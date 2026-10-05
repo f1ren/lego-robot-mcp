@@ -1,8 +1,9 @@
 """
 CV-based grasp readiness check.
 
-Uses YOLO to locate the target object and checks two conditions against the
-green forward-arrow computed by heading.detect_heading():
+Uses YOLO to locate the target object (YOLOE for the non-COCO classes in
+_YOLOE_CLASSES) and checks two conditions against the green forward-arrow
+computed by heading.detect_heading():
 
   1. The object is touching the robot's front body (close to arrow_anchor).
   2. The green forward-arrow passes *well over* the object's center of mass
@@ -61,6 +62,31 @@ _CLASS_SYNONYMS: dict[str, frozenset[str] | None] = {
     "button": frozenset({"remote", "mouse", "keyboard", "cell phone"}),
     # "any" accepts every YOLO detection — picks the most forward object.
     "any":    None,
+}
+
+# Non-COCO classes are detected by YOLOE (open-vocabulary YOLO) instead,
+# prompted with a stored visual-prompt embedding (VPE): the normalised mean
+# YOLOE embedding of a few example boxes of the object. No training, no text
+# encoder (CLIP) at runtime, and no Gemini call when it finds the object.
+# YOLOE's confidences run lower than COCO YOLO's: on the 2026-10-05 paper-ball
+# frames, conf 0.1 found 37/37 held-out balls with no false positives (0.2
+# missed 2), 53/54 balls in earlier DroidCam sessions (different camera and
+# viewpoint), and fired on 0 of 35 ball-free frames (white cup, light
+# switches, signs). yoloe-26s found only 26/39 — keep the large model.
+_YOLOE_MODEL_NAME = "yoloe-26l-seg.pt"
+_YOLOE_CONF       = 0.1
+_YOLOE_VPE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yoloe_vpe")
+
+# YOLOE class -> the example (frame, x1/y1/x2/y2 box) pairs its stored VPE in
+# _YOLOE_VPE_DIR was built from, frame paths relative to the repo root. A VPE
+# only fits the model that produced it: after changing a class's examples or
+# _YOLOE_MODEL_NAME, rebuild it with save_yoloe_vpe("<class>").
+_YOLOE_CLASSES: dict[str, tuple[tuple[str, tuple[int, int, int, int]], ...]] = {
+    "paper ball": (  # crumpled white paper ball, external camera
+        ("tests/fixtures/yoloe/paper_ball_on_floor.jpg",                         (400, 729, 465, 791)),
+        ("tests/fixtures/yoloe/paper_ball_near_jaws.jpg",                        (409, 700, 476, 763)),
+        ("tests/fixtures/grasp_readiness/simpleipcamera_paper_ball_in_jaws.jpg", (505, 726, 572, 787)),
+    ),
 }
 
 # ── data classes ──────────────────────────────────────────────────────────────
@@ -192,7 +218,10 @@ def _yolo_detect(
     If *target_class* maps to None in _CLASS_SYNONYMS (the "any" sentinel), or
     if the key is absent AND the literal class name does not appear in the YOLO
     vocabulary, all detections are returned so the caller can pick the best one.
+    Classes in _YOLOE_CLASSES are detected by YOLOE instead (_yoloe_detect).
     """
+    if target_class in _YOLOE_CLASSES:
+        return _yoloe_detect(bgr, target_class)
     model = _load_model()
     results = model(bgr, conf=_YOLO_CONF, iou=_YOLO_IOU, verbose=False)
 
@@ -216,6 +245,87 @@ def _yolo_detect(
              len(objects), target_class, accept_all,
              [(o.class_name, f"{o.confidence:.2f}") for o in objects])
     return objects
+
+
+# ── YOLOE backend (non-COCO classes) ──────────────────────────────────────────
+
+_yoloe_model = None
+
+
+def _yoloe_vpe_path(class_name: str) -> str:
+    return os.path.join(_YOLOE_VPE_DIR, class_name.replace(" ", "_") + ".pt")
+
+
+def _load_yoloe_model():
+    """YOLOE with every _YOLOE_CLASSES class set from its stored VPE."""
+    global _yoloe_model
+    if _yoloe_model is not None:
+        return _yoloe_model
+    import torch
+    from ultralytics import YOLOE
+    log.info("Loading YOLOE model: %s (classes: %s)", _YOLOE_MODEL_NAME, list(_YOLOE_CLASSES))
+    model = YOLOE(_YOLOE_MODEL_NAME)
+    names = list(_YOLOE_CLASSES)
+    vpe = torch.cat([torch.load(_yoloe_vpe_path(n), weights_only=True) for n in names], dim=1)
+    model.set_classes(names, vpe)
+    _yoloe_model = model
+    return _yoloe_model
+
+
+def _yoloe_detect(bgr: np.ndarray, target_class: str) -> list[DetectedObject]:
+    """Run YOLOE and return detections of *target_class* (a _YOLOE_CLASSES key)."""
+    model = _load_yoloe_model()
+    results = model.predict(bgr, conf=_YOLOE_CONF, iou=_YOLO_IOU, verbose=False)
+
+    objects: list[DetectedObject] = []
+    for r in results:
+        if r.boxes is None:
+            continue
+        for box in r.boxes:
+            if model.names[int(box.cls[0].item())] != target_class:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            objects.append(DetectedObject(target_class, float(box.conf[0].item()), x1, y1, x2, y2))
+    log.info("YOLOE detected %d '%s': %s", len(objects), target_class,
+             [f"{o.confidence:.2f}" for o in objects])
+    return objects
+
+
+def build_yoloe_vpe(class_name: str):
+    """Visual-prompt embedding for *class_name* from its _YOLOE_CLASSES examples.
+
+    The L2-normalised mean of each example box's YOLOE embedding, shape
+    (1, 1, D), on the CPU.
+    """
+    import torch
+    from ultralytics import YOLOE
+    from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
+
+    model = YOLOE(_YOLOE_MODEL_NAME)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    vpes = []
+    for rel_path, box in _YOLOE_CLASSES[class_name]:
+        bgr = cv2.imread(os.path.join(repo_root, rel_path))
+        if bgr is None:
+            raise FileNotFoundError(os.path.join(repo_root, rel_path))
+        predictor = YOLOEVPSegPredictor(overrides=dict(task="segment", mode="predict", save=False, batch=1, verbose=False))
+        predictor.set_prompts(dict(bboxes=np.array([box], dtype=np.float32), cls=np.array([0])))
+        predictor.setup_model(model=model.model, verbose=False)
+        vpes.append(predictor.get_vpe(bgr))
+    return torch.nn.functional.normalize(torch.stack(vpes).mean(0), dim=-1).cpu()
+
+
+def save_yoloe_vpe(class_name: str) -> str:
+    """Rebuild *class_name*'s VPE (build_yoloe_vpe) and store it in _YOLOE_VPE_DIR.
+
+        python -c 'from mcp_robot.grasp_readiness import save_yoloe_vpe; save_yoloe_vpe("paper ball")'
+    """
+    import torch
+    path = _yoloe_vpe_path(class_name)
+    os.makedirs(_YOLOE_VPE_DIR, exist_ok=True)
+    torch.save(build_yoloe_vpe(class_name), path)
+    log.info("Saved YOLOE VPE for '%s': %s", class_name, path)
+    return path
 
 
 # ── VLM fallback detector ─────────────────────────────────────────────────────
@@ -579,7 +689,8 @@ def check_grasp_readiness(
 
     Args:
         bgr: BGR image from the external (SimpleIPCamera) camera.
-        target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS).
+        target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS,
+            and _YOLOE_CLASSES for non-COCO classes such as "paper ball").
             No default — every caller must state what it is looking for.
         target_class_free_text: free-text description for Gemini Flash fallback
             (e.g. "light switch"). Used only when YOLO finds nothing.
@@ -639,7 +750,7 @@ def annotate_frame_with_object(
 
     Detection strategy:
       1. YOLO — if *target_class_yolo* is non-empty, run YOLO filtered to that
-         canonical class (see _CLASS_SYNONYMS).
+         canonical class (see _CLASS_SYNONYMS; YOLOE for _YOLOE_CLASSES).
       2. Gemini Flash VLM — if YOLO finds nothing and *target_class_free_text*
          is non-empty, query Gemini Flash with that free-text description.
          Use this for objects outside COCO-80, e.g. "light switch".
