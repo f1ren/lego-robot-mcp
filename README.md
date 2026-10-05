@@ -49,9 +49,9 @@ If your motors are wired differently, set `PORT_LEFT_WHEEL`, `PORT_RIGHT_WHEEL`,
    Settings → Wi-Fi → ⓘ → Configure IP → Manual.
    You can also leave the phone's IP as it is and set `SIMPLEIPCAMERA_URL` in `.mcp.json` to its address instead.
 3. In the app, set:
-   (a) FPS to **30**
-   (b) Resolution to **720p**
-   (c) Tap **Start Server**
+    1. FPS to **30**
+    1. Resolution to **720p**
+    1. Tap **Start Server**
    The server reads `http://192.168.8.190:8080/stream.mjpeg`.
 5. Keep the app in the foreground, because iOS stops the camera when the app goes to the background or the phone locks:
    - Settings → Display & Brightness → Auto-Lock → **Never**
