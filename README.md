@@ -48,13 +48,16 @@ If your motors are wired differently, set `PORT_LEFT_WHEEL`, `PORT_RIGHT_WHEEL`,
 2. Give the phone the fixed IP `192.168.8.190`. Use a DHCP reservation on your router, or set it on the phone:
    Settings → Wi-Fi → ⓘ → Configure IP → Manual.
    You can also leave the phone's IP as it is and set `SIMPLEIPCAMERA_URL` in `.mcp.json` to its address instead.
-3. In the app, set the resolution to **720p** and tap **Start Server**.
+3. In the app, set:
+   (a) FPS to **30**
+   (b) Resolution to **720p**
+   (c) Tap **Start Server**
    The server reads `http://192.168.8.190:8080/stream.mjpeg`.
-4. Keep the app in the foreground, because iOS stops the camera when the app goes to the background or the phone locks:
+5. Keep the app in the foreground, because iOS stops the camera when the app goes to the background or the phone locks:
    - Settings → Display & Brightness → Auto-Lock → **Never**
    - Low Power Mode off
    - Phone on a charger
-5. The app serves one viewer at a time. If you check the stream in a browser, close the tab afterwards.
+6. The app serves one viewer at a time. If you check the stream in a browser, close the tab afterwards.
 
 The server rotates the frames 90° clockwise (`SIMPLEIPCAMERA_ROTATION`). Change that value if the image comes out sideways.
 
