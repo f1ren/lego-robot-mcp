@@ -22,6 +22,7 @@ CUP_IMG       = FIXTURES / "grasp_readiness" / "droidcam_cup.jpg"
 CUP_TOO_FAR_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_too_far.jpg"
 CUP_TOUCHING_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_touching.jpg"
 CUP_PARTIAL_OCCLUSION_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_partial_occlusion.jpg"
+RIBBON_SPLIT_PLATE_IMG = FIXTURES / "heading" / "simpleipcamera_ribbon_split_plate.jpg"
 ANNOTATED_DIR = FIXTURES / "grasp_readiness" / "annotated"
 
 
@@ -453,6 +454,60 @@ class TestGraspReadinessCupPartialOcclusionRegression(unittest.TestCase):
         d = self._result.to_dict()
         for key in ("ready", "reason", "action", "object_detected", "checks", "metrics"):
             self.assertIn(key, d, f"Missing key '{key}' in to_dict()")
+
+
+class TestGraspReadinessRibbonSplitPlateRegression(unittest.TestCase):
+    """
+    Regression for an inflated front-gap (output/logs/mcp_server.log,
+    2026-10-05 13:55:16,218): the ball sat in the open jaws, 66px from the
+    body's front edge, but the body hull missed the robot's second yellow
+    plate (split by the Pi's ribbon cable — see test_heading_annotate.py::
+    TestBodyHullJoinsRibbonSplitPlate), so mm_per_px read 1.66 instead of
+    ~1.03 and the gate reported front-gap=110mm.
+
+    _vlm_detect is stubbed with that exact logged detection (CV-refined
+    bbox/centroid plus the VLM's rough box) so this test is offline.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        from mcp_robot.grasp_readiness import DetectedObject
+        grasp_mod._load_model()
+
+        bgr = _load(RIBBON_SPLIT_PLATE_IMG)
+        logged_detection = DetectedObject(
+            class_name="small white crumpled paper ball sitting inside the robot's open gripper jaws",
+            confidence=0.95,
+            x1=549, y1=740, x2=622, y2=790,
+            note=(
+                "A small white crumpled paper ball is visible, nestled within "
+                "the open gripper jaws of the robot on the right side of the image."
+            ),
+            contact_px=(587, 766),
+            outer_bbox=(583, 677, 630, 764),
+        )
+        with mock.patch.object(grasp_mod, "_vlm_detect", return_value=logged_detection):
+            cls._result, cls._heading, cls._obj = grasp_mod._compute_readiness(
+                bgr, target_class_yolo="ball", target_class_free_text=logged_detection.class_name,
+            )
+        print(f"\n[ribbon-split-plate regression] {cls._result.to_text()}")
+        _save_annotated(bgr, cls._result, cls._heading, cls._obj,
+                         ANNOTATED_DIR / "simpleipcamera_ribbon_split_plate_grasp_readiness.jpg")
+
+    def test_scale_comes_from_both_plates(self):
+        self.assertIsNotNone(self._result.mm_per_px)
+        self.assertLess(
+            self._result.mm_per_px, 1.2,
+            f"mm_per_px={self._result.mm_per_px:.2f} — one-plate hull read 1.66",
+        )
+
+    def test_front_gap_not_inflated(self):
+        gap_mm = self._result.dist_to_front_px * self._result.mm_per_px
+        self.assertLess(gap_mm, 80, f"front-gap={gap_mm:.0f}mm — the one-plate scale reported 110mm")
+
+    def test_to_dict_reports_scale(self):
+        self.assertIsNotNone(self._result.to_dict()["metrics"]["mm_per_px"])
 
 
 if __name__ == "__main__":

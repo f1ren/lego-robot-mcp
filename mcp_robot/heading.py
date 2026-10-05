@@ -31,7 +31,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -84,6 +84,26 @@ _MAX_SEED_RETRIES = 8
 # merges when it is genuinely touching something its own size.
 _BODY_CLUSTER_RADIUS_FACTOR = 1.6
 
+# A thin occluder lying across a plate can split it into shards that are each
+# too small, under the smaller-fragment rule above, to bridge the gap to the
+# rest of the chassis. On 2026-10-05 the Pi's ribbon cable split the robot's
+# second yellow plate this way: the hull silently became one plate (~4.9k px²
+# instead of ~12.6k), inflating navigation.mm_per_px ~1.6x, so the grasp gate
+# read a 66px front-gap as 110mm instead of ~68mm. Plate-coloured fragments
+# whose nearest edges are within this factor × the smaller one's bounding-box
+# diagonal count as one piece, sized by their combined bounding box. The
+# observed cable gaps were 0.27-0.54 × the smaller shard's diagonal.
+_PLATE_SPLIT_GAP_FACTOR = 0.75
+
+# Median hue (OpenCV, 0-179) at or above which a yellow-mask fragment counts as
+# the chassis's LEGO yellow for the split-plate rule above. Chassis plates
+# measure 19-25 across every fixture and the 2026-10-05 snapshots; the sunlit
+# wood floor that leaks through YELLOW_HSV_LO/HI measures 15-17
+# (droidcam_floor_false_positive.jpg). Without this gate, split-piece sizing
+# let floor fragments chain onto the chassis until its hull was rejected as
+# implausibly large.
+_PLATE_MIN_HUE = 18
+
 # Technic-plate holes: non-yellow regions fully enclosed by the (unopened)
 # yellow mask, in this size range as a fraction of frame area (~2-200 px at
 # 720x1280). A chassis cluster has tens of them; a yellow cup has ~0-4
@@ -117,6 +137,8 @@ class Heading:
     body_area: int                    # pixel count of yellow mask used
     gripper_area: int                 # pixel count of black mask used
     body_radius_px: float = 40.0     # half the longer side of the yellow body bounding box
+    # Convex hull body_center/body_area were measured from (for debug overlays).
+    body_hull: np.ndarray | None = field(default=None, repr=False, compare=False)
 
 
 def _largest_contour(mask: np.ndarray) -> np.ndarray | None:
@@ -145,7 +167,38 @@ def _min_contour_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sqrt(np.sum((pa - pb) ** 2, axis=2).min()))
 
 
-def _cluster_from_seed(seed: np.ndarray, contours: list[np.ndarray]) -> np.ndarray:
+def _median_hue(hsv: np.ndarray, raw_yellow_mask: np.ndarray, contour: np.ndarray) -> float:
+    """Median hue of the yellow-mask pixels inside `contour` (0 if none)."""
+    x, y, w, h = cv2.boundingRect(contour)
+    filled = np.zeros((h, w), np.uint8)
+    cv2.drawContours(filled, [contour], -1, 255, cv2.FILLED, offset=(-x, -y))
+    inside = (filled > 0) & (raw_yellow_mask[y:y + h, x:x + w] > 0)
+    if not inside.any():
+        return 0.0
+    return float(np.median(hsv[y:y + h, x:x + w, 0][inside]))
+
+
+class _DisjointSets:
+    def __init__(self, n: int) -> None:
+        self.parent = list(range(n))
+
+    def find(self, i: int) -> int:
+        while self.parent[i] != i:
+            self.parent[i] = self.parent[self.parent[i]]
+            i = self.parent[i]
+        return i
+
+    def union(self, i: int, j: int) -> None:
+        ri, rj = self.find(i), self.find(j)
+        if ri != rj:
+            self.parent[ri] = rj
+
+
+def _cluster_from_seed(
+    seed: np.ndarray,
+    contours: list[np.ndarray],
+    plate_coloured: list[bool],
+) -> np.ndarray:
     """
     Build a convex hull by transitively clustering `contours` around `seed`.
 
@@ -165,36 +218,60 @@ def _cluster_from_seed(seed: np.ndarray, contours: list[np.ndarray]) -> np.ndarr
     tiny, spatially unrelated speck (noise, a reflection) can hitch a ride
     by having one lucky point fall within the seed's generous radius, even
     though it is far larger than that speck's own scale would justify.
+
+    Between two plate-coloured fragments (`plate_coloured`, parallel to
+    `contours` — see _PLATE_MIN_HUE) that scale is the size of the occluder-
+    split piece each belongs to (see _PLATE_SPLIT_GAP_FACTOR), so a plate cut
+    into shards still bridges the gap a whole plate would. Any pair involving
+    a fragment that isn't plate-coloured keeps the per-fragment size, so
+    floor/wall specks never gain that extra reach.
     """
     candidates: list[np.ndarray] = [seed]
-    for c in contours:
-        if c is seed or cv2.contourArea(c) < 30:
+    plate: list[bool] = [False]
+    for c, is_plate in zip(contours, plate_coloured):
+        if c is seed:
+            plate[0] = is_plate
+            continue
+        if cv2.contourArea(c) < 30:
             continue
         candidates.append(c)
-    diagonals = [float(np.hypot(*cv2.boundingRect(c)[2:])) for c in candidates]
+        plate.append(is_plate)
+    boxes = [cv2.boundingRect(c) for c in candidates]
+    diagonals = [float(np.hypot(w, h)) for _, _, w, h in boxes]
 
     n = len(candidates)
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i: int, j: int) -> None:
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
-
+    gaps = np.zeros((n, n), np.float32)
     for i in range(n):
         for j in range(i + 1, n):
-            pair_radius = _BODY_CLUSTER_RADIUS_FACTOR * min(diagonals[i], diagonals[j])
-            if _min_contour_distance(candidates[i], candidates[j]) <= pair_radius:
-                union(i, j)
+            gaps[i, j] = gaps[j, i] = _min_contour_distance(candidates[i], candidates[j])
 
-    seed_root = find(0)  # seed is always candidates[0]
-    pts = [candidates[i].reshape(-1, 2) for i in range(n) if find(i) == seed_root]
+    # Group plate-coloured shards split apart by a thin occluder into pieces,
+    # and size every fragment by its piece's combined bounding box.
+    pieces = _DisjointSets(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if (plate[i] and plate[j]
+                    and gaps[i, j] <= _PLATE_SPLIT_GAP_FACTOR * min(diagonals[i], diagonals[j])):
+                pieces.union(i, j)
+    extents: dict[int, list[int]] = {}
+    for i, (x, y, w, h) in enumerate(boxes):
+        e = extents.setdefault(pieces.find(i), [x, y, x + w, y + h])
+        e[:] = [min(e[0], x), min(e[1], y), max(e[2], x + w), max(e[3], y + h)]
+    piece_diagonals = [
+        float(np.hypot(e[2] - e[0], e[3] - e[1]))
+        for e in (extents[pieces.find(i)] for i in range(n))
+    ]
+
+    clusters = _DisjointSets(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            sizes = piece_diagonals if plate[i] and plate[j] else diagonals
+            pair_radius = _BODY_CLUSTER_RADIUS_FACTOR * min(sizes[i], sizes[j])
+            if gaps[i, j] <= pair_radius:
+                clusters.union(i, j)
+
+    seed_root = clusters.find(0)  # seed is always candidates[0]
+    pts = [candidates[i].reshape(-1, 2) for i in range(n) if clusters.find(i) == seed_root]
     return cv2.convexHull(np.vstack(pts))
 
 
@@ -289,6 +366,10 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
         return []
 
     holes = _hole_centroids(raw_yellow_mask, frame_area)
+    plate_coloured = [
+        cv2.contourArea(c) >= 30 and _median_hue(hsv, raw_yellow_mask, c) >= _PLATE_MIN_HUE
+        for c in contours
+    ]
     plausible: list[tuple[int, int, np.ndarray]] = []  # (holes, rank, hull)
     for rank, seed in enumerate(seed_candidates):
         seed_c = _centroid(seed)
@@ -298,7 +379,7 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
         # the same cluster again — skip the O(n^2) re-clustering.
         if any(cv2.pointPolygonTest(p[2], seed_c, False) >= 0 for p in plausible):
             continue
-        body = _cluster_from_seed(seed, contours)
+        body = _cluster_from_seed(seed, contours, plate_coloured)
         area = cv2.contourArea(body)
         if area < min_area:
             log.info(
@@ -548,6 +629,7 @@ def _heading_for_body(
         body_area=int(cv2.contourArea(body)),
         gripper_area=gripper_area,
         body_radius_px=float(max(bw, bh)) / 2.0,
+        body_hull=body,
     )
 
 

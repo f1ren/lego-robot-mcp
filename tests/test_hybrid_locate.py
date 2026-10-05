@@ -23,6 +23,13 @@ OUT_DIR   = FIXTURES / "annotated"
 # VLM/CV self-consistency, not whether the switch was actually found.
 _SWITCH_GROUND_TRUTH_BBOX = (370, 260, 480, 360)
 
+# White crumpled paper ball sitting in the open jaws in
+# simpleipcamera_paper_ball_in_jaws.jpg (raw external frame from the
+# 2026-10-05 15:17:21 control_gripper grasp-readiness gate), measured on a
+# 3× zoom of the fixture.
+_PAPER_BALL_FIXTURE = FIXTURES / "simpleipcamera_paper_ball_in_jaws.jpg"
+_PAPER_BALL_GROUND_TRUTH_BBOX = (502, 723, 573, 787)
+
 
 def _annotate(bgr, rough_bbox, refined_bbox, centroid):
     out = bgr.copy()
@@ -102,6 +109,25 @@ class TestHybridLocate(unittest.TestCase):
             "different region entirely (VLM mislocalization or CV merging with background)",
         )
 
+    def test_white_paper_ball_in_jaws_fixture(self):
+        """Same description control_gripper's grasp-readiness gate used live.
+        With x1..y2 fractions, gemini-2.5-flash's rough bbox sat ~140px above
+        the ball (on bare floor) on 5 of 6 calls — the box_2d prompt is what
+        keeps the centroid on the ball. CV refinement can't help here: the
+        "white" HSV range also matches the light wood floor, so the hybrid
+        falls back to the rough bbox's centre."""
+        centroid, rough_bbox = self._run_one(
+            _PAPER_BALL_FIXTURE, "small crumpled white paper ball between the gripper fingers")
+        if centroid is None:  # refinement gave up — locate_object_hybrid uses the rough bbox centre
+            centroid = ((rough_bbox[0] + rough_bbox[2]) // 2, (rough_bbox[1] + rough_bbox[3]) // 2)
+        gx1, gy1, gx2, gy2 = _PAPER_BALL_GROUND_TRUTH_BBOX
+        cx, cy = centroid
+        self.assertTrue(
+            gx1 <= cx <= gx2 and gy1 <= cy <= gy2,
+            f"Centroid {centroid} should land on the paper ball (ground truth "
+            f"{_PAPER_BALL_GROUND_TRUTH_BBOX})",
+        )
+
 
 class TestCvRefineLocationFallback(unittest.TestCase):
     """Regression test for the zero-overlap last-resort branch in
@@ -146,6 +172,71 @@ class TestCvRefineLocationFallback(unittest.TestCase):
             f"cv_refine_location should give up (None) when no contour overlaps the rough "
             f"bbox anywhere, not confidently return an unrelated blob; got {refined}",
         )
+
+
+class TestCvRefineLocationBackgroundFlood(unittest.TestCase):
+    """Regression for the bloated grasp-readiness box on a white paper ball
+    (output/logs/mcp_server.log, 2026-10-05 15:17:23): Gemini's HSV range for
+    "white" (any hue, S≥0, V≥150) also matches ~90% of the light wood floor,
+    so the colour mask flooded every search window and cv_refine_location
+    returned the whole 1.0× window, (434, 500, 622, 701), as the ball's bbox.
+    It must now detect that the range can't separate the object from its
+    background and return None, so locate_object_hybrid keeps the VLM's
+    rough bbox. Replays logged values — offline, no Gemini call.
+    """
+
+    _WHITE_HSV_LO = (0, 0, 150)
+    _WHITE_HSV_HI = (179, 255, 255)
+    _AREA_FRAC = 0.003
+
+    @classmethod
+    def setUpClass(cls):
+        import numpy as np
+
+        from mcp_robot import vision
+        cls.vision = vision
+        cls.bgr = cv2.imread(str(_PAPER_BALL_FIXTURE))
+        assert cls.bgr is not None, f"Could not load {_PAPER_BALL_FIXTURE}"
+        cls.hsv_lo = np.array(cls._WHITE_HSV_LO, dtype=np.uint8)
+        cls.hsv_hi = np.array(cls._WHITE_HSV_HI, dtype=np.uint8)
+
+    def test_logged_flood_returns_none(self):
+        # Exact rough bbox logged at 15:17:23 (old x1..y2 prompt; it sat on floor above the ball).
+        refined = self.vision.cv_refine_location(
+            self.bgr, (501, 567, 555, 634), self.hsv_lo, self.hsv_hi, self._AREA_FRAC)
+        self.assertIsNone(refined, f"White-on-wood HSV range should not refine; got {refined}")
+
+    def test_hybrid_keeps_rough_bbox_on_the_ball(self):
+        """A box_2d rough bbox on the ball (from a gemini-2.5-flash call on this
+        frame) must come back unchanged, not grown into the floor around it."""
+        from unittest import mock
+
+        rough = (501, 718, 565, 801)
+        vlm = (rough, 0.95, "paper ball in the jaws", self.hsv_lo, self.hsv_hi, self._AREA_FRAC)
+        with mock.patch.object(self.vision, "locate_object_vlm", return_value=vlm):
+            bbox, centroid, *_ = self.vision.locate_object_hybrid(self.bgr, "white paper ball")
+        self.assertEqual(tuple(bbox), rough)
+        gx1, gy1, gx2, gy2 = _PAPER_BALL_GROUND_TRUTH_BBOX
+        self.assertTrue(gx1 <= centroid[0] <= gx2 and gy1 <= centroid[1] <= gy2,
+                        f"centroid {centroid} should be on the ball {_PAPER_BALL_GROUND_TRUTH_BBOX}")
+
+    def test_discriminative_colour_still_refines(self):
+        """Control: a range that does single out its object — the blue cup in
+        droidcam_cup_near_door_corner.jpg, with the cup's logged rough bbox —
+        must still be refined, not rejected as background."""
+        import numpy as np
+
+        bgr = cv2.imread(str(pathlib.Path(__file__).parent / "fixtures" / "navigation"
+                             / "droidcam_cup_near_door_corner.jpg"))
+        self.assertIsNotNone(bgr)
+        rough = (356, 327, 433, 427)
+        refined = self.vision.cv_refine_location(
+            bgr, rough, np.array((95, 80, 50), dtype=np.uint8),
+            np.array((135, 255, 255), dtype=np.uint8), 0.0084)
+        self.assertIsNotNone(refined, "blue cup on a non-blue floor should still refine")
+        (x1, y1, x2, y2), _ = refined
+        self.assertTrue(x1 >= rough[0] - 5 and y1 >= rough[1] - 5 and x2 <= rough[2] + 5 and y2 <= rough[3] + 5,
+                        f"refined bbox {(x1, y1, x2, y2)} should stay on the cup {rough}")
 
 
 if __name__ == "__main__":

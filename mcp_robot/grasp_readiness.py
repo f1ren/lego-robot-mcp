@@ -112,6 +112,7 @@ class GraspReadiness:
     arrow_well_over: bool = False
     perp_dist_px: float = 0.0
     dist_to_front_px: float = 0.0
+    mm_per_px: float | None = None  # body-plate scale dist_to_front_px was converted with
     missing_distance_mm: float | None = None
     note: str = ""
 
@@ -132,6 +133,7 @@ class GraspReadiness:
             "metrics": {
                 "perp_dist_px": round(self.perp_dist_px, 1),
                 "dist_to_front_px": round(self.dist_to_front_px, 1),
+                "mm_per_px": round(self.mm_per_px, 3) if self.mm_per_px is not None else None,
                 "missing_distance_mm": (
                     round(self.missing_distance_mm, 1)
                     if self.missing_distance_mm is not None else None
@@ -156,8 +158,9 @@ class GraspReadiness:
             f" arrow_well_over={self.arrow_well_over}"
         )
         if self.object_detected:
+            scale = f" × {self.mm_per_px:.2f}mm/px" if self.mm_per_px is not None else ""
             lines.append(
-                f"Metrics — dist_to_front={self.dist_to_front_px:.0f}px,"
+                f"Metrics — dist_to_front={self.dist_to_front_px:.0f}px{scale},"
                 f" perp_dist={self.perp_dist_px:.0f}px"
             )
         if self.note:
@@ -306,6 +309,23 @@ def _save_debug_image(
         return None
     try:
         annotated = annotate_bgr(bgr.copy()) if heading is not None else bgr.copy()
+
+        if heading is not None and heading.body_hull is not None:
+            # Outline the yellow plate(s) the px->mm scale comes from, so a
+            # hull that missed a plate (and so inflated every mm) is visible.
+            from mcp_robot import navigation as nav_mod  # lazy: circular import
+            plate_color = (255, 255, 0)  # cyan
+            cv2.polylines(annotated, [heading.body_hull], True, plate_color, 2, cv2.LINE_AA)
+            plate_label = f"plate area {heading.body_area}px^2"
+            mm_scale = nav_mod.mm_per_px(heading.body_area)
+            if mm_scale is not None:
+                plate_label += f" -> {mm_scale:.2f}mm/px"
+            (tw, th), _ = cv2.getTextSize(plate_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            px, py, _, _ = cv2.boundingRect(heading.body_hull)
+            px = max(0, min(px, annotated.shape[1] - tw - 4))
+            ty = py - 6 if py > th + 6 else py + th + 6
+            cv2.rectangle(annotated, (px, ty - th - 2), (px + tw + 2, ty + 2), (0, 0, 0), cv2.FILLED)
+            cv2.putText(annotated, plate_label, (px + 1, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, plate_color, 1, cv2.LINE_AA)
 
         if obj is not None:
             color = (0, 200, 0) if result.ready else (0, 0, 220)
@@ -492,6 +512,7 @@ def _compute_readiness(
         arrow_well_over=arrow_over,
         perp_dist_px=perp_dist,
         dist_to_front_px=dist_to_front,
+        mm_per_px=mm_scale,
         missing_distance_mm=missing_distance_mm,
         note=obj.note,
     )
@@ -572,10 +593,12 @@ def check_grasp_readiness(
         target_class_free_text=target_class_free_text,
     )
     log.info(
-        "Grasp readiness: ready=%s | %s%s",
+        "Grasp readiness: ready=%s | %s%s%s",
         result.ready,
         result.reason,
         f" | action: {result.action}" if result.action else "",
+        f" | front-gap={result.dist_to_front_px:.0f}px × {result.mm_per_px:.2f}mm/px"
+        if result.mm_per_px is not None else "",
     )
     _save_debug_image(bgr, heading, obj, result)
     return result

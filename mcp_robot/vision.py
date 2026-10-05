@@ -751,10 +751,8 @@ def locate_object_vlm(
         f"Find '{description}' in this image.\n\n"
         "Return ONLY a JSON object with these fields:\n"
         "  \"found\": true if the object is visible, false otherwise\n"
-        "  \"x1\": left edge of bounding box as a fraction of image width  (0.0–1.0)\n"
-        "  \"y1\": top edge of bounding box as a fraction of image height (0.0–1.0)\n"
-        "  \"x2\": right edge of bounding box as a fraction of image width  (0.0–1.0)\n"
-        "  \"y2\": bottom edge of bounding box as a fraction of image height (0.0–1.0)\n"
+        "  \"box_2d\": the object's bounding box as [ymin, xmin, ymax, xmax], "
+        "integers normalized to 0–1000\n"
         "  \"hsv_hue_lo\": lower hue bound in OpenCV range 0–179 (OpenCV halves standard 0–360°)\n"
         "  \"hsv_hue_hi\": upper hue bound in OpenCV range 0–179\n"
         "  \"hsv_sat_min\": minimum saturation 0–255 (0=grey, 255=fully saturated)\n"
@@ -818,21 +816,34 @@ def locate_object_vlm(
         return None
 
     try:
-        # Gemini occasionally emits "x"/"y" instead of the requested "x1"/"y1"
-        # for the top-left corner — fall back to those before giving up.
-        raw_x1 = data.get("x1", data.get("x"))
-        raw_y1 = data.get("y1", data.get("y"))
-        raw_x2 = data["x2"]
-        raw_y2 = data["y2"]
-        # Gemini normally normalizes coords to [0,1], but occasionally emits
-        # one axis already in pixel space (e.g. x1=0.49 alongside y1=194) — a
-        # value > 1 can't be a normalized fraction, so treat it as already
-        # being in pixel space instead of scaling it again.
-        x1 = int(raw_x1) if raw_x1 > 1 else int(raw_x1 * w)
-        y1 = int(raw_y1) if raw_y1 > 1 else int(raw_y1 * h)
-        x2 = int(raw_x2) if raw_x2 > 1 else int(raw_x2 * w)
-        y2 = int(raw_y2) if raw_y2 > 1 else int(raw_y2 * h)
-    except (KeyError, TypeError) as exc:
+        if "box_2d" in data:
+            # Gemini's native detection format: [ymin, xmin, ymax, xmax] on a
+            # 0–1000 grid. The x1..y2-as-0–1-fractions format this replaced
+            # put the box ~140px (≈0.11 × height) above a white paper ball in
+            # a 720×1280 frame on 5 of 6 calls; with box_2d this prompt's
+            # centre errors were 6/29/61px, and a box_2d-only prompt's were
+            # ≤13px on 6 of 6 (gemini-2.5-flash, 2026-10-05 15:16/15:17
+            # grasp-readiness frames).
+            ymin, xmin, ymax, xmax = (float(v) for v in data["box_2d"])
+            x1, y1 = int(xmin / 1000 * w), int(ymin / 1000 * h)
+            x2, y2 = int(xmax / 1000 * w), int(ymax / 1000 * h)
+        else:
+            # Legacy x1..y2 fractions — no longer requested, still accepted.
+            # Gemini occasionally emits "x"/"y" instead of "x1"/"y1" for the
+            # top-left corner — fall back to those before giving up.
+            raw_x1 = data.get("x1", data.get("x"))
+            raw_y1 = data.get("y1", data.get("y"))
+            raw_x2 = data["x2"]
+            raw_y2 = data["y2"]
+            # Gemini normally normalizes coords to [0,1], but occasionally emits
+            # one axis already in pixel space (e.g. x1=0.49 alongside y1=194) — a
+            # value > 1 can't be a normalized fraction, so treat it as already
+            # being in pixel space instead of scaling it again.
+            x1 = int(raw_x1) if raw_x1 > 1 else int(raw_x1 * w)
+            y1 = int(raw_y1) if raw_y1 > 1 else int(raw_y1 * h)
+            x2 = int(raw_x2) if raw_x2 > 1 else int(raw_x2 * w)
+            y2 = int(raw_y2) if raw_y2 > 1 else int(raw_y2 * h)
+    except (KeyError, TypeError, ValueError) as exc:
         log.error("locate_object_vlm: missing bbox fields: %s — data: %s", exc, data)
         raise VQAResponseParseError(f"missing bbox fields ({exc})", text) from exc
 
@@ -884,6 +895,29 @@ _CV_SEARCH_EXPANSION = 3.0
 _CV_SEARCH_RADII = (0.0, 0.25, 0.5, 1.0, 2.0, _CV_SEARCH_EXPANSION)
 _CV_SEARCH_RADII_TRUSTED = 4
 
+# Max fraction of the ring around the rough bbox (out to the widest trusted
+# radius) that the VLM's HSV range may match. Past this, the range matches the
+# background as well as the object, so no contour can isolate the object: the
+# MORPH_CLOSE below knits the matched background pixels into one blob that
+# grows with every radius, and the "largest across trusted radii" rule returns
+# the whole 1.0× window as the object's bbox. Calibrated on all 20 white-paper-
+# ball locates in the 2026-10-05 log: Gemini's "white" (any hue, S≥0, V≥150–
+# 180) matched 42–97% of the light wood floor around the ball and every one of
+# those flooded the window; the only clean refinement (V≥200) matched 12%.
+_CV_BACKGROUND_MATCH_MAX = 0.25
+
+
+def _hsv_mask(hsv: np.ndarray, hsv_lo: np.ndarray, hsv_hi: np.ndarray) -> np.ndarray:
+    """cv2.inRange, handling hue wrap-around (e.g. red spans 170–179 and 0–10)."""
+    import cv2 as _cv2
+
+    if hsv_lo[0] <= hsv_hi[0]:
+        return _cv2.inRange(hsv, hsv_lo, hsv_hi)
+    lo_a = hsv_lo.copy(); hi_a = np.array([179, hsv_hi[1], hsv_hi[2]], dtype=np.uint8)
+    lo_b = np.array([0,   hsv_lo[1], hsv_lo[2]], dtype=np.uint8); hi_b = hsv_hi.copy()
+    return _cv2.bitwise_or(_cv2.inRange(hsv, lo_a, hi_a),
+                           _cv2.inRange(hsv, lo_b, hi_b))
+
 
 def _contour_overlaps_bbox(
     contour: np.ndarray,
@@ -927,7 +961,9 @@ def cv_refine_location(
     blob at the widest radius if nothing lands in range anywhere.
 
     Returns (refined_bbox, centroid) in full-image pixel coords, or None if no
-    matching blob is found at any radius.
+    matching blob is found at any radius — or, before searching at all, if
+    the HSV range matches more than _CV_BACKGROUND_MATCH_MAX of the
+    background ring around the rough bbox (e.g. "white" on a light floor).
     """
     import cv2 as _cv2
 
@@ -938,6 +974,25 @@ def cv_refine_location(
     total_px = img_h * img_w
     exp_px   = expected_area_frac * total_px
     kernel   = np.ones((7, 7), np.uint8)
+
+    # The colour range must single out the object before any contour can: if
+    # it also matches most of the ring around the rough bbox, refining would
+    # only grow a background blob — return None so the caller keeps the
+    # VLM's rough bbox instead.
+    pad = int(bbox_size * _CV_SEARCH_RADII[_CV_SEARCH_RADII_TRUSTED - 1])
+    wx1, wy1 = max(0, rx1 - pad), max(0, ry1 - pad)
+    wx2, wy2 = min(img_w, rx2 + pad), min(img_h, ry2 + pad)
+    window_mask = _hsv_mask(_cv2.cvtColor(bgr[wy1:wy2, wx1:wx2], _cv2.COLOR_BGR2HSV), hsv_lo, hsv_hi)
+    ring = np.ones(window_mask.shape, dtype=bool)
+    ring[ry1 - wy1:ry2 - wy1, rx1 - wx1:rx2 - wx1] = False
+    if ring.any():
+        bg_match = np.count_nonzero(window_mask[ring]) / np.count_nonzero(ring)
+        if bg_match > _CV_BACKGROUND_MATCH_MAX:
+            log.warning("cv_refine_location: HSV range [%s-%s] matches %.0f%% of the background "
+                        "around the rough bbox (max %.0f%%) — colour can't isolate the object; "
+                        "giving up (caller falls back to VLM rough bbox)",
+                        hsv_lo.tolist(), hsv_hi.tolist(), bg_match * 100, _CV_BACKGROUND_MATCH_MAX * 100)
+            return None
 
     best = None
     best_origin = (0, 0)
@@ -955,16 +1010,7 @@ def cv_refine_location(
         sy2 = min(img_h, ry2 + pad)
 
         roi = bgr[sy1:sy2, sx1:sx2]
-        hsv_roi = _cv2.cvtColor(roi, _cv2.COLOR_BGR2HSV)
-
-        # Handle hue wrap-around (e.g. red spans 170–179 and 0–10)
-        if hsv_lo[0] <= hsv_hi[0]:
-            mask = _cv2.inRange(hsv_roi, hsv_lo, hsv_hi)
-        else:
-            lo_a = hsv_lo.copy(); hi_a = np.array([179, hsv_hi[1], hsv_hi[2]], dtype=np.uint8)
-            lo_b = np.array([0,   hsv_lo[1], hsv_lo[2]], dtype=np.uint8); hi_b = hsv_hi.copy()
-            mask = _cv2.bitwise_or(_cv2.inRange(hsv_roi, lo_a, hi_a),
-                                   _cv2.inRange(hsv_roi, lo_b, hi_b))
+        mask = _hsv_mask(_cv2.cvtColor(roi, _cv2.COLOR_BGR2HSV), hsv_lo, hsv_hi)
 
         mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, kernel)
         mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN,  kernel)

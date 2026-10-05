@@ -311,5 +311,61 @@ class TestYellowCupNotMistakenForBody(unittest.TestCase):
         self.assertEqual(labels[round(angle / 45) % 8], "N", f"forward={dx:.3f},{dy:.3f}")
 
 
+class TestBodyHullJoinsRibbonSplitPlate(unittest.TestCase):
+    """Regression for body_candidates' split-plate rule (see
+    mcp_robot/heading.py::_PLATE_SPLIT_GAP_FACTOR / _PLATE_MIN_HUE).
+
+    On 2026-10-05 the Pi's white ribbon cable lay across the robot's second
+    yellow plate and cut it into two shards (326px and 259px, 12px apart).
+    Each was too small on its own to bridge the ~77px gap to the first plate,
+    so the hull covered one plate only — 4,854px² instead of ~12,600px² —
+    and navigation.mm_per_px read 1.66 instead of ~1.03. The grasp gate then
+    reported a 66px front-gap as 110mm (output/logs/mcp_server.log,
+    2026-10-05 13:55:16,218).
+    """
+
+    FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "heading" / "simpleipcamera_ribbon_split_plate.jpg"
+
+    # Manually verified points in the raw 720x1280 frame, one on each plate.
+    _FIRST_PLATE_PT = (431, 741)
+    _SECOND_PLATE_PT = (442, 855)
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import body_hull, detect_heading
+        from mcp_robot.navigation import mm_per_px
+        cls._body_hull = staticmethod(body_hull)
+        cls._detect = staticmethod(detect_heading)
+        cls._mm_per_px = staticmethod(mm_per_px)
+        cls._bgr = cv2.imread(str(cls.FIXTURE))
+
+    def test_hull_spans_both_plates(self):
+        self.assertIsNotNone(self._bgr, f"Could not load {self.FIXTURE}")
+        body = self._body_hull(self._bgr)
+        self.assertIsNotNone(body, "body_hull should detect the robot body")
+        for name, pt in (("first", self._FIRST_PLATE_PT), ("second", self._SECOND_PLATE_PT)):
+            self.assertGreaterEqual(
+                cv2.pointPolygonTest(body, pt, False), 0,
+                f"hull {cv2.boundingRect(body)} misses the {name} plate at {pt}",
+            )
+
+    def test_mm_per_px_matches_two_plate_frames(self):
+        heading = self._detect(self._bgr)
+        self.assertIsNotNone(heading, f"No heading detected in {self.FIXTURE}")
+        scale = self._mm_per_px(heading.body_area)
+        # Same-day frames whose hull already covered both plates read
+        # 0.99-1.06 mm/px; the one-plate hull read 1.66.
+        self.assertGreater(scale, 0.9)
+        self.assertLess(scale, 1.2, f"mm_per_px={scale:.2f} — hull lost a plate again?")
+
+    def test_heading_east(self):
+        heading = self._detect(self._bgr)
+        self.assertIsNotNone(heading, f"No heading detected in {self.FIXTURE}")
+        dx, dy = heading.forward
+        angle = math.degrees(math.atan2(-dy, dx))
+        labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+        self.assertEqual(labels[round(angle / 45) % 8], "E", f"forward={dx:.3f},{dy:.3f}")
+
+
 if __name__ == "__main__":
     unittest.main()

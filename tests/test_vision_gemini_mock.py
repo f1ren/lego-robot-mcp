@@ -160,6 +160,50 @@ def test_locate_object_vlm_handles_mixed_normalized_and_pixel_coords(fake_gemini
     assert bbox == (20, 20, 100, 60)  # x scaled by w=200, y used as-is (already pixels)
 
 
+def test_locate_object_vlm_requests_box_2d(fake_gemini_client, monkeypatch):
+    """Regression: the prompt must ask for Gemini's native box_2d format.
+    With x1..y2 as 0–1 fractions instead, gemini-2.5-flash put the box
+    ~140px above a white paper ball in a 720×1280 frame on 5 of 6 calls
+    (2026-10-05 15:16/15:17 grasp-readiness frames)."""
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    client = fake_gemini_client(['{"found": false}'])
+
+    vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+    prompt = client.calls[0]["contents"][0].parts[1].text
+    assert '"box_2d"' in prompt
+    assert "[ymin, xmin, ymax, xmax]" in prompt
+    assert "0–1000" in prompt
+
+
+def test_locate_object_vlm_parses_box_2d(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    payload = json.dumps({
+        "found": True, "box_2d": [200, 100, 600, 500],  # [ymin, xmin, ymax, xmax] on 0–1000
+        "hsv_hue_lo": 100, "hsv_hue_hi": 130, "hsv_sat_min": 50, "hsv_val_min": 60,
+        "approx_area_frac": 0.08, "confidence": 0.97, "note": "blue cup on floor",
+    })
+    fake_gemini_client([payload])
+
+    result = vision.locate_object_vlm(_tiny_bgr_image(w=200, h=100), "blue cup")
+
+    assert result is not None
+    bbox, *_ = result
+    assert bbox == (20, 20, 100, 60)  # x by w=200, y by h=100, both /1000
+
+
+def test_locate_object_vlm_malformed_box_2d_raises_parse_error(fake_gemini_client, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    payload = json.dumps({
+        "found": True, "box_2d": [200, 100, 600],  # one coordinate short
+        "confidence": 0.97, "note": "blue cup on floor",
+    })
+    fake_gemini_client([payload])
+
+    with pytest.raises(vision.VQAResponseParseError, match="missing bbox fields"):
+        vision.locate_object_vlm(_tiny_bgr_image(), "blue cup")
+
+
 # ── locate_object_vlm fatal response-parsing errors ──────────────────────────
 #
 # These must raise vision.VQAResponseParseError specifically (a VQAFailure
