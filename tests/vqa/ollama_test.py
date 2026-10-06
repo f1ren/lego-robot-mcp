@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Standalone Qwen vision tester.
+Standalone Ollama vision tester.
 
 Usage examples:
 
   # Before/after stills (the fallback path used when streaming is unavailable)
-  python qwen_test.py --mode stills \
+  python ollama_test.py --mode stills \
       --before /tmp/lego-robot-snapshots/before_pi_camera.jpg \
       --after  /tmp/lego-robot-snapshots/after_pi_camera.jpg \
       --action "drive left=40 right=-40 for 1s" \
       --expected "robot turns clockwise"
 
   # Action video (the main path — pass the whole action_video_* folder)
-  python qwen_test.py --mode video \
+  python ollama_test.py --mode video \
       --folder /tmp/lego-robot-snapshots/action_video_20260504_134200 \
       --action "drive left=40 right=-40 for 1s" \
       --expected "robot turns clockwise"
 
   # Clip VQA (used by capture_front/external_video_clip)
-  python qwen_test.py --mode clip \
+  python ollama_test.py --mode clip \
       --folder /tmp/lego-robot-snapshots/action_video_20260504_134200 \
       --camera simpleipcamera
 
   # Pick the latest action_video_* folder automatically
-  python qwen_test.py --mode video --latest
+  python ollama_test.py --mode video --latest
 
 Environment variables (mirrors mcp_robot/config.py defaults):
   OLLAMA_HOST   http://localhost:11434
-  OLLAMA_MODEL  qwen2.5vl
+  OLLAMA_MODEL  gemma4:26b
 
 Note: _with_change_analysis no longer writes action_video_* snapshot folders
 automatically (replaced by the continuous SegmentRecorder in
@@ -44,7 +44,7 @@ import sys
 from pathlib import Path
 
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
 
 # ── prompts (copied verbatim from vision.py) ──────────────────────────────────
 
@@ -233,7 +233,7 @@ def _call_ollama(prompt: str, images: list[bytes]) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Test Qwen vision calls in isolation")
+    ap = argparse.ArgumentParser(description="Test Ollama vision calls in isolation")
     ap.add_argument("--mode", choices=["stills", "video", "clip"], default="video")
     ap.add_argument("--action",   default="unknown action")
     ap.add_argument("--expected", default="something changes")

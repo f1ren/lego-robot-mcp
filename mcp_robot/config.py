@@ -448,7 +448,9 @@ CLICK_BUTTON_VQA = bool(os.getenv("CLICK_BUTTON_VQA", ""))
 
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
+# Same model as NAPC's local-VQA runs: about the quality of the previous
+# default (qwen3-vl:32b-thinking) there, but answers much faster.
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # Enabled by default. RERUN_ENABLED=   (empty) disables rerun logging

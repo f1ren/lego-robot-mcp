@@ -2448,7 +2448,7 @@ def capture_front_video_clip(
             content.append(_clip_image_content(frame_b64))
         vqa = vision.describe_clip("pi_camera", result["frames"], result.get("paths"))
         if vqa:
-            content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
+            content.append(TextContent(type="text", text=f"Clip VQA ({config.OLLAMA_MODEL}):\n{vqa}"))
         return content
     except Exception as exc:
         log.error("[TOOL] capture_front_video_clip error: %s", exc, exc_info=True)
@@ -2483,7 +2483,7 @@ def capture_external_video_clip(
             raw_frames=result.get("raw_frames"),
         )
         if vqa:
-            content.append(TextContent(type="text", text=f"Clip VQA (Qwen):\n{vqa}"))
+            content.append(TextContent(type="text", text=f"Clip VQA ({config.OLLAMA_MODEL}):\n{vqa}"))
         return content
     except Exception as exc:
         log.error("[TOOL] capture_external_video_clip error: %s", exc, exc_info=True)
