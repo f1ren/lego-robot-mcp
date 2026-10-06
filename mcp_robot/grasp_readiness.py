@@ -5,7 +5,10 @@ Uses YOLO to locate the target object (YOLOE for the non-COCO classes in
 _YOLOE_CLASSES) and checks two conditions against the green forward-arrow
 computed by heading.detect_heading():
 
-  1. The object is touching the robot's front body (close to arrow_anchor).
+  1. The object is within the gripper's reach: its center lies at most
+     config.GRASP_REACH_MM past the finger pivots, along the heading, in the
+     floor-plane frame fitted to the robot's own plate
+     (navigation.floor_homography).
   2. The green forward-arrow passes *well over* the object's center of mass
      (perpendicular distance from arrow ray < ARROW_OVER_FRAC * object radius).
 
@@ -43,10 +46,6 @@ _YOLO_IOU        = 0.45
 # Arrow is "well over" object when perpendicular distance < this fraction of
 # the object's half-size (max(w,h)/2).
 _ARROW_OVER_FRAC = 0.55
-
-# Object nearest-bbox-point to arrow_anchor must be < this fraction of image
-# diagonal to count as "touching robot body".
-_BODY_TOUCH_FRAC = 0.08
 
 # Maps a canonical target_class name to the set of COCO class names YOLO may
 # use for that object.  Add rows here as new object types are introduced.
@@ -134,11 +133,12 @@ class GraspReadiness:
     object_class: str = ""
     object_confidence: float = 0.0
     object_center: tuple[int, int] = field(default_factory=lambda: (0, 0))
-    touches_body: bool = False
+    within_reach: bool = False
     arrow_well_over: bool = False
     perp_dist_px: float = 0.0
-    dist_to_front_px: float = 0.0
-    mm_per_px: float | None = None  # body-plate scale dist_to_front_px was converted with
+    # Object center's distance past the finger pivots, along the heading
+    # (negative = short of them); None when it couldn't be measured.
+    center_past_pivot_mm: float | None = None
     missing_distance_mm: float | None = None
     note: str = ""
 
@@ -153,13 +153,15 @@ class GraspReadiness:
             "object_center": list(self.object_center),
             "note": self.note,
             "checks": {
-                "touches_body": self.touches_body,
+                "within_reach": self.within_reach,
                 "arrow_well_over": self.arrow_well_over,
             },
             "metrics": {
                 "perp_dist_px": round(self.perp_dist_px, 1),
-                "dist_to_front_px": round(self.dist_to_front_px, 1),
-                "mm_per_px": round(self.mm_per_px, 3) if self.mm_per_px is not None else None,
+                "center_past_pivot_mm": (
+                    round(self.center_past_pivot_mm, 1)
+                    if self.center_past_pivot_mm is not None else None
+                ),
                 "missing_distance_mm": (
                     round(self.missing_distance_mm, 1)
                     if self.missing_distance_mm is not None else None
@@ -180,15 +182,16 @@ class GraspReadiness:
                 f" at {self.object_center}"
             )
         lines.append(
-            f"Checks — touches_body={self.touches_body},"
+            f"Checks — within_reach={self.within_reach},"
             f" arrow_well_over={self.arrow_well_over}"
         )
         if self.object_detected:
-            scale = f" × {self.mm_per_px:.2f}mm/px" if self.mm_per_px is not None else ""
-            lines.append(
-                f"Metrics — dist_to_front={self.dist_to_front_px:.0f}px{scale},"
-                f" perp_dist={self.perp_dist_px:.0f}px"
+            reach = (
+                f"center {self.center_past_pivot_mm:+.0f}mm past the finger pivots"
+                f" (reach {config.GRASP_REACH_MM:.0f}mm), "
+                if self.center_past_pivot_mm is not None else ""
             )
+            lines.append(f"Metrics — {reach}perp_dist={self.perp_dist_px:.0f}px")
         if self.note:
             lines.append(f"VLM note: {self.note}")
         return "\n".join(lines)
@@ -421,15 +424,36 @@ def _save_debug_image(
         annotated = annotate_bgr(bgr.copy()) if heading is not None else bgr.copy()
 
         if heading is not None and heading.body_hull is not None:
-            # Outline the yellow plate(s) the px->mm scale comes from, so a
-            # hull that missed a plate (and so inflated every mm) is visible.
+            # Outline the yellow plate the floor fit's mm come from, so a hull
+            # that missed part of the plate (and so skews every mm) is visible,
+            # and mark the finger pivots plus the reach limit past them.
             from mcp_robot import navigation as nav_mod  # lazy: circular import
             plate_color = (255, 255, 0)  # cyan
             cv2.polylines(annotated, [heading.body_hull], True, plate_color, 2, cv2.LINE_AA)
-            plate_label = f"plate area {heading.body_area}px^2"
-            mm_scale = nav_mod.mm_per_px(heading.body_area)
-            if mm_scale is not None:
-                plate_label += f" -> {mm_scale:.2f}mm/px"
+            H = nav_mod.floor_homography(bgr, heading)
+            if H is not None:
+                bx, by = heading.body_center
+                fx, fy = heading.forward
+                origin = nav_mod.project_to_floor_mm(H, bx, by)
+                along = math.dist(origin, nav_mod.project_to_floor_mm(H, bx + fx, by + fy))
+                across = math.dist(origin, nav_mod.project_to_floor_mm(H, bx - fy, by + fx))
+                plate_label = f"plate fit {along:.2f}mm/px along, {across:.2f}mm/px across"
+
+                Hinv = np.linalg.inv(H)
+
+                def to_px(x_mm: float, y_mm: float) -> tuple[int, int]:
+                    pt = cv2.perspectiveTransform(np.array([[[x_mm, y_mm]]], dtype=np.float32), Hinv)
+                    return int(round(float(pt[0, 0, 0]))), int(round(float(pt[0, 0, 1])))
+
+                reach_color = (0, 255, 255)  # yellow
+                pivot_x = nav_mod.PLATE_HALF_ALONG_MM + config.GRIPPER_PIVOT_OFFSET_MM
+                reach_x = pivot_x + config.GRASP_REACH_MM
+                cv2.line(annotated, to_px(nav_mod.PLATE_HALF_ALONG_MM, 0), to_px(pivot_x, 0),
+                         reach_color, 1, cv2.LINE_AA)
+                cv2.circle(annotated, to_px(pivot_x, 0), 4, reach_color, cv2.FILLED, cv2.LINE_AA)
+                cv2.line(annotated, to_px(reach_x, -40), to_px(reach_x, 40), reach_color, 2, cv2.LINE_AA)
+            else:
+                plate_label = "no plate fit"
             (tw, th), _ = cv2.getTextSize(plate_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             px, py, _, _ = cv2.boundingRect(heading.body_hull)
             px = max(0, min(px, annotated.shape[1] - tw - 4))
@@ -449,6 +473,13 @@ def _save_debug_image(
         verdict = "READY" if result.ready else "NOT READY"
         cv2.putText(annotated, verdict, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                     (0, 200, 0) if result.ready else (0, 0, 220), 2, cv2.LINE_AA)
+        if result.center_past_pivot_mm is not None:
+            cv2.circle(annotated, result.object_center, 4, (0, 255, 255), cv2.FILLED, cv2.LINE_AA)
+            cv2.putText(annotated,
+                        f"center {result.center_past_pivot_mm:+.0f}mm past pivots"
+                        f" (reach {config.GRASP_REACH_MM:.0f}mm)",
+                        (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 200, 0) if result.within_reach else (0, 0, 220), 2, cv2.LINE_AA)
 
         os.makedirs(config.SNAPSHOT_DIR, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -468,9 +499,6 @@ def _compute_readiness(
     target_class_free_text: str = "",
 ) -> tuple[GraspReadiness, Heading | None, DetectedObject | None]:
     """Core logic — returns (result, heading, selected_object) for debug annotation."""
-    h, w = bgr.shape[:2]
-    diag = math.hypot(w, h)
-
     # ── 1. Detect heading ────────────────────────────────────────────────
     heading = detect_heading(bgr)
     if heading is None:
@@ -563,8 +591,8 @@ def _compute_readiness(
     # the robot's own arm/gripper occluding part of the object from the
     # external camera, as happens whenever the target sits right at the front
     # body — can anchor obj.x1..y2 well inside the object's true silhouette,
-    # undershooting both its radius (arrow_well_over) and its near-robot edge
-    # (touches_body). Same union inpainting.py already uses for its removal
+    # undershooting its radius (arrow_well_over) and shifting its center
+    # (within_reach). Same union inpainting.py already uses for its removal
     # mask, for the same reason (mcp_robot/inpainting.py:221-236). obj.center/
     # contact_px/nav_point are left untouched — still the more accurate point
     # for navigation aim, and YOLO detections never set outer_bbox anyway.
@@ -578,7 +606,6 @@ def _compute_readiness(
     ox, oy = (gx1 + gx2) // 2, (gy1 + gy2) // 2
     bx, by = heading.body_center
     fw     = heading.forward
-    ax, ay = heading.arrow_anchor
 
     # ── 4. Condition 2: arrow well over object ───────────────────────────
     dx, dy = ox - bx, oy - by
@@ -588,52 +615,63 @@ def _compute_readiness(
     perp_dist  = math.hypot(perp_x, perp_y)
     arrow_over = t > 0 and perp_dist < g_radius * _ARROW_OVER_FRAC
 
-    # ── 5. Condition 1: object touching robot body ───────────────────────
-    near_x = float(max(gx1, min(ax, gx2)))
-    near_y = float(max(gy1, min(ay, gy2)))
-    dist_to_front = math.hypot(ax - near_x, ay - near_y)
-
-    # Real-world gap in mm, via the same body-plate px->mm calibration
-    # drive_to()/click_button() use (navigation.mm_per_px) — see
-    # config.GRASP_TOUCH_THRESHOLD_MM for why this replaced a fixed
-    # image-diagonal pixel fraction (it wasn't perspective-invariant and
-    # under-detected real gaps for objects higher in frame). Imported
-    # lazily: navigation imports DetectedObject from this module at top
-    # level, so a module-level import here would be circular.
+    # ── 5. Condition 1: object within the gripper's reach ────────────────
+    # How far the object's center sits past the finger pivots at the end of
+    # the arm, along the heading. Measured in the floor-plane frame fitted to
+    # the robot's own plate (navigation.floor_homography), whose
+    # per-direction scale corrects for the external camera's tilt; the pivots
+    # sit config.GRIPPER_PIVOT_OFFSET_MM ahead of the plate's front edge. This
+    # replaced the gap from the plate's front corner, which the arm's own
+    # length kept above its 60mm threshold even with the ball in the jaws
+    # (2026-10-06). Imported lazily: navigation imports DetectedObject from
+    # this module at top level, so a module-level import here would be
+    # circular.
     from mcp_robot import navigation as nav_mod
-    mm_scale = nav_mod.mm_per_px(heading.body_area)
-    dist_to_front_mm = dist_to_front * mm_scale if mm_scale is not None else None
-    if dist_to_front_mm is not None:
-        touches_body = dist_to_front_mm < config.GRASP_TOUCH_THRESHOLD_MM
-        missing_distance_mm = max(0.0, dist_to_front_mm - config.GRASP_TOUCH_THRESHOLD_MM)
+    pivot_x_mm = nav_mod.PLATE_HALF_ALONG_MM + config.GRIPPER_PIVOT_OFFSET_MM
+    H = nav_mod.floor_homography(bgr, heading)
+    if H is not None:
+        center_x_mm, _ = nav_mod.project_to_floor_mm(H, ox, oy)
     else:
-        # Body plate not measurable (shouldn't happen once heading is
-        # detected — body_area backs body_center) — fall back to the old
-        # pixel-diagonal heuristic rather than failing closed.
-        touches_body = dist_to_front < diag * _BODY_TOUCH_FRAC
+        # No plate fit (plate too square to orient, or `forward` disagrees
+        # with it) — fall back to the single area-based scale along `forward`.
+        log.info("_compute_readiness: no plate floor fit — using the area-based mm/px scale")
+        mm_scale = nav_mod.mm_per_px(heading.body_area)
+        center_x_mm = t * mm_scale if mm_scale is not None else None
+    if center_x_mm is not None:
+        center_past_pivot_mm = center_x_mm - pivot_x_mm
+        within_reach = center_past_pivot_mm <= config.GRASP_REACH_MM
+        missing_distance_mm = max(0.0, center_past_pivot_mm - config.GRASP_REACH_MM)
+        reach_desc = (
+            f"center {center_past_pivot_mm:+.0f}mm past the finger pivots, "
+            f"reach {config.GRASP_REACH_MM:.0f}mm"
+        )
+    else:
+        center_past_pivot_mm = None
+        within_reach = False
         missing_distance_mm = None
+        reach_desc = "distance unmeasurable — robot body area unknown"
 
     common = dict(
         object_detected=True,
         object_class=obj.class_name,
         object_confidence=obj.confidence,
         object_center=(ox, oy),
-        touches_body=touches_body,
+        within_reach=within_reach,
         arrow_well_over=arrow_over,
         perp_dist_px=perp_dist,
-        dist_to_front_px=dist_to_front,
-        mm_per_px=mm_scale,
+        center_past_pivot_mm=center_past_pivot_mm,
         missing_distance_mm=missing_distance_mm,
         note=obj.note,
     )
+    arrow_thresh = g_radius * _ARROW_OVER_FRAC
 
-    if arrow_over and touches_body:
+    if arrow_over and within_reach:
         return GraspReadiness(
             ready=True,
             reason=(
                 f"Object ({obj.class_name}) is in grasp position: "
-                f"touching robot body and arrow passes over its center "
-                f"(perp={perp_dist:.0f}px < {obj.radius * _ARROW_OVER_FRAC:.0f}px threshold)."
+                f"within the gripper's reach ({reach_desc}) and arrow passes over its center "
+                f"(perp={perp_dist:.0f}px < {arrow_thresh:.0f}px threshold)."
             ),
             **common,
         ), heading, obj
@@ -645,12 +683,11 @@ def _compute_readiness(
     rot_dir = "CW" if cross > 0 else "CCW"
     rot_deg = math.degrees(math.atan2(perp_dist, max(t, 1.0)))
     rot_hint = f"{rot_deg:.0f}{rot_dir}"
-    gap_desc = f"{dist_to_front_mm:.0f}mm" if dist_to_front_mm is not None else f"{dist_to_front:.0f}px"
 
     # Build actionable feedback
-    if not touches_body and not arrow_over:
+    if not within_reach and not arrow_over:
         reason = (
-            f"Object is too far from the robot (front-gap={gap_desc}) "
+            f"Object is out of the gripper's reach ({reach_desc}) "
             f"and arrow misses its center (perp={perp_dist:.0f}px)."
         )
         if missing_distance_mm is not None:
@@ -660,12 +697,12 @@ def _compute_readiness(
             )
         else:
             action = f"Turn {rot_hint} to align the arrow, then drive forward to close the gap."
-    elif not touches_body:
-        reason = f"Object is not close enough to the robot body (front-gap={gap_desc})."
+    elif not within_reach:
+        reason = f"Object is out of the gripper's reach ({reach_desc})."
         if missing_distance_mm is not None:
-            action = f"Drive forward ~{missing_distance_mm:.0f}mm to bring the object against the robot's front."
+            action = f"Drive forward ~{missing_distance_mm:.0f}mm to bring the object into the gripper's reach."
         else:
-            action = "Drive forward to bring the object against the robot's front."
+            action = "Drive forward to bring the object into the gripper's reach."
     else:
         if t <= 0:
             reason = "Object is behind the robot — arrow does not reach it."
@@ -673,7 +710,7 @@ def _compute_readiness(
         else:
             reason = (
                 f"Arrow does not pass well over the object "
-                f"(perp offset={perp_dist:.0f}px, need <{obj.radius * _ARROW_OVER_FRAC:.0f}px)."
+                f"(perp offset={perp_dist:.0f}px, need <{arrow_thresh:.0f}px)."
             )
             action = f"Turn {rot_hint} so the green arrow passes through the object's center."
 
@@ -708,8 +745,8 @@ def check_grasp_readiness(
         result.ready,
         result.reason,
         f" | action: {result.action}" if result.action else "",
-        f" | front-gap={result.dist_to_front_px:.0f}px × {result.mm_per_px:.2f}mm/px"
-        if result.mm_per_px is not None else "",
+        f" | center_past_pivot={result.center_past_pivot_mm:+.0f}mm"
+        if result.center_past_pivot_mm is not None else "",
     )
     _save_debug_image(bgr, heading, obj, result)
     return result

@@ -23,6 +23,8 @@ CUP_TOO_FAR_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_too_far.jpg"
 CUP_TOUCHING_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_touching.jpg"
 CUP_PARTIAL_OCCLUSION_IMG = FIXTURES / "grasp_readiness" / "droidcam_cup_partial_occlusion.jpg"
 RIBBON_SPLIT_PLATE_IMG = FIXTURES / "heading" / "simpleipcamera_ribbon_split_plate.jpg"
+BALL_AT_PIVOT_IMG = FIXTURES / "grasp_readiness" / "simpleipcamera_paper_ball_at_pivot.jpg"
+BALL_FAR_IMG = FIXTURES / "grasp_readiness" / "simpleipcamera_paper_ball_far.jpg"
 ANNOTATED_DIR = FIXTURES / "grasp_readiness" / "annotated"
 
 
@@ -301,9 +303,14 @@ class TestGraspReadinessCupTouchingRegression(unittest.TestCase):
     2026-07-09 16:51:35,477): the blue cup sits directly against the
     robot's front, right next to the gripper — visibly in grasp position —
     yet the mm-calibrated touch-distance check reported ready=False
-    (front-gap=51mm, ~11mm past the GRASP_TOUCH_THRESHOLD_MM cutoff that
-    was 40mm at the time). This case is what raised the threshold to 60mm
-    — see config.GRASP_TOUCH_THRESHOLD_MM.
+    (front-gap=51mm, ~11mm past the plate-gap cutoff that was 40mm at the
+    time; this case raised it to 60mm, before the reach gate replaced it).
+
+    Under the reach gate (config.GRASP_REACH_MM) the cup's center reads
+    ~21mm *behind* the finger pivots, which the current arm makes
+    physically impossible: this July DroidCam view of a tall cup doesn't
+    fit the 2026-10-06 ruler measurements (GRIPPER_PIVOT_OFFSET_MM), so only
+    the verdict is pinned here.
 
     _vlm_detect is stubbed with that exact logged detection (same bbox,
     centroid, confidence, note — from locate_object_hybrid's CV-refined
@@ -363,10 +370,12 @@ class TestGraspReadinessCupPartialOcclusionRegression(unittest.TestCase):
     external camera. Gemini's rough VLM box (356,253,398,322) already only
     covered the visible upper rim, and cv_refine_location's HSV pass on top of
     it shrank the box further to (373,258,415,311) — under-segmenting even the
-    visible part. That undersized box fed touches_body/arrow_well_over
-    directly, inflating the reported front-gap to 83mm and the alignment
-    offset past threshold — both checks failed by more than the true (still
-    imperfect, but much smaller) gap warranted.
+    visible part. That undersized box fed the plate-gap check and
+    arrow_well_over directly, inflating the reported front-gap to 83mm and
+    the alignment offset past threshold — both checks failed by more than
+    the true (still imperfect, but much smaller) gap warranted. The reach
+    gate measures the box's center instead of its near edge, and the union
+    still pulls that center toward the robot.
 
     _vlm_detect is stubbed with that exact logged DetectedObject — same bbox,
     contact_px, outer_bbox all taken from locate_object_hybrid's real output
@@ -414,41 +423,24 @@ class TestGraspReadinessCupPartialOcclusionRegression(unittest.TestCase):
         _save_annotated(cls._bgr, cls._result, cls._heading, cls._obj,
                          ANNOTATED_DIR / "droidcam_cup_partial_occlusion_grasp_readiness.jpg")
 
-    def test_front_gap_shrinks_relative_to_undersized_bbox(self):
-        """Without the union, this exact detection reproduces the logged
-        incident's front-gap (dist_to_front_px=73, ready=False). With the
-        union, the measured gap to the robot's front must shrink — the object
-        didn't move, only the box's known extent did."""
+    def test_union_pulls_center_toward_the_gripper(self):
+        """With the union, the measured center must sit closer to the finger
+        pivots than the undersized box's — the object didn't move, only the
+        box's known extent did."""
         with mock.patch.object(self._grasp_mod, "_vlm_detect", return_value=self._without_union):
             baseline, _, _ = self._grasp_mod._compute_readiness(
                 self._bgr, target_class_yolo="cup", target_class_free_text="blue cup",
             )
-        self.assertEqual(baseline.dist_to_front_px, 73.0,
-                          "baseline (no union) should reproduce the exact logged incident")
         self.assertLess(
-            self._result.dist_to_front_px, baseline.dist_to_front_px,
-            "outer_bbox union should shrink the measured front-gap, not grow it",
+            self._result.center_past_pivot_mm, baseline.center_past_pivot_mm,
+            "outer_bbox union should pull the measured center in, not push it out",
         )
 
-    def test_missing_distance_much_smaller_than_logged_incident(self):
-        """Logged incident originally reported ~23mm missing to close the gap
-        (front-gap 83mm, threshold 60mm). The union must bring that down
-        noticeably, even though it doesn't need to close it entirely."""
-        self.assertIsNotNone(self._result.missing_distance_mm)
-        self.assertLess(
-            self._result.missing_distance_mm, 15.0,
-            f"Expected missing_distance_mm well below the originally-logged "
-            f"~23mm, got {self._result.missing_distance_mm:.1f}mm",
-        )
-
-    def test_still_not_ready_this_frame_needs_more_driving(self):
-        """The union corrects the *magnitude* of the gap — it doesn't fabricate
-        contact that isn't there. This exact frame is genuinely still a few mm
-        short of touching, so ready must stay False here."""
-        self.assertFalse(self._result.ready, f"got: {self._result.reason}")
-
-    def test_action_still_mentions_distance(self):
-        self.assertIn("mm", self._result.action)
+    def test_cup_at_the_gripper_is_within_reach(self):
+        """The cup sits right next to the gripper, so the reach check must
+        pass. (The arrow check is a separate matter.)"""
+        self.assertTrue(self._result.within_reach, self._result.reason)
+        self.assertEqual(self._result.missing_distance_mm, 0.0)
 
     def test_to_dict_schema(self):
         d = self._result.to_dict()
@@ -463,7 +455,10 @@ class TestGraspReadinessRibbonSplitPlateRegression(unittest.TestCase):
     body's front edge, but the body hull missed the robot's second yellow
     plate (split by the Pi's ribbon cable — see test_heading_annotate.py::
     TestBodyHullJoinsRibbonSplitPlate), so mm_per_px read 1.66 instead of
-    ~1.03 and the gate reported front-gap=110mm.
+    ~1.03 and the gate reported front-gap=110mm. With both plates in the
+    hull the old plate-corner gap still read 68mm — over its 60mm threshold
+    with the ball in the jaws; the reach gate measures from the finger
+    pivots instead.
 
     _vlm_detect is stubbed with that exact logged detection (CV-refined
     bbox/centroid plus the VLM's rough box) so this test is offline.
@@ -496,18 +491,78 @@ class TestGraspReadinessRibbonSplitPlateRegression(unittest.TestCase):
                          ANNOTATED_DIR / "simpleipcamera_ribbon_split_plate_grasp_readiness.jpg")
 
     def test_scale_comes_from_both_plates(self):
-        self.assertIsNotNone(self._result.mm_per_px)
-        self.assertLess(
-            self._result.mm_per_px, 1.2,
-            f"mm_per_px={self._result.mm_per_px:.2f} — one-plate hull read 1.66",
-        )
+        from mcp_robot import navigation as nav
+        mm_per_px = nav.mm_per_px(self._heading.body_area)
+        self.assertIsNotNone(mm_per_px)
+        self.assertLess(mm_per_px, 1.2, f"mm_per_px={mm_per_px:.2f} — one-plate hull read 1.66")
 
-    def test_front_gap_not_inflated(self):
-        gap_mm = self._result.dist_to_front_px * self._result.mm_per_px
-        self.assertLess(gap_mm, 80, f"front-gap={gap_mm:.0f}mm — the one-plate scale reported 110mm")
+    def test_ball_in_open_jaws_within_reach(self):
+        from mcp_robot import config
+        self.assertTrue(self._result.within_reach, self._result.reason)
+        self.assertLessEqual(self._result.center_past_pivot_mm, config.GRASP_REACH_MM)
 
-    def test_to_dict_reports_scale(self):
-        self.assertIsNotNone(self._result.to_dict()["metrics"]["mm_per_px"])
+    def test_to_dict_reports_center_past_pivot(self):
+        self.assertIsNotNone(self._result.to_dict()["metrics"]["center_past_pivot_mm"])
+
+
+class TestGraspReadinessPaperBallAtPivot(unittest.TestCase):
+    """
+    Regression for a false "not ready" (output/logs/mcp_server.log,
+    2026-10-06 13:35:51,396): the paper ball sat in the open jaws, yet the
+    gate reported front-gap=83mm (95px x 0.875mm/px) against a 60mm
+    threshold. Two errors: the gap ran from the plate's front corner, ~60mm
+    behind the finger pivots, so a ball in the jaws could never pass; and
+    the single area-based scale read 0.875mm/px where the camera's tilt
+    makes it 0.78 along the heading and 0.92 across.
+
+    By ruler: plate front -> finger pivots 60mm, pivots -> ball center 35mm.
+
+    Real YOLOE detection ("paper ball"), offline once yoloe-26l-seg.pt is
+    downloaded.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        bgr = _load(BALL_AT_PIVOT_IMG)
+        cls._result, heading, obj = grasp_mod._compute_readiness(bgr, target_class_yolo="paper ball")
+        print(f"\n[paper-ball-at-pivot regression] {cls._result.to_text()}")
+        _save_annotated(bgr, cls._result, heading, obj,
+                         ANNOTATED_DIR / "simpleipcamera_paper_ball_at_pivot_grasp_readiness.jpg")
+
+    def test_ready(self):
+        self.assertTrue(self._result.ready, self._result.reason)
+
+    def test_center_matches_ruler(self):
+        self.assertIsNotNone(self._result.center_past_pivot_mm)
+        self.assertAlmostEqual(self._result.center_past_pivot_mm, 35.0, delta=10.0)
+
+
+class TestGraspReadinessPaperBallFar(unittest.TestCase):
+    """
+    The paper ball ahead of the robot before drive_to approached it
+    (output/logs/mcp_server.log, 2026-10-06 13:34:52): out of reach, and the
+    action must say how far to drive (~64mm: center ~114mm past the pivots,
+    reach 50mm).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot import grasp_readiness as grasp_mod
+        bgr = _load(BALL_FAR_IMG)
+        cls._result, heading, obj = grasp_mod._compute_readiness(bgr, target_class_yolo="paper ball")
+        print(f"\n[paper-ball-far] {cls._result.to_text()}")
+        _save_annotated(bgr, cls._result, heading, obj,
+                         ANNOTATED_DIR / "simpleipcamera_paper_ball_far_grasp_readiness.jpg")
+
+    def test_not_ready_out_of_reach(self):
+        self.assertFalse(self._result.ready)
+        self.assertFalse(self._result.within_reach, self._result.reason)
+
+    def test_missing_distance(self):
+        self.assertIsNotNone(self._result.missing_distance_mm)
+        self.assertAlmostEqual(self._result.missing_distance_mm, 64.0, delta=20.0)
+        self.assertIn("mm", self._result.action)
 
 
 if __name__ == "__main__":

@@ -114,10 +114,10 @@ class TestFullPipelineNoCup(unittest.TestCase):
         print(f"\ncheck_grasp_readiness result:")
         print(f"  ready            = {result.ready}")
         print(f"  object_detected  = {result.object_detected}")
-        print(f"  touches_body     = {result.touches_body}")
+        print(f"  within_reach     = {result.within_reach}")
         print(f"  arrow_well_over  = {result.arrow_well_over}")
         print(f"  perp_dist_px     = {result.perp_dist_px:.1f}")
-        print(f"  dist_to_front_px = {result.dist_to_front_px:.1f}")
+        print(f"  center_past_pivot_mm = {result.center_past_pivot_mm}")
         print(f"  reason           = {result.reason}")
         if result.object_class:
             print(f"  object_class     = {result.object_class}  conf={result.object_confidence:.2f}")

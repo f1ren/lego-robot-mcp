@@ -48,11 +48,13 @@ TURN_ENCODER_DEG_PER_BODY_DEG = float(
 
 # ── Robot chassis footprint (for pixel → mm distance calibration) ────────────
 # Visible yellow top surface, measured with a ruler: 152 x 88 mm
-# (= 19 x 11 LEGO studs at 8mm/stud).  Navigation uses the *area* — rather
-# than a single length — to convert pixel distances to real-world mm, because
-# area is rotation-invariant: an axis-aligned bounding-box measurement (e.g.
-# robot_radius_px) changes with the robot's heading, but the visible yellow
-# pixel count does not.
+# (= 19 x 11 LEGO studs at 8mm/stud). The 152mm side runs across the robot
+# (side to side), the 88mm side front to back — re-measured 2026-10-06;
+# navigation.floor_homography depends on that orientation.  Navigation's
+# mm_per_px uses the *area* — rather than a single length — to convert pixel
+# distances to real-world mm, because area is rotation-invariant: an
+# axis-aligned bounding-box measurement (e.g. robot_radius_px) changes with
+# the robot's heading, but the visible yellow pixel count does not.
 ROBOT_BODY_LENGTH_MM = float(os.getenv("ROBOT_BODY_LENGTH_MM", "152.0"))
 ROBOT_BODY_WIDTH_MM  = float(os.getenv("ROBOT_BODY_WIDTH_MM",  "88.0"))
 ROBOT_BODY_AREA_MM2  = ROBOT_BODY_LENGTH_MM * ROBOT_BODY_WIDTH_MM
@@ -178,34 +180,29 @@ DRIVE_TO_PARTIAL_FRACTION        = float(os.getenv("DRIVE_TO_PARTIAL_FRACTION", 
 # "second (final) drive" commanded for the full re-measured 143mm although the
 # robot, per output/snapshots/droidcam_20260711_213904_969.jpg from that same
 # instant, looked already close to touching the target — implying the true
-# touching gap is close to that 143mm measured distance, not 0. Roughly
-# consistent with ROBOT_BODY_LENGTH_MM/2 (76mm, centroid to body-hull front
-# edge) plus the gripper's reach beyond the body hull and the target's own
-# radius. Shortened by 1cm to 130mm on 2026-07-12. Refine this constant with
-# more measurements if drive_to() consistently stops short of or drives into
-# targets.
+# touching gap is close to that 143mm measured distance, not 0. Consistent
+# with the ruler-measured geometry (2026-10-06): 44mm from the plate center to
+# its front edge (half the 88mm front-to-back side), 60mm more to the finger
+# pivots (GRIPPER_PIVOT_OFFSET_MM), and ~35mm more to a paper ball's center in
+# the jaws — ~139mm. Shortened by 1cm to 130mm on 2026-07-12. Refine this
+# constant with more measurements if drive_to() consistently stops short of or
+# drives into targets.
 DRIVE_TO_TOUCH_OFFSET_MM = float(os.getenv("DRIVE_TO_TOUCH_OFFSET_MM", "130.0"))
 
-# ── Grasp readiness (check_grasp_readiness touch gate) ────────────────────────
-# Real-world gap (mm) between the target object's nearest point and the
-# robot's front anchor for check_grasp_readiness() to consider it "touching"
-# the body and safe to close the gripper on. Calibrated in mm — via the same
-# body-plate px->mm scale drive_to()/click_button() use (navigation.mm_per_px)
-# — rather than a fixed fraction of the image diagonal, because that pixel
-# heuristic is not perspective-invariant: an object higher in frame (farther
-# from the external camera) projects a smaller pixel gap for the same
-# real-world distance, so a fixed px threshold under-detects real gaps. A
-# ~112mm real gap (object clearly not touching) measured at only ~112px
-# against a ~117px diagonal-fraction threshold — a false "ready" — is what
-# exposed this. The mm-calibrated check must sit strictly between the known
-# touching and not-touching cases logged so far: a cup resting against the
-# gripper (output/logs/mcp_server.log, 2026-07-09 16:51:35,477) measures
-# ~51mm from arrow_anchor — which sits at the yellow body's front-hull edge,
-# not the gripper jaws themselves, so real contact still reads as a nonzero
-# gap — while not-touching cups measure ~110-112mm. 40mm sat below the real
-# touching case (a false "not ready"); 60mm keeps ~9mm margin above the
-# touching case and ~50mm margin below the not-touching cases.
-GRASP_TOUCH_THRESHOLD_MM = float(os.getenv("GRASP_TOUCH_THRESHOLD_MM", "60.0"))
+# ── Grasp readiness (check_grasp_readiness reach gate) ────────────────────────
+# Distance from the yellow plate's front edge to the end of the arm, where the
+# gripper's fingers pivot — measured with a ruler on 2026-10-06.
+GRIPPER_PIVOT_OFFSET_MM = float(os.getenv("GRIPPER_PIVOT_OFFSET_MM", "60.0"))
+
+# Max distance, along the heading, from the finger pivots to the target's
+# center for check_grasp_readiness() to count it as within the gripper's
+# reach. On 2026-10-06 a paper ball in reach sat 35mm past the pivots by
+# ruler, which the external camera measured as 39-42mm. Across the last 5
+# approaches (2026-10-05/06 snapshots) a ball at the jaws measured 21-39mm
+# and a ball not yet reached 109-194mm. 50mm takes every ball at the jaws
+# with margin; the true limit is how far past the pivots the closing
+# fingertips reach.
+GRASP_REACH_MM = float(os.getenv("GRASP_REACH_MM", "50.0"))
 
 # ── turn_to (target-aware heading correction) ─────────────────────────────────
 # Max heading error (degrees) tolerated before turn_to() issues a turn

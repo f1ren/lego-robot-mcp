@@ -1561,7 +1561,9 @@ def check_grasp_readiness(
 
     Captures a live frame and verifies two conditions required before closing
     the gripper:
-      1. The target object is touching the robot's front body.
+      1. The target object is within the gripper's reach: its center lies at
+         most config.GRASP_REACH_MM (50mm) past the finger pivots at the end
+         of the arm, along the heading.
       2. The green forward-arrow passes well over the object's center of mass.
 
     Args:

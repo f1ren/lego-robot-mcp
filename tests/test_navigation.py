@@ -930,22 +930,27 @@ class TestNavigationBufferDriftReplan(unittest.TestCase):
 
 
 class TestFloorHomography(unittest.TestCase):
-    """_floor_homography: pixel -> floor-plane-mm projection derived each
-    frame from the robot's own 152x88mm yellow top-plate (no external
-    calibration markers).
+    """floor_homography: pixel -> floor-plane-mm projection derived each
+    frame from the bounding rectangle of the robot's own 88x152mm yellow
+    top-plate (no external calibration markers).
 
     Fixtures:
-      - droidcam_robot_near_switch_corner.jpg and static_video/droidcam_000.jpg:
-        the plate's convex hull reduces to a clean quadrilateral spanning all
-        4 quadrants -> a valid homography that maps body_center near (0,0)mm.
-      - droidcam_west_heading.jpg: a misdetected hull corner produces a
-        near-degenerate fit whose image corners extrapolate to nearly 1
-        metre from the robot -> rejected by _HOMOGRAPHY_MAX_FLOOR_MM.
+      - static_video/droidcam_000.jpg and droidcam_west_heading.jpg: valid
+        fits that map body_center near (0,0)mm. West_heading's hull has a
+        misdetected corner that made the old corner-to-corner fit degenerate
+        (its image corners extrapolated to ~1m); the bounding rectangle
+        isn't thrown by it.
+      - droidcam_robot_near_switch_corner.jpg: the gripper points north at
+        the light switch, but the detected `forward` points east, along the
+        plate's 152mm side — no trustworthy front, so no fit.
+      - grasp_readiness/simpleipcamera_paper_ball_at_pivot.jpg: the fit's
+        scale matches the plate's own 8mm Technic hole pitch.
     """
 
     SWITCH_CORNER_IMG = FIXTURES / "navigation" / "droidcam_robot_near_switch_corner.jpg"
     STATIC_VIDEO_IMG  = FIXTURES / "static_video" / "droidcam_000.jpg"
     WEST_HEADING_IMG  = FIXTURES / "navigation" / "droidcam_west_heading.jpg"
+    BALL_AT_PIVOT_IMG = FIXTURES / "grasp_readiness" / "simpleipcamera_paper_ball_at_pivot.jpg"
 
     def _detect(self, path):
         from mcp_robot.heading import detect_heading
@@ -955,33 +960,50 @@ class TestFloorHomography(unittest.TestCase):
         return bgr, h_result
 
     def _assert_valid_homography(self, path):
-        from mcp_robot.navigation import _floor_homography, _project_to_floor_mm
+        from mcp_robot.navigation import floor_homography, project_to_floor_mm
 
         bgr, h_result = self._detect(path)
-        H = _floor_homography(bgr, h_result)
+        H = floor_homography(bgr, h_result)
         self.assertIsNotNone(H, f"Expected a valid floor homography for {path}")
 
         bx, by = h_result.body_center
-        fmx, fmy = _project_to_floor_mm(H, bx, by)
+        fmx, fmy = project_to_floor_mm(H, bx, by)
         dist = math.hypot(fmx, fmy)
         self.assertLess(dist, 200.0,
                          f"body_center should map near (0,0)mm, got ({fmx:+.1f},{fmy:+.1f})")
 
-    def test_valid_homography_switch_corner(self):
-        self._assert_valid_homography(self.SWITCH_CORNER_IMG)
-
     def test_valid_homography_static_video(self):
         self._assert_valid_homography(self.STATIC_VIDEO_IMG)
 
-    def test_rejected_homography_west_heading(self):
-        """A misdetected body-hull corner in this fixture produces a
-        near-degenerate transform — _floor_homography must reject it via
-        the _HOMOGRAPHY_MAX_FLOOR_MM image-corner bound."""
-        from mcp_robot.navigation import _floor_homography
+    def test_valid_homography_west_heading(self):
+        self._assert_valid_homography(self.WEST_HEADING_IMG)
 
-        bgr, h_result = self._detect(self.WEST_HEADING_IMG)
-        H = _floor_homography(bgr, h_result)
-        self.assertIsNone(H, "Expected homography to be rejected for west_heading fixture")
+    def test_rejected_homography_heading_off_plate(self):
+        """`forward` runs along the plate's long (side-to-side) axis here —
+        the heading is ~90° off, so there is no front to orient by."""
+        from mcp_robot.navigation import floor_homography
+
+        bgr, h_result = self._detect(self.SWITCH_CORNER_IMG)
+        self.assertIsNone(floor_homography(bgr, h_result))
+
+    def test_scale_matches_plate_hole_pitch(self):
+        """The plate's 88mm side runs along the heading and the camera's tilt
+        squashes the image unequally — a regression for the fit that put the
+        152mm side along the heading (2026-10-06). On this frame the plate's
+        8mm hole pitch measures 10.23px left-right (along the heading) and
+        8.68px up-down (across it): 0.78 and 0.92 mm/px."""
+        from mcp_robot.navigation import floor_homography, project_to_floor_mm
+
+        bgr, h_result = self._detect(self.BALL_AT_PIVOT_IMG)
+        H = floor_homography(bgr, h_result)
+        self.assertIsNotNone(H)
+        bx, by = h_result.body_center
+        fx, fy = h_result.forward
+        origin = project_to_floor_mm(H, bx, by)
+        along = math.dist(origin, project_to_floor_mm(H, bx + fx, by + fy))
+        across = math.dist(origin, project_to_floor_mm(H, bx - fy, by + fx))
+        self.assertAlmostEqual(along, 8 / 10.23, delta=0.04, msg=f"along-heading {along:.3f}mm/px")
+        self.assertAlmostEqual(across, 8 / 8.68, delta=0.05, msg=f"across-heading {across:.3f}mm/px")
 
 
 if __name__ == "__main__":
