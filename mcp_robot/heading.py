@@ -370,7 +370,11 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
         cv2.contourArea(c) >= 30 and _median_hue(hsv, raw_yellow_mask, c) >= _PLATE_MIN_HUE
         for c in contours
     ]
+    # Per-seed rejections and the cluster ranking log at DEBUG: this runs on
+    # every external-camera frame (each action-clip frame, each heading check),
+    # where both are routine. Only a frame with no body at all logs at INFO.
     plausible: list[tuple[int, int, np.ndarray]] = []  # (holes, rank, hull)
+    too_small = too_large = 0
     for rank, seed in enumerate(seed_candidates):
         seed_c = _centroid(seed)
         if seed_c is None:
@@ -382,13 +386,15 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
         body = _cluster_from_seed(seed, contours, plate_coloured)
         area = cv2.contourArea(body)
         if area < min_area:
-            log.info(
+            too_small += 1
+            log.debug(
                 "body_hull: seed rank %d cluster too small (%.0fpx < %.0fpx min, %.2f%% of frame) — trying next seed",
                 rank, area, min_area, 100.0 * area / frame_area,
             )
             continue
         if area > max_area:
-            log.info(
+            too_large += 1
+            log.debug(
                 "body_hull: seed rank %d cluster implausibly large (%.0fpx > %.0fpx max, %.1f%% of frame) — "
                 "likely a false-positive yellow surface (floor/wall), trying next seed",
                 rank, area, max_area, 100.0 * area / frame_area,
@@ -398,15 +404,16 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
 
     if not plausible:
         log.info(
-            "body_hull: no plausible yellow cluster found after trying %d seed candidate(s) — "
-            "robot may be out of frame, far away, occluded, or the scene has a large "
-            "yellow-ish false positive (floor/wall) with no smaller genuine chassis fragment",
-            len(seed_candidates),
+            "body_hull: no plausible yellow cluster found after trying %d seed candidate(s) "
+            "(%d too small, %d too large) — robot may be out of frame, far away, occluded, "
+            "or the scene has a large yellow-ish false positive (floor/wall) with no smaller "
+            "genuine chassis fragment",
+            len(seed_candidates), too_small, too_large,
         )
         return []
     plausible.sort(key=lambda p: (-p[0], p[1]))
     if len(plausible) > 1:
-        log.info(
+        log.debug(
             "body_hull: %d plausible yellow clusters, ranked by plate holes: %s",
             len(plausible),
             ", ".join(f"{_centroid(p[2])}={p[0]} holes" for p in plausible),
