@@ -89,8 +89,9 @@ ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
 LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
 
 # lift_arm closes the gripper (holding torque) before raising the arm, holds
-# both for this many seconds, then lets the arm coast while switching the
-# gripper to the carry hold below. See mcp_robot.robot._GRASP_HOLD_AND_LIFT.
+# both for this many seconds, then settles the arm just below its top stop
+# (see ARM_TOP_BACK_OFF_DEG) while switching the gripper to the carry hold
+# below. See mcp_robot.robot._GRASP_HOLD_AND_LIFT.
 LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
 
 # Open-loop PWM (0..1, closing direction) the gripper motor is kept driven at
@@ -99,6 +100,19 @@ LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
 # open by the held object. Kept below the 0.7 power limit buildhat sets on
 # every Motor so a stalled motor isn't left at full power through a carry.
 GRIPPER_HOLD_PWM = float(os.getenv("GRIPPER_HOLD_PWM", "0.4"))
+
+# Full arm raises (lift_arm, move_arm by the full travel) end pressed into the
+# top stop, and cutting power there springs the arm back down — it then falls
+# all the way, as it does whenever power is cut while it's moving down. Cut
+# while it's still, it stays where it is, unpowered. So a full raise backs the
+# arm off this far in speed mode, holds it with release=False for
+# ARM_TOP_HOLD_SECONDS so the motor brings it to a stop, and only then lets go.
+# Measured from the top stop (encoder 31): the hold caught the arm at ~20,
+# about 3/4 of the way up, where it stayed. Partial raises don't need this:
+# they end moving up, and gravity stops the arm.
+ARM_TOP_BACK_OFF_DEG   = int(os.getenv("ARM_TOP_BACK_OFF_DEG",     "5"))
+ARM_TOP_BACK_OFF_SPEED = int(os.getenv("ARM_TOP_BACK_OFF_SPEED",   "15"))
+ARM_TOP_HOLD_SECONDS   = float(os.getenv("ARM_TOP_HOLD_SECONDS",   "0.5"))
 
 # Per-wheel speed used for in-place turns during navigate_to.
 # Each wheel runs at this value (opposing directions), so effective combined
