@@ -45,6 +45,41 @@ end = m.get_position()
 print(json.dumps({{"start": start, "end": end, "delta": end - start}}))
 """
 
+# A full raise ends with the arm pressed into its top stop, and cutting power
+# there springs it back down: the arm falls all the way whenever power is cut
+# while it's moving down, but stays put when cut while it's still. So back off
+# in speed mode, hold with release=False until the motor has stopped the arm,
+# and only then let go (a run_for_degrees back-off overshot further, to ~16
+# from 31, in testing). Spliced into scripts that import time and name the
+# arm's Motor `arm`. See config.ARM_TOP_BACK_OFF_DEG.
+_ARM_SETTLE_BELOW_TOP = """
+settle_target = arm.get_position() - {back_off_deg}
+arm.start(-{speed})
+settle_t0 = time.monotonic()
+while arm.get_position() > settle_target and time.monotonic() - settle_t0 < 2.0:
+    pass
+arm.release = False
+arm.run_for_degrees(-1, speed={speed})  # hold here; a 0° move is a zero-length ramp
+time.sleep({hold_seconds})
+arm.coast()
+"""
+
+# move_arm's full raise: up into the top stop, then settle just below it.
+# The arm motor is inverted, so *degrees* is positive here.
+_RAISE_ARM_FULLY = """
+import json
+import time
+from buildhat import Motor
+
+arm = Motor({port!r})
+start = arm.get_position()
+arm.run_for_degrees({degrees}, speed={speed})
+top = arm.get_position()
+{settle}
+end = arm.get_position()
+print(json.dumps({{"start": start, "top": top, "end": end, "delta": end - start}}))
+"""
+
 _DRIVE_WHEELS = """
 import json
 from buildhat import MotorPair
@@ -76,7 +111,8 @@ print(json.dumps({{"left": pair._leftmotor.get_position(), "right": pair._rightm
 # calls where nothing is driving the gripper motor at all. The gripper then
 # switches to open-loop PWM instead of coasting, and lift_arm registers it
 # with RPiClient.hold_motor so this and every later script's exit keeps it
-# driven until release_gripper_hold().
+# driven until release_gripper_hold(). The arm is let go only after settling
+# just below its top stop (see _ARM_SETTLE_BELOW_TOP), so it stays up.
 _GRASP_HOLD_AND_LIFT = """
 import json
 import time
@@ -97,7 +133,8 @@ arm_end = arm.get_position()
 time.sleep({hold_seconds})
 
 gripper.pwm({gripper_hold_pwm})
-arm.coast()
+{arm_settle}
+arm_settled = arm.get_position()
 gripper_end = gripper.get_position()
 
 print(json.dumps({{
@@ -108,6 +145,7 @@ print(json.dumps({{
     "arm_start": arm_start,
     "arm_end": arm_end,
     "arm_delta": arm_end - arm_start,
+    "arm_settled": arm_settled,
 }}))
 """
 
@@ -397,7 +435,9 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """
     Move the arm by *degrees*. Positive = down, negative = up.
     After any downward move, raises 17° to keep the gripper clear of the ground
-    and maximise wheel normal force.
+    and maximise wheel normal force. A full raise (by the arm's whole
+    ARM_DOWN_DEG - ARM_UP_DEG travel or more) then settles just below the
+    top stop so the arm stays up once let go — see _ARM_SETTLE_BELOW_TOP.
 
     Args:
         degrees: How far to move. Positive = down, negative = up.
@@ -405,6 +445,18 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """
     direction = "down" if degrees > 0 else "up"
     log.info("move_arm: moving arm %s %d° at speed %d", direction, abs(degrees), speed)
+    if degrees <= -(config.ARM_DOWN_DEG - config.ARM_UP_DEG):
+        result = get_client().run_python(
+            _RAISE_ARM_FULLY.format(
+                port=config.PORT_ARM,
+                degrees=-degrees,  # motor is physically inverted
+                speed=speed,
+                settle=_arm_settle_below_top(),
+            ),
+            timeout=max(30, abs(degrees) // 10 + 10),
+        )
+        log.info("move_arm: arm raised fully (top=%s), settled at %s", result.get("top"), result.get("end"))
+        return result
     result = move_motor(config.PORT_ARM, -degrees, speed)  # motor is physically inverted; negate so positive=down as documented
     if degrees > 0:
         move_motor(config.PORT_ARM, 17, speed)  # raise 17° so gripper clears the ground
@@ -414,6 +466,14 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     return result
 
 
+def _arm_settle_below_top() -> str:
+    return _ARM_SETTLE_BELOW_TOP.format(
+        back_off_deg=config.ARM_TOP_BACK_OFF_DEG,
+        speed=config.ARM_TOP_BACK_OFF_SPEED,
+        hold_seconds=config.ARM_TOP_HOLD_SECONDS,
+    )
+
+
 def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
     """Lower arm fully to ground level, then raise 17° for wheel clearance."""
     return move_arm(config.ARM_DOWN_DEG, speed)
@@ -421,16 +481,17 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED) -> dict:
 
 def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
     """Close the gripper with holding torque, lift the arm fully to the
-    home/retracted position, hold for config.LIFT_ARM_HOLD_SECONDS, then let
-    the arm coast and leave the gripper powered (config.GRIPPER_HOLD_PWM)
-    so a lifted object can be carried and dropped. The gripper stays powered
-    across later tool calls until the gripper is next moved (control_gripper
-    open, put), which cuts the power just before opening — see
-    release_gripper_hold(). The close + raise run as a single RPi script (see
-    _GRASP_HOLD_AND_LIFT) so the gripper stays under active hold for the
-    whole arm-raise + settle window instead of coasting the instant the
-    close finishes. Named to match the PDDL domain's lift-arm action
-    (pddl/robot_domain.pddl), whose precondition already requires
+    home/retracted position, hold for config.LIFT_ARM_HOLD_SECONDS, then
+    settle the arm just below its top stop and let it go — it stays up
+    unpowered (see _ARM_SETTLE_BELOW_TOP) — and leave the gripper powered
+    (config.GRIPPER_HOLD_PWM) so a lifted object can be carried and dropped.
+    The gripper stays powered across later tool calls until the gripper is
+    next moved (control_gripper open, put), which cuts the power just before
+    opening — see release_gripper_hold(). The close + raise run as a single
+    RPi script (see _GRASP_HOLD_AND_LIFT) so the gripper stays under active
+    hold for the whole arm-raise + settle window instead of coasting the
+    instant the close finishes. Named to match the PDDL domain's lift-arm
+    action (pddl/robot_domain.pddl), whose precondition already requires
     (holding ?o) — re-closing here re-affirms the grip immediately before
     the lift rather than trusting the earlier grasp to have held.
 
@@ -456,8 +517,9 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
                 arm_speed=speed,
                 hold_seconds=config.LIFT_ARM_HOLD_SECONDS,
                 gripper_hold_pwm=config.GRIPPER_HOLD_PWM,
+                arm_settle=_arm_settle_below_top(),
             ),
-            timeout=max(30, gripper_deg // 10 + arm_deg // 10 + int(config.LIFT_ARM_HOLD_SECONDS) + 15),
+            timeout=max(30, gripper_deg // 10 + arm_deg // 10 + int(config.LIFT_ARM_HOLD_SECONDS) + 18),
         )
     except Exception:
         # Don't leave a stalled gripper powered after a failed lift.
@@ -469,9 +531,9 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED) -> dict:
     _gripper_state = "close"
     log.info(
         "lift_arm: closed gripper (delta=%s), held %ss while raising arm (delta=%s), "
-        "gripper left powered at PWM %s until next opened",
+        "arm settled at %s, gripper left powered at PWM %s until next opened",
         result.get("gripper_delta"), config.LIFT_ARM_HOLD_SECONDS, result.get("arm_delta"),
-        config.GRIPPER_HOLD_PWM,
+        result.get("arm_settled"), config.GRIPPER_HOLD_PWM,
     )
     return result
 

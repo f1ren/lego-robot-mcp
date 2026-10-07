@@ -1321,6 +1321,9 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED, expected: str 
     Args:
         degrees:  How far to move. Positive = down, negative = up.
                   Start with values like ±30–90 and adjust based on results.
+                  A full raise (-ARM_DOWN_DEG, i.e. -90, or more) eases back
+                  a few degrees below the top stop afterwards, so the arm
+                  stays up instead of falling back once let go.
         speed:    Motor speed, 7-15 (default 7 — halved from the old default
                   of 15 to slow the move down for diagnosing the raise/lower-
                   then-fall bug; max 15 still caps jitter).
@@ -1337,7 +1340,12 @@ def move_arm(degrees: int, speed: int = config.DEFAULT_ARM_SPEED, expected: str 
     if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
         return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     direction = "down" if degrees > 0 else "up" if degrees < 0 else "no-op"
-    suffix = "; then raises 17° to clear gripper from ground" if degrees > 0 else ""
+    if degrees > 0:
+        suffix = "; then raises 17° to clear gripper from ground"
+    elif degrees <= -(config.ARM_DOWN_DEG - config.ARM_UP_DEG):
+        suffix = "; then eases back slightly below the top and stays there"
+    else:
+        suffix = ""
     expected_str = expected if expected else (
         f"arm moves {direction} by ~{abs(degrees)}°{suffix} — visible in 3rd party cam (arm angle "
         f"changes); front camera may show arm entering or leaving frame; wheels and gripper unchanged"
@@ -1396,7 +1404,9 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
     Grasp-safe arm lift: closes the gripper with holding torque, raises the
-    arm fully to the home/retracted position and holds briefly. The close +
+    arm fully to the home/retracted position and holds briefly, then eases
+    the arm back a few degrees below the top stop and lets it go — stopped
+    there first, it stays up unpowered instead of falling back. The close +
     raise run inside a single script on the RPi (see
     mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque stays actively
     applied by the BuildHAT firmware for the whole raise + settle window —
@@ -1426,8 +1436,9 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
     expected_str = expected if expected else (
         "gripper jaws close fully (grasps anything between them), arm raises fully to "
         f"home position (~{config.ARM_UP_DEG}°, i.e. ~{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° "
-        "up from fully lowered) while the gripper holds; the gripper stays closed and keeps "
-        "holding — fingers do not reopen and any grasped object stays in the gripper"
+        "up from fully lowered) while the gripper holds, then eases back slightly below the "
+        "top and stays there; the gripper stays closed and keeps holding — fingers do not "
+        "reopen and any grasped object stays in the gripper"
     )
     return _with_change_analysis(
         f"close gripper with hold, lift arm fully to home position at speed {speed}, "
