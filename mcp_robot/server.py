@@ -17,7 +17,8 @@ Exposes the following tools to MCP clients (e.g. Claude Code):
   ─────────────
   move_arm               Move arm up or down (downward moves end with a 17° raise)
   lower_arm              Lower arm fully to ground then raise 17° for wheel clearance
-  lift_arm               Close gripper (hold torque), lift arm to home/retracted position; gripper stays powered until next opened
+  lift_arm               Close gripper (hold torque), lift arm to carry height (about halfway); gripper stays powered until next opened
+  raise_arm_fully        Raise a carried object fully (top stop, then settle) — the release height at a bin
   control_gripper        Open or close the gripper (open ends with 17° close-back to release wheel pressure)
 
   High-level actions
@@ -1403,18 +1404,21 @@ def lower_arm(speed: int = config.DEFAULT_ARM_SPEED, expected: str = "", context
 def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
              sub_observation: str = "", sub_action: str = "") -> dict:
     """
-    Grasp-safe arm lift: closes the gripper with holding torque, raises the
-    arm fully to the home/retracted position and holds briefly, then eases
-    the arm back a few degrees below the top stop and lets it go — stopped
-    there first, it stays up unpowered instead of falling back. The close +
+    Grasp-safe arm lift to carry height: closes the gripper with holding
+    torque, then raises the arm about halfway (config.ARM_CARRY_RAISE_DEG
+    above lower_arm's pose). There the object clears the floor and the
+    front camera still sees ahead over it. Fully raised, the object would
+    fill the front camera's view, so navigate_to while carrying from this
+    height. Use raise_arm_fully only once the robot is near the drop-off
+    (e.g. a bin). The arm stays at carry height unpowered. The close +
     raise run inside a single script on the RPi (see
     mcp_robot.robot._GRASP_HOLD_AND_LIFT) so the hold torque stays actively
-    applied by the BuildHAT firmware for the whole raise + settle window —
+    applied by the BuildHAT firmware for the whole raise + hold window —
     this is what stops a grasped object (e.g. a cup) from slipping out while
     the arm moves. The gripper then STAYS POWERED (closing) through every
-    later tool call — navigate_to, drive, turn, ... — so the object can be
-    carried, and is only released by the next gripper move:
-    control_gripper("open") or put cut its power just before opening.
+    later tool call — navigate_to, drive, turn, raise_arm_fully, ... — so
+    the object can be carried, and is only released by the next gripper
+    move: control_gripper("open") or put cut its power just before opening.
     get_motor_positions reports this as `gripper_held`. Captures before/after
     images and returns a Gemini-generated `change_description`.
 
@@ -1434,20 +1438,63 @@ def lift_arm(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: st
     if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
         return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
     expected_str = expected if expected else (
-        "gripper jaws close fully (grasps anything between them), arm raises fully to "
-        f"home position (~{config.ARM_UP_DEG}°, i.e. ~{config.ARM_DOWN_DEG - config.ARM_UP_DEG}° "
-        "up from fully lowered) while the gripper holds, then eases back slightly below the "
-        "top and stays there; the gripper stays closed and keeps holding — fingers do not "
-        "reopen and any grasped object stays in the gripper"
+        "gripper jaws close fully (grasps anything between them), then the arm rises a little, "
+        "to about halfway up — NOT fully raised — lifting any grasped object just clear of the "
+        "floor, and stays there; the front camera still sees ahead over the object; the gripper "
+        "stays closed and keeps holding — fingers do not reopen and any grasped object stays "
+        "in the gripper"
     )
     return _with_change_analysis(
-        f"close gripper with hold, lift arm fully to home position at speed {speed}, "
-        "hold; gripper stays powered closed",
+        f"close gripper with hold, lift arm {config.ARM_CARRY_RAISE_DEG}° to carry height "
+        f"(about halfway) at speed {speed}, hold; gripper stays powered closed",
         expected_str,
         lambda: robot_mod.lift_arm(speed),
         context=context,
         annotate=False,
         skip_vqa=not config.LIFT_ARM_VQA,
+        sub_observation=sub_observation,
+        sub_action=sub_action,
+    )
+
+
+@_tool(motor=True)
+def raise_arm_fully(speed: int = config.LIFT_ARM_SPEED, expected: str = "", context: str = "",
+                    sub_observation: str = "", sub_action: str = "") -> dict:
+    """
+    Raise a carried object from lift_arm's carry height to the release
+    height for a bin: the arm goes up into its top stop, then eases back a
+    few degrees below it and stays there. Call it only once navigate_to has
+    stopped near the bin, so the robot doesn't travel with the object
+    blocking the front camera. Then drive_to the bin's mouth and
+    control_gripper("open"). Only the arm moves: the gripper keeps holding
+    (lift_arm's carry hold stays on) until it is next opened. Captures
+    before/after images and returns a Gemini-generated `change_description`.
+
+    Args:
+        speed:    Arm motor speed, 5-15 (default 5, same as lift_arm's, since
+                  the arm is carrying a load; max 15 still caps jitter).
+        expected: Short, precise description of the expected outcome.
+        context:  Why this action is being taken and hints for evaluation.
+        sub_observation: ~4-word video subtitle: what was just observed or instructed
+                         (e.g. "Bin just ahead").
+        sub_action:      ~4-word video subtitle: what the robot is doing now
+                         (e.g. "Raising ball to drop").
+    """
+    log.info("[TOOL] raise_arm_fully speed=%r", speed)
+    if not (config.ARM_SPEED_MIN <= abs(speed) <= config.ARM_SPEED_MAX):
+        return _err(f"arm speed must be between {config.ARM_SPEED_MIN} and {config.ARM_SPEED_MAX} (abs).")
+    expected_str = expected if expected else (
+        "arm rises from about halfway up to fully raised, then eases back slightly below the "
+        "top and stays there; the gripper stays closed and keeps holding — any carried object "
+        "rises with it and stays in the gripper; wheels unchanged"
+    )
+    return _with_change_analysis(
+        f"raise arm fully (top stop, then settle just below it) at speed {speed}; "
+        "gripper stays powered closed",
+        expected_str,
+        lambda: robot_mod.raise_arm_fully(speed),
+        context=context,
+        annotate=False,
         sub_observation=sub_observation,
         sub_action=sub_action,
     )

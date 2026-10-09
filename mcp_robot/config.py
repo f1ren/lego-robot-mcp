@@ -88,11 +88,23 @@ ARM_SPEED_MIN = int(os.getenv("ARM_SPEED_MIN", "5"))
 # (lower_arm/move_arm are unaffected and keep DEFAULT_ARM_SPEED).
 LIFT_ARM_SPEED = int(os.getenv("LIFT_ARM_SPEED", "5"))
 
-# lift_arm closes the gripper (holding torque) before raising the arm, holds
-# both for this many seconds, then settles the arm just below its top stop
-# (see ARM_TOP_BACK_OFF_DEG) while switching the gripper to the carry hold
-# below. See mcp_robot.robot._GRASP_HOLD_AND_LIFT.
+# lift_arm closes the gripper (holding torque) before raising the arm to
+# carry height, holds the grip for this many seconds, then switches the
+# gripper to the carry hold below. See mcp_robot.robot._GRASP_HOLD_AND_LIFT.
 LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
+
+# How far (encoder degrees) lift_arm raises the arm above lower_arm's pose:
+# carry height, about halfway up. A carried object clears the floor there
+# and the front camera still sees ahead over it. Fully raised, the object
+# fills most of the front camera's view, so the robot only raises it fully
+# at the bin (raise_arm_fully). The arm travels ~49-52 from the ground to
+# the top stop. lower_arm's 17° clearance raise leaves it 9-17 up (it
+# undershoots under load), so carry height lands at ~40-55% of the travel.
+# Checked on the robot holding the paper ball (2026-10-09): +9 from
+# lower_arm's pose (40%), the arm stayed put unpowered, and the ball took
+# only the bottom quarter of the front camera frame. The raise ends moving
+# up, so it needs no settle (see ARM_TOP_BACK_OFF_DEG).
+ARM_CARRY_RAISE_DEG = int(os.getenv("ARM_CARRY_RAISE_DEG", "10"))
 
 # Open-loop PWM (0..1, closing direction) the gripper motor is kept driven at
 # from lift_arm until the gripper is next moved (control_gripper open / put),
@@ -101,7 +113,7 @@ LIFT_ARM_HOLD_SECONDS = float(os.getenv("LIFT_ARM_HOLD_SECONDS", "5.0"))
 # every Motor so a stalled motor isn't left at full power through a carry.
 GRIPPER_HOLD_PWM = float(os.getenv("GRIPPER_HOLD_PWM", "0.4"))
 
-# Full arm raises (lift_arm, move_arm by the full travel) end pressed into the
+# Full arm raises (move_arm by the full travel, raise_arm_fully) end pressed into the
 # top stop, and cutting power there springs the arm back down — it then falls
 # all the way, as it does whenever power is cut while it's moving down. Cut
 # while it's still, it stays where it is, unpowered. So a full raise backs the
