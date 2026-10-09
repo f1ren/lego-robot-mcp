@@ -1,8 +1,8 @@
 """
 Full arm raises settle just below the top stop before letting the arm go:
 back off in speed mode, hold with release=False, then coast — all in the
-raise's own script. Partial raises (and lower_arm's 17° clearance raise)
-don't back off.
+raise's own script. Partial raises (lower_arm's 17° clearance raise, and
+lift_arm's raise to carry height) don't back off.
 
 Offline — RPiClient's SSH layer is replaced by a recorder, so these check the
 generated scripts, not the BuildHAT itself.
@@ -75,22 +75,27 @@ def test_lower_arm_clearance_raise_does_not_back_off(client):
     assert not any(_settles(s) for s in client.scripts)
 
 
-def test_lift_arm_settles_arm_instead_of_coasting_it_off_the_stop(client):
+def test_lift_arm_raises_only_to_carry_height(client):
     robot.lift_arm(speed=15)
     script = client.scripts[-1]
     _assert_in_order(
         script,
-        f"arm.run_for_degrees({FULL}, speed=15)",
+        "gripper.run_for_degrees(",
+        f"arm_target = arm_start + {config.ARM_CARRY_RAISE_DEG}",
+        "arm.start(15)",
+        "while arm.get_position() < arm_target",
+        "arm.coast()",  # let go while still moving up
         f"time.sleep({config.LIFT_ARM_HOLD_SECONDS})",
         f"gripper.pwm({config.GRIPPER_HOLD_PWM})",
-        *SETTLE,
         "arm_settled = arm.get_position()",
     )
+    assert f"arm.run_for_degrees({FULL}" not in script
+    assert not _settles(script)
     assert script.count("arm.coast()") == 1
     compile(script, "<rpi>", "exec")  # with the gripper hold preamble
 
 
-@pytest.mark.parametrize("action", [robot.put, robot.prep_for_press])
+@pytest.mark.parametrize("action", [robot.put, robot.prep_for_press, robot.raise_arm_fully])
 def test_compound_full_raises_settle(client, action):
     action()
     raises = [s for s in client.scripts if f"arm.run_for_degrees({FULL}" in s]

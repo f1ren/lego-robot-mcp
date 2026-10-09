@@ -68,6 +68,15 @@ def test_put_releases_hold(client):
     assert all("_BH_HELD" not in s for s in client.scripts[-3:])
 
 
+def test_raise_arm_fully_keeps_hold(client):
+    robot.lift_arm()
+    robot.raise_arm_fully()
+    assert client.is_held(config.PORT_GRIPPER)
+    script = client.scripts[-1]
+    assert f"_BH_HELD = {{{GRIPPER_IDX}: {config.GRIPPER_HOLD_PWM}}}" in script
+    assert f"Motor({config.PORT_GRIPPER!r})" not in script  # only the arm moves
+
+
 def test_close_while_held_keeps_hold(client):
     robot.lift_arm()
     robot.control_gripper("close")  # already closed -> skipped

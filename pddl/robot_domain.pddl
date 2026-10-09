@@ -11,7 +11,8 @@
     (gripper-empty)
     (adjacent ?l1 ?l2)
     (arm-lowered)
-    (arm-raised)
+    (arm-carry)          ; about halfway up — lift-arm's carry height
+    (arm-raised)         ; fully up — raise-arm-fully's release height
     (gripper-open)
     (is-in-grasp-pose)
 
@@ -54,12 +55,17 @@
   )
 
   ; Move while already holding an object — the transport leg after grasp
-  ; and before place. The gripper is necessarily closed around the held
-  ; object here, so (unlike `navigate` above) this does not require
-  ; gripper-open/arm-lowered.
+  ; and before place/drop-into-bin. The gripper is necessarily closed around
+  ; the held object here, so (unlike `navigate` above) this does not require
+  ; gripper-open/arm-lowered. It requires carry height (arm-carry, from
+  ; lift-arm) instead: fully raised, the held object fills the front
+  ; camera's view, and lowered it drags along the floor.
+  ; Execution: navigate_to. Heading for a bin, target the one the plan's
+  ; drop-into-bin names.
   (:action navigate-holding
     :parameters (?from ?to ?o)
-    :precondition (and (robot-at ?from) (adjacent ?from ?to) (holding ?o))
+    :precondition (and (robot-at ?from) (adjacent ?from ?to) (holding ?o)
+                       (arm-carry))
     :effect (and (not (robot-at ?from)) (robot-at ?to))
   )
 
@@ -85,14 +91,17 @@
   (:action lower-arm
     :parameters ()
     :precondition (and)
-    :effect (and (arm-lowered) (not (arm-raised)))
+    :effect (and (arm-lowered) (not (arm-carry)) (not (arm-raised)))
   )
 
+  ; Lift a grasped object to carry height: the arm about halfway up, the
+  ; object clear of the floor, and the front camera still seeing ahead over
+  ; it. Not all the way up — see raise-arm-fully.
   ; Raising the arm ends the grasp pose — see convention note on navigate.
   (:action lift-arm
     :parameters (?o)
     :precondition (and (holding ?o) (arm-lowered))
-    :effect (and (arm-raised) (not (arm-lowered)) (not (is-in-grasp-pose)))
+    :effect (and (arm-carry) (not (arm-lowered)) (not (is-in-grasp-pose)))
   )
 
   ; Grasp an object at the robot's current location.
@@ -108,7 +117,8 @@
   )
 
   ; Set an object down at the robot's current location (calls put MCP tool,
-  ; which opens the gripper and raises the arm).
+  ; which opens the gripper and raises the arm). After a navigate-holding
+  ; leg the arm is at carry height, so the object drops a short way.
   (:action place
     :parameters (?o ?l)
     :precondition (and (robot-at ?l) (holding ?o))
@@ -116,32 +126,40 @@
                  (gripper-open) (not (arm-lowered)))
   )
 
-  ; Dispose of the held item: next to the bin with the arm raised, release it
+  ; Raise the held item from carry height to the release height for a bin's
+  ; mouth. Only at the bin's location: navigate-holding got the robot there
+  ; at carry height, so it never travels with the item blocking the front
+  ; camera. navigate_to stops short of its target, which leaves room to
+  ; raise without swinging the loaded gripper into the cup or its rack.
+  ; Retracts (arm-carry), so navigate-holding can't move the robot with the
+  ; arm up. ?w/bin-accepts only make ?b the bin the item goes into, so the
+  ; step names the same bin as drop-into-bin.
+  ; Execution: raise_arm_fully.
+  (:action raise-arm-fully
+    :parameters (?o ?b ?l ?w)
+    :precondition (and (robot-at ?l) (bin-at ?b ?l) (holding ?o) (arm-carry)
+                       (waste-type ?o ?w) (bin-accepts ?b ?w))
+    :effect (and (arm-raised) (not (arm-carry)))
+  )
+
+  ; Dispose of the held item: at the bin with the arm raised, release it
   ; into the tilted cup's mouth. Only a bin that accepts the item's waste
   ; stream qualifies — the "properly" in "dispose of this properly".
-  ; (arm-raised) is only reachable through lift-arm, which re-closes the
-  ; gripper with hold torque before raising, so the item can't slip out on
-  ; the way. Convention: never assert (arm-raised) in (:init), so the plan
-  ; always includes lower-arm + lift-arm — lift_arm raises a fixed amount
-  ; from fully lowered, so that pair is what guarantees the release height.
-  ; The final approach leg (?from -> the bin's location ?to) is part of this
-  ; action on purpose, so the arm is up BEFORE the robot heads for the bin —
-  ; the disposal counterpart of navigate requiring is-in-grasp-pose. Raising
-  ; it only on arrival could swing the loaded gripper into the cup or its
-  ; rack. A separate approach action would need a "lined up with bin ?b"
-  ; fluent that lift-arm/lower-arm/navigate-holding have no ?b to retract,
-  ; and the default pyperplan search is satisficing, so a non-minimal plan
-  ; could reuse a stale one.
-  ; Execution: navigate_to the bin, drive_to until the gripper is at the
-  ; cup's mouth, control_gripper open. Not put — put also raises the arm by
-  ; its full ARM_DOWN_DEG - ARM_UP_DEG travel, and here it is already up.
+  ; (arm-raised) is only reachable through raise-arm-fully, at the bin,
+  ; which needs lift-arm's (arm-carry) — lift-arm re-closes the gripper with
+  ; hold torque before raising, so the item can't slip out on the way.
+  ; Convention: never assert (arm-carry) or (arm-raised) in (:init), so the
+  ; plan always includes lower-arm + lift-arm + raise-arm-fully.
+  ; raise_arm_fully raises into the top stop, so the release height doesn't
+  ; depend on where the arm started.
+  ; Execution: drive_to until the gripper is at the cup's mouth,
+  ; control_gripper open. Not put — put also raises the arm by its full
+  ; ARM_DOWN_DEG - ARM_UP_DEG travel, and here it is already up.
   (:action drop-into-bin
-    :parameters (?from ?to ?o ?b ?w)
-    :precondition (and (robot-at ?from) (adjacent ?from ?to) (bin-at ?b ?to)
-                       (holding ?o) (arm-raised)
+    :parameters (?o ?b ?l ?w)
+    :precondition (and (robot-at ?l) (bin-at ?b ?l) (holding ?o) (arm-raised)
                        (waste-type ?o ?w) (bin-accepts ?b ?w))
-    :effect (and (not (robot-at ?from)) (robot-at ?to)
-                 (not (holding ?o)) (gripper-empty) (gripper-open)
+    :effect (and (not (holding ?o)) (gripper-empty) (gripper-open)
                  (not (is-in-grasp-pose))
                  (in-bin ?o ?b) (disposed ?o))
   )
