@@ -116,6 +116,23 @@ class TestHeadingDirection(unittest.TestCase):
         and flipping the arrow 180 degrees to point NE at the shadow instead."""
         self._assert_heading("heading/droidcam_cup_gripper_shadow.jpg", "SW")
 
+    def test_gripper_north_ball_in_jaws_facing_bins(self):
+        """Gripper holds a paper ball and points north at the bins — regression for
+        the dominant Hough axis being the chassis's side-to-side one: the 88x152mm
+        plate's front and back edges outweighed its side edges 223:13 and the
+        arrow pointed ESE (2026-10-11, see heading._PERP_AXIS_SWITCH_RATIO)."""
+        self._assert_heading("heading/simpleipcamera_ball_in_jaws_facing_bins.jpg", "N")
+
+    def test_gripper_south_paper_ball_ahead(self):
+        """Open claw points south at a paper ball — same side-to-side axis error,
+        which pointed the arrow W."""
+        self._assert_heading("grasp_readiness/droidcam_036.jpg", "S")
+
+    def test_gripper_north_switch_corner(self):
+        """Chain-link arm reaches north to the light switch — same side-to-side
+        axis error, which pointed the arrow E."""
+        self._assert_heading("navigation/droidcam_robot_near_switch_corner.jpg", "N")
+
 
 class TestHeadingBodyCenter(unittest.TestCase):
     """Regression test for body_hull's fragment-clustering fix (see

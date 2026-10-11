@@ -941,8 +941,11 @@ class TestFloorHomography(unittest.TestCase):
         (its image corners extrapolated to ~1m); the bounding rectangle
         isn't thrown by it.
       - droidcam_robot_near_switch_corner.jpg: the gripper points north at
-        the light switch, but the detected `forward` points east, along the
-        plate's 152mm side — no trustworthy front, so no fit.
+        the light switch. detect_heading used to point `forward` east, along
+        the plate's 152mm side (fixed 2026-10-11, see
+        heading._PERP_AXIS_SWITCH_RATIO); it now gets a valid fit, and the
+        same frame with `forward` turned 90° checks that an off-plate
+        heading still gets none.
       - grasp_readiness/simpleipcamera_paper_ball_at_pivot.jpg: the fit's
         scale matches the plate's own 8mm Technic hole pitch.
     """
@@ -978,13 +981,20 @@ class TestFloorHomography(unittest.TestCase):
     def test_valid_homography_west_heading(self):
         self._assert_valid_homography(self.WEST_HEADING_IMG)
 
+    def test_valid_homography_switch_corner(self):
+        self._assert_valid_homography(self.SWITCH_CORNER_IMG)
+
     def test_rejected_homography_heading_off_plate(self):
-        """`forward` runs along the plate's long (side-to-side) axis here —
-        the heading is ~90° off, so there is no front to orient by."""
+        """`forward` turned 90° runs along the plate's long (side-to-side)
+        axis — the heading detect_heading gave this frame before 2026-10-11.
+        There is no front to orient by, so no fit."""
+        import dataclasses
         from mcp_robot.navigation import floor_homography
 
         bgr, h_result = self._detect(self.SWITCH_CORNER_IMG)
-        self.assertIsNone(floor_homography(bgr, h_result))
+        fx, fy = h_result.forward
+        off_plate = dataclasses.replace(h_result, forward=(-fy, fx))
+        self.assertIsNone(floor_homography(bgr, off_plate))
 
     def test_scale_matches_plate_hole_pitch(self):
         """The plate's 88mm side runs along the heading and the camera's tilt
