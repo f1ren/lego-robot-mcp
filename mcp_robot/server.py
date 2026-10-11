@@ -708,9 +708,9 @@ def turn_to(
     navigate_to() instead.
 
     Args:
-        target_class_yolo:      YOLO class for the target (e.g. "cup"). Falls
-                                back to the last target used by navigate_to/
-                                click_button if omitted.
+        target_class_yolo:      YOLO class for the target (e.g. "cup",
+                                "green cup"). Falls back to the last target
+                                used by navigate_to/click_button if omitted.
         target_class_free_text: Free-text description of the target (e.g.
                                 "red plastic cup"). Same fallback as
                                 target_class_yolo.
@@ -851,9 +851,9 @@ def drive_to(
     navigate_to() instead.
 
     Args:
-        target_class_yolo:      YOLO class for the target (e.g. "cup"). Falls
-                                back to the last target used by navigate_to/
-                                click_button if omitted.
+        target_class_yolo:      YOLO class for the target (e.g. "cup",
+                                "green cup"). Falls back to the last target
+                                used by navigate_to/click_button if omitted.
         target_class_free_text: Free-text description of the target (e.g.
                                 "red plastic cup"). Same fallback as
                                 target_class_yolo.
@@ -1933,8 +1933,9 @@ def navigate_to(
 
     Args:
         target_class_yolo:      YOLO class for the target (e.g. "cup", "ball",
-                                "paper ball", "bottle", "any"). REQUIRED — must
-                                be non-empty.
+                                "paper ball", "green cup", "bottle", "any" —
+                                see get_robot_state). REQUIRED — must be
+                                non-empty.
         target_class_free_text: Free-text description for Gemini Flash fallback
                                 when YOLO finds nothing (e.g. "light switch").
                                 REQUIRED — must be non-empty. Prefer a
@@ -2565,6 +2566,11 @@ def get_robot_state(
                                   "ball"   → sports ball, orange, apple
                                   "paper ball" → crumpled white paper ball
                                              (YOLOE; "ball" won't find it)
+                                  "blue cup" / "yellow cup" / "green cup"
+                                           → that waste-bin cup in the rack
+                                             (YOLOE + colour; "cup" won't
+                                             find them)
+                                  "colored cup" → any of the three bin cups
                                   "bottle" → bottle, cup, vase
                                   "any"    → most-forward object of any class
                                 No default — state explicitly what you're

@@ -2,8 +2,8 @@
 CV-based grasp readiness check.
 
 Uses YOLO to locate the target object (YOLOE for the non-COCO classes in
-_YOLOE_CLASSES) and checks two conditions against the green forward-arrow
-computed by heading.detect_heading():
+_YOLOE_CLASSES and _YOLOE_COLOR_CLASSES) and checks two conditions against the
+green forward-arrow computed by heading.detect_heading():
 
   1. The object is within the gripper's reach: its center lies at most
      config.GRASP_REACH_MM past the finger pivots, along the heading, in the
@@ -20,6 +20,7 @@ import base64
 import logging
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,7 +87,55 @@ _YOLOE_CLASSES: dict[str, tuple[tuple[str, tuple[int, int, int, int]], ...]] = {
         ("tests/fixtures/yoloe/paper_ball_near_jaws.jpg",                        (409, 700, 476, 763)),
         ("tests/fixtures/grasp_readiness/simpleipcamera_paper_ball_in_jaws.jpg", (505, 726, 572, 787)),
     ),
+    # The blue, yellow and green waste-bin cups, tilted in their rack, external
+    # camera — all three cups in three camera placements (2026-10-05/09/11).
+    # On the 2026-10-05..11 frames (1,692 frames, 5,076 cups) conf 0.1 found
+    # 5,076/5,076, mean IoU 0.96-0.98 against colour-thresholded boxes, with no
+    # other detections; a VPE from a single frame's three cups (each of three
+    # frames tried) found 5,073+. See _YOLOE_COLOR_CLASSES for telling the
+    # cups apart.
+    "colored cup": (
+        ("tests/fixtures/yoloe/paper_ball_on_floor.jpg",            (109, 52, 242, 248)),
+        ("tests/fixtures/yoloe/paper_ball_on_floor.jpg",            (287, 53, 415, 248)),
+        ("tests/fixtures/yoloe/paper_ball_on_floor.jpg",            (466, 53, 599, 250)),
+        ("tests/fixtures/yoloe/colored_cups_robot_at_ball.jpg",     (151, 153, 272, 331)),
+        ("tests/fixtures/yoloe/colored_cups_robot_at_ball.jpg",     (316, 159, 442, 341)),
+        ("tests/fixtures/yoloe/colored_cups_robot_at_ball.jpg",     (488, 166, 615, 347)),
+        ("tests/fixtures/yoloe/colored_cups_robot_facing_bins.jpg", (99, 178, 221, 353)),
+        ("tests/fixtures/yoloe/colored_cups_robot_facing_bins.jpg", (263, 184, 390, 361)),
+        ("tests/fixtures/yoloe/colored_cups_robot_facing_bins.jpg", (436, 192, 560, 367)),
+    ),
 }
+
+# Colour-qualified targets: target class -> (YOLOE class, OpenCV hue band).
+# Visual prompts don't separate the cups by colour — their VPEs sit at
+# cosine 0.85-0.89 to each other, and with one class per colour 1,040 of the
+# 5,076 cups above came out the wrong colour. So each colour is the YOLOE
+# class narrowed by the hue band that dominates the detection's mask, read
+# off a gray-world white-balanced frame. The cups measure blue 103-108,
+# yellow 22-28, green 69-85 (2026-10-05..11).
+_YOLOE_COLOR_CLASSES: dict[str, tuple[str, tuple[int, int]]] = {
+    "blue cup":   ("colored cup", (96, 128)),
+    "yellow cup": ("colored cup", (16, 36)),
+    "green cup":  ("colored cup", (48, 96)),
+}
+# Only saturated, lit mask pixels vote (not the white rack, the floor or the
+# cup's shadowed inside). The winning band must hold this share of the mask
+# and this many times the runner-up's votes, or the detection has no colour
+# and matches no colour target: on the frames above that left 2 cups
+# uncoloured (one dim evening frame) and gave none the wrong colour. Without
+# the white balance, a camera exposure transient's orange cast turned the
+# green cup yellow (yoloe/colored_cups_washed_out_heldout.jpg) — a wrong bin,
+# where no colour only means falling back to Gemini.
+_COLOR_MIN_SAT   = 110
+_COLOR_MIN_VAL   = 40
+_COLOR_MIN_SHARE = 0.25
+_COLOR_MIN_LEAD  = 2.0
+
+# YOLOE (an end-to-end head, no NMS) sometimes returns a second, near-identical
+# box for one object (a cup in 87 of the 1,692 frames above); boxes of one
+# class overlapping by more than this IoU are one object.
+_YOLOE_DUP_IOU = 0.6
 
 # ── data classes ──────────────────────────────────────────────────────────────
 
@@ -221,9 +270,10 @@ def _yolo_detect(
     If *target_class* maps to None in _CLASS_SYNONYMS (the "any" sentinel), or
     if the key is absent AND the literal class name does not appear in the YOLO
     vocabulary, all detections are returned so the caller can pick the best one.
-    Classes in _YOLOE_CLASSES are detected by YOLOE instead (_yoloe_detect).
+    Classes in _YOLOE_CLASSES and _YOLOE_COLOR_CLASSES are detected by YOLOE
+    instead (_yoloe_detect).
     """
-    if target_class in _YOLOE_CLASSES:
+    if target_class in _YOLOE_CLASSES or target_class in _YOLOE_COLOR_CLASSES:
         return _yoloe_detect(bgr, target_class)
     model = _load_model()
     results = model(bgr, conf=_YOLO_CONF, iou=_YOLO_IOU, verbose=False)
@@ -253,6 +303,9 @@ def _yolo_detect(
 # ── YOLOE backend (non-COCO classes) ──────────────────────────────────────────
 
 _yoloe_model = None
+# heading.py runs YOLOE too, on frames from whichever thread annotates them,
+# and an ultralytics model isn't safe to load or predict with concurrently.
+_yoloe_lock = threading.Lock()
 
 
 def _yoloe_vpe_path(class_name: str) -> str:
@@ -262,36 +315,114 @@ def _yoloe_vpe_path(class_name: str) -> str:
 def _load_yoloe_model():
     """YOLOE with every _YOLOE_CLASSES class set from its stored VPE."""
     global _yoloe_model
-    if _yoloe_model is not None:
+    with _yoloe_lock:
+        if _yoloe_model is not None:
+            return _yoloe_model
+        import torch
+        from ultralytics import YOLOE
+        log.info("Loading YOLOE model: %s (classes: %s)", _YOLOE_MODEL_NAME, list(_YOLOE_CLASSES))
+        model = YOLOE(_YOLOE_MODEL_NAME)
+        names = list(_YOLOE_CLASSES)
+        vpe = torch.cat([torch.load(_yoloe_vpe_path(n), weights_only=True) for n in names], dim=1)
+        model.set_classes(names, vpe)
+        _yoloe_model = model
         return _yoloe_model
-    import torch
-    from ultralytics import YOLOE
-    log.info("Loading YOLOE model: %s (classes: %s)", _YOLOE_MODEL_NAME, list(_YOLOE_CLASSES))
-    model = YOLOE(_YOLOE_MODEL_NAME)
-    names = list(_YOLOE_CLASSES)
-    vpe = torch.cat([torch.load(_yoloe_vpe_path(n), weights_only=True) for n in names], dim=1)
-    model.set_classes(names, vpe)
-    _yoloe_model = model
-    return _yoloe_model
 
 
 def _yoloe_detect(bgr: np.ndarray, target_class: str) -> list[DetectedObject]:
-    """Run YOLOE and return detections of *target_class* (a _YOLOE_CLASSES key)."""
-    model = _load_yoloe_model()
-    results = model.predict(bgr, conf=_YOLOE_CONF, iou=_YOLO_IOU, verbose=False)
-
-    objects: list[DetectedObject] = []
-    for r in results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            if model.names[int(box.cls[0].item())] != target_class:
-                continue
-            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
-            objects.append(DetectedObject(target_class, float(box.conf[0].item()), x1, y1, x2, y2))
+    """Run YOLOE and return detections of *target_class* (a _YOLOE_CLASSES or
+    _YOLOE_COLOR_CLASSES key)."""
+    objects = [obj for obj, _ in _yoloe_predict(bgr, target_class)]
     log.info("YOLOE detected %d '%s': %s", len(objects), target_class,
              [f"{o.confidence:.2f}" for o in objects])
     return objects
+
+
+def _yoloe_predict(
+    bgr: np.ndarray, target_class: str,
+) -> list[tuple[DetectedObject, np.ndarray | None]]:
+    """YOLOE detections of *target_class* (a _YOLOE_CLASSES or
+    _YOLOE_COLOR_CLASSES key), one per object, each with its mask outline
+    (Nx2 image coordinates, or None). Doesn't log — heading.py calls this on
+    every frame it reads the robot's heading from.
+    """
+    yoloe_class, hue_band = _YOLOE_COLOR_CLASSES.get(target_class, (target_class, None))
+    model = _load_yoloe_model()
+    with _yoloe_lock:
+        results = model.predict(bgr, conf=_YOLOE_CONF, iou=_YOLO_IOU, verbose=False)
+
+    found: list[tuple[DetectedObject, np.ndarray | None]] = []
+    hsv = None
+    for r in results:
+        if r.boxes is None:
+            continue
+        outlines = r.masks.xy if r.masks is not None else [None] * len(r.boxes)
+        for box, outline in zip(r.boxes, outlines):
+            if model.names[int(box.cls[0].item())] != yoloe_class:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+            if hue_band is not None:
+                if hsv is None:
+                    hsv = cv2.cvtColor(_gray_world(bgr), cv2.COLOR_BGR2HSV)
+                if _mask_color(hsv, (x1, y1, x2, y2), outline, yoloe_class) != target_class:
+                    continue
+            found.append((DetectedObject(target_class, float(box.conf[0].item()), x1, y1, x2, y2), outline))
+
+    found.sort(key=lambda f: f[0].confidence, reverse=True)
+    kept: list[tuple[DetectedObject, np.ndarray | None]] = []
+    for obj, outline in found:
+        if all(_box_iou(obj, other) <= _YOLOE_DUP_IOU for other, _ in kept):
+            kept.append((obj, outline))
+    return kept
+
+
+def _gray_world(bgr: np.ndarray) -> np.ndarray:
+    """*bgr* white-balanced so that its three channel means are equal."""
+    means = bgr.reshape(-1, 3).mean(axis=0)
+    gains = (means.mean() / np.maximum(means, 1e-3)).astype(np.float32)
+    return np.clip(bgr.astype(np.float32) * gains, 0, 255).astype(np.uint8)
+
+
+def _mask_color(
+    hsv: np.ndarray,
+    box: tuple[int, int, int, int],
+    outline: np.ndarray | None,
+    yoloe_class: str,
+) -> str | None:
+    """The colour target of *yoloe_class* (see _YOLOE_COLOR_CLASSES) whose hue
+    band dominates the detection's mask — its box if there's no outline — in
+    the white-balanced *hsv* frame, or None if none clearly does."""
+    h, w = hsv.shape[:2]
+    x1, y1, x2, y2 = max(0, box[0]), max(0, box[1]), min(w, box[2]), min(h, box[3])
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = hsv[y1:y2, x1:x2]
+    region = np.zeros(crop.shape[:2], np.uint8)
+    if outline is not None and len(outline) >= 3:
+        cv2.fillPoly(region, [np.round(outline - (x1, y1)).astype(np.int32)], 1)
+    else:
+        region[:] = 1
+    area = int(np.count_nonzero(region))
+    if area == 0:
+        return None
+    voting = (region > 0) & (crop[..., 1] >= _COLOR_MIN_SAT) & (crop[..., 2] >= _COLOR_MIN_VAL)
+    hues = crop[..., 0][voting]
+    shares = {
+        target: np.count_nonzero((hues >= lo) & (hues <= hi)) / area
+        for target, (cls, (lo, hi)) in _YOLOE_COLOR_CLASSES.items() if cls == yoloe_class
+    }
+    best, *others = sorted(shares, key=shares.get, reverse=True)
+    runner_up = shares[others[0]] if others else 0.0
+    if shares[best] < _COLOR_MIN_SHARE or shares[best] < _COLOR_MIN_LEAD * runner_up:
+        return None
+    return best
+
+
+def _box_iou(a: DetectedObject, b: DetectedObject) -> float:
+    iw = max(0, min(a.x2, b.x2) - max(a.x1, b.x1))
+    ih = max(0, min(a.y2, b.y2) - max(a.y1, b.y1))
+    union = a.width * a.height + b.width * b.height - iw * ih
+    return iw * ih / union if union > 0 else 0.0
 
 
 def build_yoloe_vpe(class_name: str):
@@ -727,7 +858,8 @@ def check_grasp_readiness(
     Args:
         bgr: BGR image from the external (SimpleIPCamera) camera.
         target_class_yolo: canonical YOLO class to look for (see _CLASS_SYNONYMS,
-            and _YOLOE_CLASSES for non-COCO classes such as "paper ball").
+            and _YOLOE_CLASSES / _YOLOE_COLOR_CLASSES for non-COCO classes such
+            as "paper ball" or "green cup").
             No default — every caller must state what it is looking for.
         target_class_free_text: free-text description for Gemini Flash fallback
             (e.g. "light switch"). Used only when YOLO finds nothing.
@@ -787,7 +919,8 @@ def annotate_frame_with_object(
 
     Detection strategy:
       1. YOLO — if *target_class_yolo* is non-empty, run YOLO filtered to that
-         canonical class (see _CLASS_SYNONYMS; YOLOE for _YOLOE_CLASSES).
+         canonical class (see _CLASS_SYNONYMS; YOLOE for _YOLOE_CLASSES and
+         _YOLOE_COLOR_CLASSES).
       2. Gemini Flash VLM — if YOLO finds nothing and *target_class_free_text*
          is non-empty, query Gemini Flash with that free-text description.
          Use this for objects outside COCO-80, e.g. "light switch".
