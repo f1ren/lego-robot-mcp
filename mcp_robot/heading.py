@@ -2,18 +2,19 @@
 Detect the robot's forward heading in external (SimpleIPCamera) frames and overlay
 a green arrow showing the direction the gripper is pointing.
 
-The robot has a yellow LEGO body whose chassis presents many long parallel
-edges (brick rows, top and bottom panel edges). Those edges all run along the
-body's "forward" axis. We:
+The robot has a yellow LEGO body whose chassis presents many long straight
+edges (plate edges, hole-grid rows), running both front-to-back and
+side-to-side. We:
   1. Color-mask the yellow body to localize it and define a search ROI.
      Other yellow objects (e.g. a yellow cup) also pass the mask, so the
      plausible yellow clusters are ranked by how many small enclosed holes
      they contain — the chassis is built from Technic plates with a precise
      hole grid, while cups/walls/floor patches are smooth.
   2. Run a Hough line transform on Canny edges inside that ROI; the dominant
-     line orientation gives the forward axis (modulo 180°).
-  3. Disambiguate front-vs-back by detecting the dark gripper-and-arm
-     assembly nearby — it sits at the FRONT of the body.
+     line orientation gives the chassis's axes (modulo 90°).
+  3. Detect the dark gripper-and-arm assembly — it sits at the FRONT of the
+     body — along that axis and its perpendicular. Where it lies picks the
+     forward axis and disambiguates front-vs-back.
 
 This is intentionally a static image-processing approach (no motion required):
 the lab lighting and floor are kept clean enough that color masking is more
@@ -113,10 +114,26 @@ _PLATE_MIN_HUE = 18
 _HOLE_MIN_AREA_FRAC = 2.0 / 921600
 _HOLE_MAX_AREA_FRAC = 200.0 / 921600
 
-# Gripper search ROI: expand along the body's long axis (where the arm extends)
-# more aggressively than perpendicular, relative to the larger/smaller body dim.
+# Gripper search ROI: expand along the candidate forward axis (where the arm
+# extends) more aggressively than perpendicular, relative to the larger/smaller
+# body dim.
 _ROI_EXPAND_ALONG = 1.5   # fraction of max(bw, bh) along the forward/backward axis
 _ROI_EXPAND_PERP  = 0.4   # fraction of min(bw, bh) perpendicular to the axis
+
+# The dominant Hough angle fixes the chassis's orientation only modulo 90°:
+# the plates' edges and hole grid run both ways, and the 88x152mm top plate's
+# long side runs side to side (see navigation.floor_homography). Which family
+# wins depends on what the PCB, cables and lighting leave visible. So the
+# gripper is searched for along the dominant axis and its perpendicular, and
+# the perpendicular wins only when its best gripper blob scores more than this
+# many times higher. On 2026-10-11 (simpleipcamera_ball_in_jaws_facing_bins.jpg)
+# the plate's front and back edges outweighed its side edges 223:13, and the
+# arrow pointed ~90° off. The perpendicular's gripper score was 10.1x the
+# dominant's there, and 6.9x and 63.6x on two older fixtures with the same
+# silent error (grasp_readiness/droidcam_036.jpg,
+# navigation/droidcam_robot_near_switch_corner.jpg). Across the other 113
+# external-camera fixture frames it stays at or below 1.93x.
+_PERP_AXIS_SWITCH_RATIO = 3.5
 
 # Dilation used only to *group* nearby black-mask fragments into one gripper
 # candidate (see the fragmentation comment below) — generous on purpose, since
@@ -139,6 +156,13 @@ class Heading:
     body_radius_px: float = 40.0     # half the longer side of the yellow body bounding box
     # Convex hull body_center/body_area were measured from (for debug overlays).
     body_hull: np.ndarray | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass
+class _Gripper:
+    anchor: tuple[int, int]   # (x, y) centroid of the chosen black blob
+    area: int                 # its pixel count
+    score: float              # area × |projection onto the axis| × edge density
 
 
 def _largest_contour(mask: np.ndarray) -> np.ndarray | None:
@@ -458,22 +482,22 @@ def _heading_for_body(
 ) -> Heading | None:
     """Forward heading assuming `body` is the robot's chassis hull, or None."""
     h, w = bgr.shape[:2]
-    frame_area = h * w
     body_center = _centroid(body)
     if body_center is None:
         log.info("detect_heading: body hull found but centroid degenerate (zero-area moments)")
         return None
     bx, by, bw, bh = cv2.boundingRect(body)
 
-    # ── 2. Forward direction from dominant Hough lines on the body ────────
-    # Compute the long axis BEFORE gripper detection so we can use it to
-    # score gripper candidates by alignment with the axis (see step 3).
-    # The LEGO chassis presents many long parallel edges (brick rows, top
-    # and bottom panel edges) all aligned with the body's long axis. We
-    # detect Canny edges within a yellow-restricted ROI, run a probabilistic
-    # Hough transform, and take the length-weighted modal angle as the long
-    # axis. This is robust to oblique camera angles where the projected body
+    # ── 2. Chassis axis from dominant Hough lines on the body ─────────────
+    # Compute the axis BEFORE gripper detection so we can use it to score
+    # gripper candidates by alignment with the axis (see step 3).
+    # The LEGO chassis presents many long straight edges (plate edges,
+    # hole-grid rows). We detect Canny edges within a yellow-restricted ROI,
+    # run a probabilistic Hough transform, and take the length-weighted modal
+    # angle. This is robust to oblique camera angles where the projected body
     # shape becomes L-shaped (for which minAreaRect would return a diagonal).
+    # The edges run both front-to-back and side-to-side, so the modal angle is
+    # the forward axis or the one perpendicular to it — step 3 decides which.
     pad_long_x = int(bw * 0.4)
     pad_long_y = int(bh * 0.4)
     lx0 = max(0, bx - pad_long_x)
@@ -511,10 +535,71 @@ def _heading_for_body(
     )[3:-3]
     dom_deg = int(np.argmax(smoothed))
     a = math.radians(dom_deg)
-    axis = (math.cos(a), math.sin(a))
+    dom_axis = (math.cos(a), math.sin(a))
+    perp_axis = (-dom_axis[1], dom_axis[0])
 
-    # ── 3. Find black gripper inside an expanded ROI around the body ──────
-    # Expand more along the body's long axis (where the arm protrudes) than
+    # ── 3. Find the gripper; it picks the forward axis ────────────────────
+    # See _PERP_AXIS_SWITCH_RATIO for why the perpendicular is searched too.
+    dom = _find_gripper(bgr, hsv, yellow_mask, body, body_center, dom_axis)
+    perp = _find_gripper(bgr, hsv, yellow_mask, body, body_center, perp_axis)
+    if perp is not None and (dom is None or perp.score > _PERP_AXIS_SWITCH_RATIO * dom.score):
+        log.debug(
+            "detect_heading: gripper lies across the dominant %d° Hough axis (score %.0f vs %s) — "
+            "taking the perpendicular as forward",
+            dom_deg, perp.score, "none" if dom is None else f"{dom.score:.0f}",
+        )
+        axis, gripper = perp_axis, perp
+    elif dom is not None:
+        axis, gripper = dom_axis, dom
+    else:
+        log.info(
+            "detect_heading: body+axis found at %s but no gripper/arm blob detected — "
+            "gripper may be occluded or outside the search ROI",
+            body_center,
+        )
+        return None
+
+    # Disambiguate front-vs-back using the gripper centroid: forward points
+    # toward the gripper, away from the body interior.
+    dx = gripper.anchor[0] - body_center[0]
+    dy = gripper.anchor[1] - body_center[1]
+    if axis[0] * dx + axis[1] * dy < 0:
+        axis = (-axis[0], -axis[1])
+
+    # Anchor the arrow at the body's front edge: project every body-hull
+    # vertex onto the forward axis, take the max-projection point. This
+    # keeps the arrow rooted on the body itself (not at the gripper centroid,
+    # which can sit off-axis when jaws or arm hang asymmetrically).
+    hull_xy = body.reshape(-1, 2).astype(np.float32)
+    projections = (hull_xy[:, 0] - body_center[0]) * axis[0] + (hull_xy[:, 1] - body_center[1]) * axis[1]
+    front_idx = int(np.argmax(projections))
+    front_x, front_y = int(hull_xy[front_idx, 0]), int(hull_xy[front_idx, 1])
+
+    return Heading(
+        body_center=body_center,
+        arrow_anchor=(front_x, front_y),
+        forward=axis,
+        body_area=int(cv2.contourArea(body)),
+        gripper_area=gripper.area,
+        body_radius_px=float(max(bw, bh)) / 2.0,
+        body_hull=body,
+    )
+
+
+def _find_gripper(
+    bgr: np.ndarray, hsv: np.ndarray, yellow_mask: np.ndarray, body: np.ndarray,
+    body_center: tuple[int, int], axis: tuple[float, float],
+) -> _Gripper | None:
+    """
+    Best black gripper/arm blob around `body`, assuming the robot's forward
+    axis is `axis` (either sign), or None if no blob reaches
+    _MIN_GRIPPER_AREA_FRAC.
+    """
+    h, w = bgr.shape[:2]
+    frame_area = h * w
+    bx, by, bw, bh = cv2.boundingRect(body)
+
+    # Expand more along the axis (where the arm protrudes) than
     # perpendicular, so the search window captures the full gripper/arm even
     # when it extends far beyond the body bbox (e.g. chain-link arm at ~90°).
     ax_abs, ay_abs = abs(axis[0]), abs(axis[1])
@@ -565,11 +650,11 @@ def _heading_for_body(
     gripper_edges = cv2.Canny(gray_gripper_roi, 60, 150)
 
     # Pick the black blob that best represents the gripper. Score by
-    # area × |projection onto body long axis| × edge density so that
+    # area × |projection onto the axis| × edge density so that
     # off-axis noise (cables, shadows perpendicular to the forward
     # direction) and large-but-smooth blobs (cast shadows, which can
     # otherwise out-area the real gripper) cannot outscore the actual
-    # gripper, which sits at one end of the body's long axis and has
+    # gripper, which sits at one end of the forward axis and has
     # visible mechanical texture.
     #
     # A thin/wireframe gripper (open claw, chain-link arm) can fragment into
@@ -584,9 +669,7 @@ def _heading_for_body(
     groups, _ = cv2.findContours(link_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_area = _MIN_GRIPPER_AREA_FRAC * frame_area
     bcx, bcy = body_center
-    best_score = -1.0
-    arrow_anchor: tuple[int, int] | None = None
-    gripper_area = 0
+    best: _Gripper | None = None
     for g in groups:
         g_mask = np.zeros(black_mask.shape, dtype=np.uint8)
         cv2.drawContours(g_mask, [g], -1, 255, thickness=cv2.FILLED)
@@ -601,43 +684,9 @@ def _heading_for_body(
         edge_px = cv2.countNonZero(cv2.bitwise_and(gripper_edges, real_mask))
         texture = edge_px / area
         score = area * along * texture
-        if score > best_score:
-            best_score = score
-            arrow_anchor = (int(round(cx_full)), int(round(cy_full)))
-            gripper_area = int(area)
-    if arrow_anchor is None:
-        log.info(
-            "detect_heading: body+axis found at %s but no gripper/arm blob detected — "
-            "gripper may be occluded or outside the search ROI",
-            body_center,
-        )
-        return None
-
-    # Disambiguate front-vs-back using the gripper centroid: forward points
-    # toward the gripper, away from the body interior.
-    dx = arrow_anchor[0] - body_center[0]
-    dy = arrow_anchor[1] - body_center[1]
-    if axis[0] * dx + axis[1] * dy < 0:
-        axis = (-axis[0], -axis[1])
-
-    # Anchor the arrow at the body's front edge: project every body-hull
-    # vertex onto the forward axis, take the max-projection point. This
-    # keeps the arrow rooted on the body itself (not at the gripper centroid,
-    # which can sit off-axis when jaws or arm hang asymmetrically).
-    hull_xy = body.reshape(-1, 2).astype(np.float32)
-    projections = (hull_xy[:, 0] - body_center[0]) * axis[0] + (hull_xy[:, 1] - body_center[1]) * axis[1]
-    front_idx = int(np.argmax(projections))
-    front_x, front_y = int(hull_xy[front_idx, 0]), int(hull_xy[front_idx, 1])
-
-    return Heading(
-        body_center=body_center,
-        arrow_anchor=(front_x, front_y),
-        forward=axis,
-        body_area=int(cv2.contourArea(body)),
-        gripper_area=gripper_area,
-        body_radius_px=float(max(bw, bh)) / 2.0,
-        body_hull=body,
-    )
+        if best is None or score > best.score:
+            best = _Gripper((int(round(cx_full)), int(round(cy_full))), int(area), score)
+    return best
 
 
 def _draw_arrow(bgr: np.ndarray, heading: Heading) -> np.ndarray:
