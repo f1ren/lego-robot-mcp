@@ -61,7 +61,8 @@
   ; lift-arm) instead: fully raised, the held object fills the front
   ; camera's view, and lowered it drags along the floor.
   ; Execution: navigate_to. Heading for a bin, target the one the plan's
-  ; drop-into-bin names.
+  ; drop-into-bin names, by its colour: target_class_yolo "blue cup",
+  ; "yellow cup" or "green cup".
   (:action navigate-holding
     :parameters (?from ?to ?o)
     :precondition (and (robot-at ?from) (adjacent ?from ?to) (holding ?o)

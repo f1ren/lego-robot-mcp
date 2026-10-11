@@ -384,5 +384,58 @@ class TestBodyHullJoinsRibbonSplitPlate(unittest.TestCase):
         self.assertEqual(labels[round(angle / 45) % 8], "E", f"forward={dx:.3f},{dy:.3f}")
 
 
+class TestYellowCupErasedFromBody(unittest.TestCase):
+    """Regression for erasing YOLOE's bin cups from the yellow mask (see
+    mcp_robot/heading.py::_NOT_ROBOT_YOLOE_CLASS), 2026-10-11.
+
+    Near the bins, nearest-edge clustering joined the yellow waste-bin cup to
+    the chassis plates — the hole ranking (TestYellowCupNotMistakenForBody)
+    only ranks clusters, and here cup and chassis were one. With the robot
+    beside the green cup the joined hull was 106k px, 11.6% of the frame, and
+    was rejected as implausibly large: no heading, so get_robot_state,
+    turn_to and navigate_to all stopped at "robot heading not detected". With
+    it just below the bins the hull stayed under that limit and was accepted,
+    centred between robot and cup with a 264px radius.
+    """
+
+    FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "yoloe"
+
+    @classmethod
+    def setUpClass(cls):
+        from mcp_robot.heading import detect_heading
+        cls._detect = staticmethod(detect_heading)
+
+    def _heading(self, name: str):
+        bgr = cv2.imread(str(self.FIXTURES / name))
+        self.assertIsNotNone(bgr, f"Could not load {name}")
+        heading = self._detect(bgr)
+        self.assertIsNotNone(heading, f"{name}: no heading — yellow cup joined to the body again?")
+        return heading
+
+    def _assert_on_chassis(self, heading, bbox):
+        x1, y1, x2, y2 = bbox
+        cx, cy = heading.body_center
+        self.assertTrue(x1 <= cx <= x2 and y1 <= cy <= y2,
+                        f"body_center {heading.body_center} off the chassis {bbox}")
+        self.assertLess(heading.body_radius_px, 140, "hull spans the cup as well as the robot")
+
+    @staticmethod
+    def _forward_deg(heading) -> float:
+        dx, dy = heading.forward
+        return math.degrees(math.atan2(-dy, dx))  # 0 = E, 90 = N
+
+    def test_robot_beside_green_cup(self):
+        heading = self._heading("colored_cups_robot_by_green_cup_heldout.jpg")
+        self._assert_on_chassis(heading, (435, 440, 685, 615))
+        # Gripper points NNE: from the body center to the jaws is ~70°.
+        self.assertTrue(55 <= self._forward_deg(heading) <= 85, f"forward={heading.forward}")
+
+    def test_robot_below_bins(self):
+        heading = self._heading("colored_cups_robot_at_bins_heldout.jpg")
+        self._assert_on_chassis(heading, (400, 395, 645, 620))
+        # Gripper points NE, at the green cup.
+        self.assertTrue(25 <= self._forward_deg(heading) <= 65, f"forward={heading.forward}")
+
+
 if __name__ == "__main__":
     unittest.main()

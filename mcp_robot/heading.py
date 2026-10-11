@@ -6,8 +6,9 @@ The robot has a yellow LEGO body whose chassis presents many long straight
 edges (plate edges, hole-grid rows), running both front-to-back and
 side-to-side. We:
   1. Color-mask the yellow body to localize it and define a search ROI.
-     Other yellow objects (e.g. a yellow cup) also pass the mask, so the
-     plausible yellow clusters are ranked by how many small enclosed holes
+     Other yellow objects (e.g. a yellow cup) also pass the mask: the
+     waste-bin cups YOLOE recognises are erased from it, and the plausible
+     yellow clusters left are ranked by how many small enclosed holes
      they contain — the chassis is built from Technic plates with a precise
      hole grid, while cups/walls/floor patches are smooth.
   2. Run a Hough line transform on Canny edges inside that ROI; the dominant
@@ -104,6 +105,21 @@ _PLATE_SPLIT_GAP_FACTOR = 0.75
 # let floor fragments chain onto the chassis until its hull was rejected as
 # implausibly large.
 _PLATE_MIN_HUE = 18
+
+# Objects YOLOE recognises as not the robot are erased from the yellow mask
+# before the body is searched for — in practice the yellow waste-bin cup,
+# which is the chassis's yellow hue for hue. Nearest-edge clustering (see
+# _BODY_CLUSTER_RADIUS_FACTOR) bridges the gap from a plate fragment to the
+# cup whenever the robot is within about two body lengths of the bins, and
+# hole ranking (below) can't help once the two are one cluster — the hull is
+# then too large to accept (no heading at all) or spans robot and cup. On the
+# 2026-10-05..11 frames (1,692) erasing the cups gave a heading to 81 of the
+# 87 frames that had none, moved 7 hulls that spanned robot and cup (body
+# radius 264-312px) back onto the robot (93-121px), and left the other 1,598
+# headings unchanged. Every "colored cup" outline is erased (only the yellow
+# one passes the mask anyway), widened by _NOT_ROBOT_PAD_PX for the cup's rim.
+_NOT_ROBOT_YOLOE_CLASS = "colored cup"
+_NOT_ROBOT_PAD_PX = 4
 
 # Technic-plate holes: non-yellow regions fully enclosed by the (unopened)
 # yellow mask, in this size range as a fraction of frame area (~2-200 px at
@@ -327,6 +343,27 @@ def _count_holes_in(hull: np.ndarray, holes: np.ndarray) -> int:
     )
 
 
+def _not_robot_outlines(bgr: np.ndarray) -> list[np.ndarray]:
+    """Mask outlines (Nx2) of the objects YOLOE finds in `bgr` that aren't the
+    robot (see _NOT_ROBOT_YOLOE_CLASS); none if YOLOE fails."""
+    from mcp_robot import grasp_readiness  # imports this module, so not at the top
+    try:
+        found = grasp_readiness._yoloe_predict(bgr, _NOT_ROBOT_YOLOE_CLASS)
+    except Exception as exc:
+        log.warning("body_hull: YOLOE %r detection failed, searching the whole yellow mask: %s",
+                    _NOT_ROBOT_YOLOE_CLASS, exc)
+        return []
+    return [outline for _, outline in found if outline is not None and len(outline) >= 3]
+
+
+def _erase_outlines(mask: np.ndarray, outlines: list[np.ndarray]) -> None:
+    """Zero `mask` in place inside each outline, widened by _NOT_ROBOT_PAD_PX."""
+    for outline in outlines:
+        pts = [np.round(outline).astype(np.int32)]
+        cv2.fillPoly(mask, pts, 0)
+        cv2.polylines(mask, pts, True, 0, thickness=2 * _NOT_ROBOT_PAD_PX + 1)
+
+
 def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     """
     Locate the robot's yellow body in `bgr` and return its convex hull
@@ -339,11 +376,14 @@ def body_hull(bgr: np.ndarray) -> np.ndarray | None:
     return candidates[0] if candidates else None
 
 
-def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
+def body_candidates(bgr: np.ndarray, not_robot: list[np.ndarray] | None = None) -> list[np.ndarray]:
     """
     Return every plausibly-sized yellow cluster's convex hull, most
     chassis-like (most enclosed Technic-plate holes) first. Ties keep the
     seed-size order. Empty list if none.
+
+    `not_robot`: outlines to erase from the yellow mask first (see
+    _NOT_ROBOT_YOLOE_CLASS) — found with YOLOE when None.
 
     Locates the body by clustering nearby yellow contours into one shape so
     callers get a reliable centroid + ROI. This hull is NOT used by
@@ -370,6 +410,7 @@ def body_candidates(bgr: np.ndarray) -> list[np.ndarray]:
 
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     raw_yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    _erase_outlines(raw_yellow_mask, _not_robot_outlines(bgr) if not_robot is None else not_robot)
     yellow_mask = cv2.morphologyEx(
         raw_yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
@@ -457,7 +498,9 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     frame_area = h * w
 
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    not_robot = _not_robot_outlines(bgr)
     yellow_mask = cv2.inRange(hsv, _YELLOW_HSV_LO, _YELLOW_HSV_HI)
+    _erase_outlines(yellow_mask, not_robot)
     yellow_mask = cv2.morphologyEx(
         yellow_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
     )
@@ -466,7 +509,7 @@ def detect_heading(bgr: np.ndarray) -> Heading | None:
     # Try each plausible yellow cluster, most chassis-like first. A cluster
     # that yields no forward axis or no adjacent gripper isn't the robot
     # (e.g. a yellow cup) — move on rather than give up on the frame.
-    candidates = body_candidates(bgr)
+    candidates = body_candidates(bgr, not_robot)
     if not candidates:
         log.info("detect_heading: aborting — no robot body detected (see body_hull log above)")
         return None
