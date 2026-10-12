@@ -480,7 +480,8 @@ CLICK_BUTTON_VQA = _env_flag("CLICK_BUTTON_VQA", "")
 
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
+# Gemma 4 answers faster than the previous default, qwen3-vl:32b-thinking.
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # Enabled by default. RERUN_ENABLED=   (empty) disables rerun logging
