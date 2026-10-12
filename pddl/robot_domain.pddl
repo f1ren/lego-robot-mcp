@@ -20,9 +20,9 @@
     ; Bins are cups tilted 45°, mouth up, so the robot can release a held item
     ; into one with its arm raised — see drop-into-bin.
     ; Static facts, declared in the problem (:init) for every bin and item.
-    ; Which stream a bin takes (e.g. blue = paper) is a scene fact read off
-    ; its label/color, not a domain rule. Declare bins with bin-at, never
-    ; object-at — grasp would then be able to pick one up.
+    ; Which stream a bin takes (e.g. blue = paper) is a scene fact, not a
+    ; domain rule. Declare bins with bin-at, never object-at — grasp would
+    ; then be able to pick one up.
     (bin-at ?b ?l)
     (waste-type ?o ?w)   ; e.g. (waste-type paper-ball paper)
     (bin-accepts ?b ?w)  ; e.g. (bin-accepts bin-blue paper)

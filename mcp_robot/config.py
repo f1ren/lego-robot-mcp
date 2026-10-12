@@ -444,6 +444,13 @@ SCENE_TEXT_BORDER_PX = int(os.getenv("SCENE_TEXT_BORDER_PX", "3"))
 # (difflib ratio) — absorbs OCR noise like "Plastlc" vs "Plastic".
 SCENE_TEXT_MATCH_RATIO = float(os.getenv("SCENE_TEXT_MATCH_RATIO", "0.8"))
 SCENE_TEXT_OCR_THREADS = int(os.getenv("SCENE_TEXT_OCR_THREADS", "4"))
+# The baseline: erase sign text from the front camera's frames before any
+# model sees them — Claude, and the VQA models whose answers reach it. Each
+# word OCR can read goes, with the pictograms and arrows printed on the paper
+# around it (scene_text.hide_text). The overhead camera, which navigation runs
+# on, is left alone. On by default exactly when SCENE_TEXT_ENABLED is off, so
+# that switch alone picks the condition: with it off, nothing reads the signs.
+SCENE_TEXT_HIDE = _env_flag("SCENE_TEXT_HIDE", "0" if SCENE_TEXT_ENABLED else "1")
 
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"

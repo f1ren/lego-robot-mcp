@@ -110,27 +110,60 @@ def _log_init_progress(component: str, status: str) -> None:
             pct, finished, total, done, pending, failed,
         )
 
+_INSTRUCTIONS = (
+    "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
+    "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
+    "Always call get_robot_state before planning a sequence of actions. "
+    "Motor-action tools (move_motor, drive, move_arm, lower_arm, control_gripper, "
+    "put) automatically record a video of the motion and return a "
+    "vision-model `change_description` summarising what happened — "
+    "you do NOT need to call capture_image afterwards to verify them. "
+    "Use get_front_camera_image / get_external_camera_image / "
+    "capture_front_video_clip / capture_external_video_clip / get_robot_state "
+    "when you explicitly need to see the scene. "
+    "Stop and report to the user if a motor or camera tool raises an error."
+)
+
+# Only a server that reads text tells the coordinator about it: with
+# SCENE_TEXT_ENABLED off (the baseline) nothing Claude is told mentions signs
+# or text. Claude Code keeps the first 4096 chars of a server's instructions
+# (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH) — this whole text is ~3000.
+_VISUAL_SIGNALS_INSTRUCTIONS = (
+    "\n\nVISUAL SIGNALS (signs, labels). This server (Neil) reads text off both camera "
+    "streams on its own, once a view has been still for about 0.6 s, is lit well enough "
+    "and sharp, and differs from the last view it read. Text containing a word not seen "
+    "before this session is a visual signal. It reaches you twice: as one JSON line "
+    f"appended to {config.SIGNALS_OUTBOX}, and as `visual_signals` on the next tool result. "
+    "Until a tool result has carried it, the robot pauses: multi-step motions (navigate_to, "
+    "the scans, drive_to's second leg) stop at their next step (\"Navigation PAUSED\"), and "
+    "motor commands return ok: false, paused: true without moving. Neil knows nothing "
+    "about NAPC: judging a signal and replanning is your job.\n"
+    "1. At the start of every task, and again whenever it expires, start the background "
+    f"monitor: Monitor(command=\"tail -n 0 -F {config.SIGNALS_OUTBOX}\", "
+    "description=\"Neil visual signals\", timeout_ms=1800000). Its events arrive between "
+    "your tool calls, never during one.\n"
+    "2. A visual signal comes first: on one, from the monitor or a tool result, decide "
+    "whether it changes what the plan should do before your next motor command. Look at "
+    "its `frame` with Read — the OCR strings can be split, merged or misread; its "
+    "`context_frame` is the other camera at the same moment.\n"
+    "- It doesn't matter: carry on, and re-issue a command that paused. After a monitor "
+    "event, call scene_text_status first: its result carries the signal, so your next "
+    "motor command won't pause on it.\n"
+    "- It changes the plan: keep the robot stopped and call napc "
+    "replan_with_observation(observation=<what it says and what it refers to>, "
+    "images=[{label, path}, ...], completed_steps=k). It is synchronous (~15-20 s). "
+    "Continue with the plan it returns, which already starts from where the robot is, "
+    "and pass its problem_pddl to any later plan_pddl. k = the number of steps of NAPC's "
+    "current plan (your last plan_pddl) whose tool calls actually finished and were "
+    "verified; a step cut short by a pause is not completed.\n"
+    "plan_pddl echoes earlier observations under `observations`; keep your problem "
+    "consistent with them. scene_text_status shows what was read; "
+    "scene_text_status(reset_seen=True) has text already in view read again."
+)
+
 mcp = FastMCP(
     "lego-robot",
-    instructions=(
-        "Control a 4-motor Lego robot via BuildHat on a Raspberry Pi. "
-        "Motors: left_wheel (A), right_wheel (B), gripper (C), arm (D). "
-        "Always call get_robot_state before planning a sequence of actions. "
-        "Motor-action tools (move_motor, drive, move_arm, lower_arm, control_gripper, "
-        "put) automatically record a video of the motion and return a "
-        "vision-model `change_description` summarising what happened — "
-        "you do NOT need to call capture_image afterwards to verify them. "
-        "Use get_front_camera_image / get_external_camera_image / "
-        "capture_front_video_clip / capture_external_video_clip / get_robot_state "
-        "when you explicitly need to see the scene. "
-        "Stop and report to the user if a motor or camera tool raises an error. "
-        "The cameras are also read for new text (signs, labels): each new text is a "
-        f"visual signal, appended to {config.SIGNALS_OUTBOX} (tail it in the background) "
-        "and carried by the next tool result as `visual_signals`. Until a result has "
-        "carried it, the robot pauses: multi-step motions stop at their next step and "
-        "motor commands return PAUSED without moving — decide whether the text matters, "
-        "then re-issue the command."
-    ),
+    instructions=_INSTRUCTIONS + (_VISUAL_SIGNALS_INSTRUCTIONS if config.SCENE_TEXT_ENABLED else ""),
 )
 
 
@@ -2694,7 +2727,6 @@ def compile_video(since: str, camera: str = "simpleipcamera") -> dict:
 
 # ── background streaming ──────────────────────────────────────────────────────
 
-@_tool()
 def scene_text_status(reset_seen: bool = False) -> dict:
     """
     What the camera streams' text reader has seen: every word read so far
@@ -2727,6 +2759,12 @@ def scene_text_status(reset_seen: bool = False) -> dict:
         watcher.reset()
         status["reset"] = True
     return _ok(status)
+
+
+# A tool for it only where text is read — in the baseline, no tool name says
+# the cameras are read for text.
+if config.SCENE_TEXT_ENABLED:
+    _tool()(scene_text_status)
 
 
 def _run_pi_camera() -> None:

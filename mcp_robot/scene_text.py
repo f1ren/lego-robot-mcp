@@ -33,6 +33,10 @@ is stopped must not be missed if the background tail isn't running.
 Only still views are read — text in a moving frame is blurred and OCR
 guesses on it — and only views that changed since the last read, so a
 robot parked in front of a sign costs one OCR call, not one per frame.
+
+The baseline (SCENE_TEXT_HIDE, on when SCENE_TEXT_ENABLED is off) goes the
+other way: hide_text erases sign text from the front camera's frames before
+Claude or a VQA model sees them, so nothing reads the signs at all.
 """
 from __future__ import annotations
 
@@ -123,6 +127,141 @@ def read_text(
             continue
         lines.append(TextLine(text, score, [[float(x), float(y)] for x, y in box]))
     return lines
+
+
+# ── hiding text (SCENE_TEXT_HIDE — the baseline) ────────────────────────────
+#
+# Each word OCR can read is erased, and with it the ink printed on the paper
+# around it: the recycling sign's pictograms (wine glass, bottle, page) sit
+# above their word and its arrow below, and a pictogram alone would still
+# say which bin is which. Only words OCR reads start it — the detector alone
+# also boxes crumpled paper and Lego beams (sign_pan_pi_camera.mp4), and
+# growing a mask from those erased the gripper.
+
+# The front camera is the one that sees the signs: the overhead camera looks
+# down at the floor, and its frames carry the server's own drawn labels.
+HIDE_CAMERAS = ("pi_camera",)
+
+# A word: OCR confidence at least this, and 2+ letters. Below the reader's
+# SCENE_TEXT_MIN_SCORE, since a model still reads text that OCR scores low
+# mid-pan or cut off by the frame edge ("Sass" 0.59 and "AISS" 0.64 for Glass).
+_HIDE_MIN_SCORE = 0.5
+# Where a word's sign ink is looked for, in heights h of the word: the
+# pictogram's top sits up to ~3.4h above the word, the arrow ~1.2h below it.
+_HIDE_UP, _HIDE_DOWN, _HIDE_SIDE = 4.0, 2.0, 1.0
+_HIDE_MAX_BLOB = 3.5    # pictograms are ≤ ~2.8h — a bigger dark blob is something else
+_HIDE_INK = 0.6         # ink: darker than this fraction of the paper's brightness,
+_HIDE_INK_MAX_SAT = 80  # grey or black — not the coloured cups —
+_HIDE_ON_PAPER = 0.75   # and surrounded by paper: brightness ≥ this fraction of it
+# Erasing a word can make a neighbour readable that OCR first missed
+# (frame 33 of sign_pan_pi_camera.mp4: "Glass"), so read again after each pass.
+_HIDE_PASSES = 3
+
+_hide_ocr = None
+_hide_ocr_lock = threading.Lock()
+
+
+def _height(box: np.ndarray) -> float:
+    return float(np.linalg.norm(box[3] - box[0]) + np.linalg.norm(box[2] - box[1])) / 2
+
+
+def _words_to_hide(bgr: np.ndarray) -> list[np.ndarray]:
+    """Boxes of the words OCR can read in bgr. Its own engine: a lower
+    text_score floor than the reader's, and RapidOCR keeps per-call
+    thresholds as engine state, so they can't be passed to a shared one."""
+    global _hide_ocr
+    with _hide_ocr_lock:
+        if _hide_ocr is None:
+            from rapidocr_onnxruntime import RapidOCR
+            _hide_ocr = RapidOCR(text_score=0.3, intra_op_num_threads=config.SCENE_TEXT_OCR_THREADS)
+        result, _ = _hide_ocr(bgr, use_cls=False)
+    return [np.array(box, dtype=np.float32) for box, text, score in result or []
+            if float(score) >= _HIDE_MIN_SCORE and sum(ch.isalpha() for ch in str(text)) >= 2]
+
+
+def _sign_mask(bgr: np.ndarray, boxes: list[np.ndarray]) -> np.ndarray:
+    """Each word's box, plus the dark blobs printed on the paper around it."""
+    import cv2
+    img_h, img_w = bgr.shape[:2]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
+    mask = np.zeros((img_h, img_w), np.uint8)
+    for box in boxes:
+        cv2.fillPoly(mask, [box.astype(np.int32)], 255)
+        h = max(8.0, _height(box))
+        (x1, y1), (x2, y2) = box.min(axis=0), box.max(axis=0)
+        wx1, wy1 = int(max(0, x1 - _HIDE_SIDE * h)), int(max(0, y1 - _HIDE_UP * h))
+        wx2, wy2 = int(min(img_w, x2 + _HIDE_SIDE * h)), int(min(img_h, y2 + _HIDE_DOWN * h))
+        win = gray[wy1:wy2, wx1:wx2]
+        win_h, win_w = win.shape
+        paper = float(np.percentile(win, 90))
+        ink = (win < paper * _HIDE_INK) & (sat[wy1:wy2, wx1:wx2] < _HIDE_INK_MAX_SAT)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+        ring = max(2, int(0.3 * h))
+        for i in range(1, n):
+            bx, by, bw, bh, _area = stats[i]
+            if bw > _HIDE_MAX_BLOB * h or bh > _HIDE_MAX_BLOB * h:
+                continue
+            # Touching the window's edge where the frame goes on: the blob
+            # runs on past the window, so it's bigger than it looks.
+            if ((bx == 0 and wx1 > 0) or (by == 0 and wy1 > 0)
+                    or (bx + bw == win_w and wx2 < img_w) or (by + bh == win_h and wy2 < img_h)):
+                continue
+            ry1, ry2 = max(0, by - ring), min(win_h, by + bh + ring)
+            rx1, rx2 = max(0, bx - ring), min(win_w, bx + bw + ring)
+            around = win[ry1:ry2, rx1:rx2][labels[ry1:ry2, rx1:rx2] != i]
+            if around.size and np.median(around) >= _HIDE_ON_PAPER * paper:
+                blob = labels[by:by + bh, bx:bx + bw] == i
+                mask[wy1 + by:wy1 + by + bh, wx1 + bx:wx1 + bx + bw][blob] = 255
+    # Covers the soft edge of the strokes, which would otherwise leave an outline.
+    k = max(3, int(round(0.25 * float(np.median([_height(b) for b in boxes])))) | 1)
+    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+
+
+def hide_text(bgr: np.ndarray, raw: np.ndarray | None = None) -> np.ndarray:
+    """bgr with the sign text a model could read erased — each readable
+    word and the sign's ink around it, inpainted to blank paper. Returns
+    bgr itself when there was nothing to erase.
+
+    raw: the same frame before overlays were drawn on bgr (optical-flow
+    arrows) — text is looked for there, and the erased pixels come from it."""
+    import cv2
+    clean = bgr if raw is None else raw
+    erased = np.zeros(clean.shape[:2], np.uint8)
+    for _ in range(_HIDE_PASSES):
+        boxes = _words_to_hide(clean)
+        if not boxes:
+            break
+        mask = _sign_mask(clean, boxes)
+        clean = cv2.inpaint(clean, mask, 7, cv2.INPAINT_TELEA)
+        erased |= mask
+    if not erased.any():
+        return bgr
+    # Count only, never the words: the log is read while debugging a run.
+    log.info("scene_text: erased sign text from a frame (%.1f%% of it)", 100 * float((erased > 0).mean()))
+    if raw is None:
+        return clean
+    out = bgr.copy()
+    out[erased > 0] = clean[erased > 0]
+    return out
+
+
+def hide_text_b64(frame_b64: str, raw_b64: str | None = None) -> str:
+    """hide_text for a base64 JPEG; frame_b64 itself when nothing was erased."""
+    import cv2
+
+    def decode(b64: str) -> np.ndarray | None:
+        return cv2.imdecode(np.frombuffer(base64.b64decode(b64), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+    bgr = decode(frame_b64)
+    if bgr is None:
+        return frame_b64
+    raw = decode(raw_b64) if raw_b64 and raw_b64 != frame_b64 else None
+    out = hide_text(bgr, raw if raw is not None and raw.shape == bgr.shape else None)
+    if out is bgr:
+        return frame_b64
+    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return base64.b64encode(buf.tobytes()).decode() if ok else frame_b64
 
 
 # ── novelty ──────────────────────────────────────────────────────────────────

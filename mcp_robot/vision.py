@@ -428,8 +428,10 @@ def _subsample_frames(
     labeled_frames: Sequence[tuple[str, str]],
     frame_paths: Sequence[str | None] | None = None,
     raw_labeled_frames: Sequence[tuple[str, str]] | None = None,
-) -> tuple[list[tuple[str, str]], list[str | None]]:
-    """Return 3 frames per camera (first, peak-motion, last), grouped by camera.
+) -> tuple[list[tuple[str, str]], list[str | None], list[str | None]]:
+    """Return 3 frames per camera (first, peak-motion, last), grouped by camera,
+    with their paths and their raw_labeled_frames counterparts (None where
+    a camera's raw frames don't line up with its labeled ones).
 
     The inner frame is selected by optical flow: the frame with the highest mean
     flow magnitude from its predecessor, computed on raw_labeled_frames when
@@ -449,22 +451,23 @@ def _subsample_frames(
 
     out_frames: list[tuple[str, str]] = []
     out_paths: list[str | None] = []
+    out_raw: list[str | None] = []
     for label, indices in camera_indices.items():
         n = len(indices)
+        raw_b64s = raw_camera_b64s.get(label)
+        if raw_b64s is not None and len(raw_b64s) != n:
+            raw_b64s = None
         if n <= 3:
-            picks = indices
+            local_picks = list(range(n))
         else:
-            raw_b64s = raw_camera_b64s.get(label)
-            if raw_b64s and len(raw_b64s) == n:
-                inner_local = _peak_motion_index(raw_b64s)
-            else:
-                inner_local = int(n * 2 / 3)
-            picks = sorted({indices[0], indices[inner_local], indices[-1]})
-        for i in picks:
-            out_frames.append(labeled_frames[i])
-            out_paths.append(paths[i])
+            inner_local = _peak_motion_index(raw_b64s) if raw_b64s else int(n * 2 / 3)
+            local_picks = sorted({0, inner_local, n - 1})
+        for j in local_picks:
+            out_frames.append(labeled_frames[indices[j]])
+            out_paths.append(paths[indices[j]])
+            out_raw.append(raw_b64s[j] if raw_b64s else None)
 
-    return out_frames, out_paths
+    return out_frames, out_paths, out_raw
 
 
 def describe_action_video(
@@ -501,7 +504,13 @@ def describe_action_video(
         log.info("Video is static — skipping VQA for action %r", action)
         return "Verdict: NO — no motion detected in video\nChanges: No motion was detected in the captured video frames; the robot may not have moved."
 
-    labeled_frames, frame_paths = _subsample_frames(labeled_frames, frame_paths, motion_frames)
+    labeled_frames, frame_paths, raw_picked = _subsample_frames(labeled_frames, frame_paths, motion_frames)
+    if config.SCENE_TEXT_HIDE:
+        from mcp_robot import scene_text
+        labeled_frames = [
+            (label, scene_text.hide_text_b64(b64, raw) if label in scene_text.HIDE_CAMERAS else b64)
+            for (label, b64), raw in zip(labeled_frames, raw_picked)
+        ]
 
     # Collapse each camera's subsampled frames into a single stacked composite.
     cameras_ordered: dict[str, list[tuple[int, str]]] = {}
