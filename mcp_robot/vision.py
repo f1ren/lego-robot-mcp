@@ -273,7 +273,7 @@ def _ollama_video_describe(
     log.info("Ollama clip VQA model=%s host=%s camera=%r frames=%d",
              config.OLLAMA_MODEL, config.OLLAMA_HOST, camera, len(frames))
 
-    client = ollama.Client(host=config.OLLAMA_HOST)
+    client = ollama.Client(host=config.OLLAMA_HOST, timeout=config.OLLAMA_TIMEOUT_S)
     t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,
@@ -383,7 +383,7 @@ def _ollama_describe_video(
         prompt_text, "\n".join(image_log_lines),
     )
 
-    client = ollama.Client(host=config.OLLAMA_HOST)
+    client = ollama.Client(host=config.OLLAMA_HOST, timeout=config.OLLAMA_TIMEOUT_S)
     t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,
@@ -631,7 +631,7 @@ def _ollama_ask_with_images(
     log.info("Ollama ask_with_images model=%s host=%s images=%d",
              config.OLLAMA_MODEL, config.OLLAMA_HOST, len(images))
 
-    client = ollama.Client(host=config.OLLAMA_HOST)
+    client = ollama.Client(host=config.OLLAMA_HOST, timeout=config.OLLAMA_TIMEOUT_S)
     t0 = time.monotonic()
     resp = client.chat(
         model=config.OLLAMA_MODEL,

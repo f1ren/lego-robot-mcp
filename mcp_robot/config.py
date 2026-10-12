@@ -484,6 +484,9 @@ CLICK_BUTTON_VQA = _env_flag("CLICK_BUTTON_VQA", "")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 # Gemma 4 answers faster than the previous default, qwen3-vl:32b-thinking.
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
+# Without a timeout a stuck Ollama call blocks the motor tool forever (seen on
+# raise_arm_fully: the MCP client aborted after 1800s of silence).
+OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "180"))
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # Enabled by default. RERUN_ENABLED=   (empty) disables rerun logging
