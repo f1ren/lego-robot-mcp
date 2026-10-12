@@ -10,6 +10,12 @@ from pathlib import Path
 _PROJECT_DIR = Path(__file__).parent.parent
 _OUTPUT_DIR = _PROJECT_DIR / "output"
 
+
+def _env_flag(name: str, default: str) -> bool:
+    """On/off env var: empty, 0, false, no and off all mean off."""
+    return os.getenv(name, default).strip().lower() not in ("", "0", "false", "no", "off")
+
+
 # ── SSH ──────────────────────────────────────────────────────────────────────
 RPI_HOST = os.getenv("ROBOT_HOST", "rpi.local")
 RPI_USER = os.getenv("ROBOT_USER", "rpi")
@@ -242,7 +248,7 @@ SCAN_STEP_DEG  = int(os.getenv("SCAN_STEP_DEG",  "30"))   # degrees per rotation
 SCAN_TOTAL_DEG = int(os.getenv("SCAN_TOTAL_DEG", "360"))   # total arc to sweep
 SCAN_SPEED     = int(os.getenv("SCAN_SPEED",     "15"))    # wheel speed during scan turns
 # Set SCAN_ENABLED=1 to enable the 360° sweep; disabled by default.
-SCAN_ENABLED   = bool(os.getenv("SCAN_ENABLED", ""))
+SCAN_ENABLED   = _env_flag("SCAN_ENABLED", "")
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 CAMERA_WIDTH   = int(os.getenv("CAMERA_WIDTH",   "640"))
@@ -399,17 +405,17 @@ SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", str(_OUTPUT_DIR / "snapshots"))
 # ── Scene text (mcp_robot/scene_text.py) ─────────────────────────────────────
 # Reads new text (signs, labels) off the live camera streams once a view is
 # still and clear, and raises previously-unseen text to the coordinator as a
-# visual signal. SCENE_TEXT_ENABLED=  (empty) turns the whole thing off.
-SCENE_TEXT_ENABLED = bool(os.getenv("SCENE_TEXT_ENABLED", "1"))
+# visual signal. SCENE_TEXT_ENABLED=0 turns the whole thing off.
+SCENE_TEXT_ENABLED = _env_flag("SCENE_TEXT_ENABLED", "1")
 SCENE_TEXT_CAMERAS = tuple(c.strip() for c in os.getenv("SCENE_TEXT_CAMERAS", "pi_camera,simpleipcamera").split(",") if c.strip())
 # One JSON line per visual signal — tail it in the background (see CLAUDE.md).
 SIGNALS_OUTBOX = os.getenv("SIGNALS_OUTBOX", str(_OUTPUT_DIR / "signals" / "neil.jsonl"))
 # Frames (and OCR overlays) behind each signal.
 SCENE_TEXT_DIR = os.getenv("SCENE_TEXT_DIR", str(_OUTPUT_DIR / "scene_text"))
 # While a signal no tool result has carried yet is pending, multi-step motions
-# stop at their next step and motor commands don't start. SCENE_TEXT_PAUSE=
-# (empty) keeps the signals but never pauses.
-SCENE_TEXT_PAUSE = bool(os.getenv("SCENE_TEXT_PAUSE", "1"))
+# stop at their next step and motor commands don't start. SCENE_TEXT_PAUSE=0
+# keeps the signals but never pauses.
+SCENE_TEXT_PAUSE = _env_flag("SCENE_TEXT_PAUSE", "1")
 # Frames are sampled at most this often per camera for the still/changed test.
 SCENE_TEXT_SAMPLE_INTERVAL_S = float(os.getenv("SCENE_TEXT_SAMPLE_INTERVAL_S", "0.2"))
 # A view counts as still once it has stayed still this long.
@@ -460,17 +466,17 @@ LOCATE_OBJECT_FALLBACK_MODEL = os.getenv("LOCATE_OBJECT_FALLBACK_MODEL", "gemini
 
 # Skip VQA verification for lower_arm (the action is reliable enough).
 # Set LOWER_ARM_VQA=1 to re-enable.
-LOWER_ARM_VQA = bool(os.getenv("LOWER_ARM_VQA", ""))
+LOWER_ARM_VQA = _env_flag("LOWER_ARM_VQA", "")
 
 # exp:49e9ab56 — lift_arm is safe/reliable enough to skip VQA, same as
 # control_gripper's "open" action. Set LIFT_ARM_VQA=1 to re-enable.
-LIFT_ARM_VQA = bool(os.getenv("LIFT_ARM_VQA", ""))
+LIFT_ARM_VQA = _env_flag("LIFT_ARM_VQA", "")
 
 # click_button's VQA verdicts on the press/release have proven unreliable,
 # while the action itself (measured-distance press + fractional release) is
 # reliable enough for the current experiment. Skip VQA for now. Set
 # CLICK_BUTTON_VQA=1 to re-enable.
-CLICK_BUTTON_VQA = bool(os.getenv("CLICK_BUTTON_VQA", ""))
+CLICK_BUTTON_VQA = _env_flag("CLICK_BUTTON_VQA", "")
 
 # ── Ollama local vision ───────────────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
@@ -483,7 +489,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:32b-thinking")
 # RERUN_CONNECT=1          connect to an already-running viewer (use in MCP server
 #                          when stream.py has already spawned the viewer)
 # RERUN_ADDR               gRPC URL for RERUN_CONNECT (default: rerun+http://127.0.0.1:9876)
-RERUN_ENABLED = bool(os.getenv("RERUN_ENABLED", "1"))
+RERUN_ENABLED = _env_flag("RERUN_ENABLED", "1")
 RERUN_MODE    = os.getenv("RERUN_MODE", "spawn")
-RERUN_CONNECT = bool(os.getenv("RERUN_CONNECT", ""))
+RERUN_CONNECT = _env_flag("RERUN_CONNECT", "")
 RERUN_ADDR    = os.getenv("RERUN_ADDR", "rerun+http://127.0.0.1:9876")
