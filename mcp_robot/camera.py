@@ -345,18 +345,31 @@ finally:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
+def _hide_scene_text(frame_b64: str) -> str:
+    """A Pi frame as a model may see it: with SCENE_TEXT_HIDE, sign text erased."""
+    if not config.SCENE_TEXT_HIDE:
+        return frame_b64
+    from mcp_robot import scene_text
+    return scene_text.hide_text_b64(frame_b64)
+
+
 def capture_still() -> dict:
     """
     Capture one JPEG frame from the RPi camera.
 
     If stream_live() is running, returns the latest cached frame to avoid
     opening a second picamera2 session. Falls back to a fresh SSH capture.
+    With SCENE_TEXT_HIDE, sign text is erased from the frame first — the
+    returned frame and the saved file alike.
 
     Returns:
         {"frame": "<base64>", "width": int, "height": int, "bytes": int, "path": str | None}
     """
     cached = _pi_cache.latest()
     if cached is not None:
+        frame = _hide_scene_text(cached["frame"])
+        if frame is not cached["frame"]:
+            cached = {**cached, "frame": frame, "bytes": len(frame) * 3 // 4}
         path = _save_snapshot(cached["frame"], "picamera")
         viz.log_still(cached)
         return {**cached, "path": path}
@@ -367,6 +380,7 @@ def capture_still() -> dict:
         warmup=config.CAMERA_WARMUP,
     )
     result = get_client().run_python(script, timeout=15)
+    result["frame"] = _hide_scene_text(result["frame"])
     path = _save_snapshot(result["frame"], "picamera")
     viz.log_still(result)
     return {**result, "path": path}
@@ -378,7 +392,8 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
 
     If stream_live() is running, slices the last `duration_s` seconds from
     the frame cache (no extra picamera2 session needed). Falls back to a
-    fresh SSH capture otherwise.
+    fresh SSH capture otherwise. With SCENE_TEXT_HIDE, sign text is erased
+    from each frame.
 
     Returns:
         {"frames": ["<base64>", ...], "count": int, "width": int, "height": int}
@@ -386,7 +401,7 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     clip_frames = _pi_cache.clip(duration_s, fps)
     if clip_frames is not None:
         result = {
-            "frames": [f["frame"] for f in clip_frames],
+            "frames": [_hide_scene_text(f["frame"]) for f in clip_frames],
             "count": len(clip_frames),
             "width": clip_frames[0]["width"],
             "height": clip_frames[0]["height"],
@@ -407,6 +422,7 @@ def capture_clip(duration_s: float = 2.0, fps: float = 2.0) -> dict:
     )
     timeout = int(duration_s + 10)
     result = get_client().run_python(script, timeout=timeout)
+    result["frames"] = [_hide_scene_text(f) for f in result["frames"]]
     paths = [_save_snapshot(f, "clip", index=i) for i, f in enumerate(result["frames"])]
     result["paths"] = paths
     viz.log_clip(result)

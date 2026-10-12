@@ -81,6 +81,14 @@ Claude Code decides whether the text matters. If it does, Claude Code asks NAPC 
 
 The frames behind each signal, with an `_ocr.jpg` overlay of what was read, are saved in `output/scene_text/`. The settings are the `SCENE_TEXT_*` and `SIGNALS_OUTBOX` entries in `mcp_robot/config.py`. See [mcp_robot/scene_text.py](mcp_robot/scene_text.py) for the design.
 
+The instructions on handling signals reach Claude Code from the server itself, so they are only there when scene text is on.
+
+### Baseline: no sign reading
+
+Set `SCENE_TEXT_ENABLED=0` in `.mcp.json` to run without scene text. The server then doesn't read text, and its instructions say nothing about text or signs. It also erases sign text from the front camera's frames before Claude or a VQA model sees them. Each word OCR can read is erased, along with the pictograms and arrows printed on the paper around it, leaving blank paper. The erasing is `SCENE_TEXT_HIDE`, which defaults to on exactly when `SCENE_TEXT_ENABLED` is off; set `SCENE_TEXT_HIDE=0` to turn text reading off without erasing anything. Start a new Claude Code session after switching, because the server's instructions are read when the session connects.
+
+Erasing covers the front camera's stills, clips, and the frames sent to the VQA model after each motor action. The overhead camera, which navigation runs on, is left alone: it doesn't see the signs. Task videos made with `compile_video` keep the raw frames.
+
 ## Usage
 
 Start Claude Code in the repo with `claude`. It starts the servers listed in `.mcp.json`, and `/mcp` shows their status.

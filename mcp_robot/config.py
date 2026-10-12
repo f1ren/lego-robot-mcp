@@ -444,6 +444,13 @@ SCENE_TEXT_BORDER_PX = int(os.getenv("SCENE_TEXT_BORDER_PX", "3"))
 # (difflib ratio) — absorbs OCR noise like "Plastlc" vs "Plastic".
 SCENE_TEXT_MATCH_RATIO = float(os.getenv("SCENE_TEXT_MATCH_RATIO", "0.8"))
 SCENE_TEXT_OCR_THREADS = int(os.getenv("SCENE_TEXT_OCR_THREADS", "4"))
+# The baseline: erase sign text from the front camera's frames before any
+# model sees them — Claude, and the VQA models whose answers reach it. Each
+# word OCR can read goes, with the pictograms and arrows printed on the paper
+# around it (scene_text.hide_text). The overhead camera, which navigation runs
+# on, is left alone. On by default exactly when SCENE_TEXT_ENABLED is off, so
+# that switch alone picks the condition: with it off, nothing reads the signs.
+SCENE_TEXT_HIDE = _env_flag("SCENE_TEXT_HIDE", "0" if SCENE_TEXT_ENABLED else "1")
 
 # ── Vision backend ────────────────────────────────────────────────────────────
 # VISION_BACKEND: "gemini" | "ollama" | "auto"
@@ -454,7 +461,9 @@ VISION_BACKEND = os.getenv("VISION_BACKEND", "auto")
 GEMINI_API_KEY        = os.getenv("GEMINI_API_KEY", "")
 # ER 1.6 was shut down 2026-08-31; its ID now 404s on every API version.
 GEMINI_MODEL          = os.getenv("GEMINI_MODEL",          "gemini-robotics-er-2-preview")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
+# gemini-2.5-pro now 404s for new users ("no longer available"); the API names
+# gemini-3.1-pro-preview as its replacement.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-pro-preview")
 
 # Model used for free-text object localization (locate_object tool / VLM fallback).
 # Flash is fast and cheap; override with LOCATE_OBJECT_MODEL if needed.
@@ -482,6 +491,9 @@ CLICK_BUTTON_VQA = _env_flag("CLICK_BUTTON_VQA", "")
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST",  "http://localhost:11434")
 # Gemma 4 answers faster than the previous default, qwen3-vl:32b-thinking.
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:26b")
+# Without a timeout a stuck Ollama call blocks the motor tool forever (seen on
+# raise_arm_fully: the MCP client aborted after 1800s of silence).
+OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "180"))
 
 # ── Rerun visualization (optional) ───────────────────────────────────────────
 # Enabled by default. RERUN_ENABLED=   (empty) disables rerun logging

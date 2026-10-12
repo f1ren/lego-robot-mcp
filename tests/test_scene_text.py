@@ -1,7 +1,8 @@
 """
 mcp_robot.scene_text: reading new text off the camera streams and raising it
 to the coordinator as a visual signal — outbox line, tool-result attachment,
-and the pause until a tool result has carried it.
+and the pause until a tool result has carried it. And the baseline, where
+nothing reads the signs: their text erased from what models see.
 
 Fixtures (tests/fixtures/scene_text/, both real Pi-camera footage from
 2026-09-30, the recycling sign above the three bins):
@@ -13,6 +14,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -318,3 +323,142 @@ def test_navigate_to_pauses_before_moving_when_text_is_read_mid_navigation(box, 
     turn.assert_not_called()
     drive.assert_not_called()
     assert box.pending() == []
+
+
+# ── hiding text (SCENE_TEXT_HIDE — the baseline) ─────────────────────────────
+
+ROOT = Path(__file__).parent.parent
+
+
+@pytest.fixture(scope="module")
+def pan_frames():
+    cap = cv2.VideoCapture(str(PAN_MP4))
+    frames = []
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frames.append(frame)
+    cap.release()
+    return frames
+
+
+def _decode(b64: str) -> np.ndarray:
+    return cv2.imdecode(np.frombuffer(base64.b64decode(b64), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
+def test_hiding_erases_the_words_and_the_pictograms_above_them(sign_bgr):
+    words = [line for line in scene_text.read_text(sign_bgr) if line.text != "#"]
+    hidden = scene_text.hide_text(sign_bgr)
+    assert scene_text.read_text(hidden) == []
+    assert scene_text._words_to_hide(hidden) == []  # not even at the lower floor
+    # The pictograms (wine glass, bottle, page) name the bins on their own.
+    boxes = np.array([line.box for line in words])
+    top, x1, x2 = int(boxes[..., 1].min()), int(boxes[..., 0].min()), int(boxes[..., 0].max())
+    before = cv2.cvtColor(sign_bgr, cv2.COLOR_BGR2GRAY)[top - 120:top, x1:x2]
+    after = cv2.cvtColor(hidden, cv2.COLOR_BGR2GRAY)[top - 120:top, x1:x2]
+    ink = 0.6 * np.percentile(before, 90)
+    assert (before < ink).mean() > 0.08  # measured 0.13
+    assert (after < ink).mean() < 0.02  # measured 0.008
+
+
+def test_hiding_leaves_the_cups_ball_and_gripper_below_the_sign(sign_bgr):
+    hidden = scene_text.hide_text(sign_bgr)
+    changed = np.any(hidden != sign_bgr, axis=2)
+    assert changed[260:].mean() < 0.01  # the cups start at y≈260; measured 0.002
+
+
+def test_hiding_starts_only_from_words_ocr_reads(pan_frames):
+    """The text detector alone boxes the crumpled paper and the gripper in
+    the pan's first frames, and a mask grown from those boxes erased them:
+    without a word read, the frame is left as it is."""
+    first = pan_frames[0]
+    assert scene_text.hide_text(first) is first
+
+
+def test_hiding_reads_again_after_erasing(pan_frames):
+    """In frame 33 OCR reads "Glass" only once its neighbours are erased."""
+    assert scene_text._words_to_hide(scene_text.hide_text(pan_frames[33])) == []
+
+
+def test_hiding_an_overlaid_frame_finds_the_text_in_the_raw_one(sign_bgr):
+    overlaid = sign_bgr.copy()
+    cv2.line(overlaid, (0, 0), (639, 479), (0, 0, 255), 3)  # e.g. an optical-flow arrow
+    hidden = scene_text.hide_text(overlaid, raw=sign_bgr)
+    assert scene_text.read_text(hidden) == []
+    ys, xs = np.nonzero(np.all(overlaid == (0, 0, 255), axis=2))
+    below_sign = ys > 300
+    assert np.all(hidden[ys[below_sign], xs[below_sign]] == (0, 0, 255))  # the overlay stays
+
+
+def test_capture_still_hides_text_from_the_frame_and_the_saved_file(sign_bgr, tmp_path, monkeypatch):
+    from mcp_robot import camera, config
+    frame = _b64(sign_bgr)
+    monkeypatch.setattr(camera._pi_cache, "latest",
+                        lambda: {"frame": frame, "ts": 1.0, "width": 640, "height": 480, "bytes": 1})
+    monkeypatch.setattr(camera.viz, "log_still", lambda result: None)
+    monkeypatch.setattr(config, "SNAPSHOT_DIR", str(tmp_path))
+
+    monkeypatch.setattr(config, "SCENE_TEXT_HIDE", False)
+    assert camera.capture_still()["frame"] is frame
+
+    monkeypatch.setattr(config, "SCENE_TEXT_HIDE", True)
+    still = camera.capture_still()
+    assert scene_text.read_text(_decode(still["frame"])) == []
+    assert scene_text.read_text(cv2.imread(still["path"])) == []
+
+
+@pytest.mark.parametrize("hide", [False, True])
+def test_vqa_gets_the_front_camera_frames_with_the_text_erased(sign_bgr, hide, fake_gemini_client, monkeypatch):
+    from mcp_robot import config, vision
+    monkeypatch.setattr(config, "VISION_BACKEND", "gemini")
+    monkeypatch.setattr(config, "SCENE_TEXT_HIDE", hide)
+    monkeypatch.setattr(vision, "_has_motion_labeled", lambda labeled: True)
+    client = fake_gemini_client(["Verdict: YES — turned\nChanges: turned\nPlan: N/A — no context"])
+
+    vision.describe_action_video("turn", "face the bins", [("pi_camera", _b64(sign_bgr))] * 3)
+    parts = client.calls[0]["contents"][0].parts
+    sent = [cv2.imdecode(np.frombuffer(p.inline_data.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            for p in parts if p.inline_data is not None]
+    assert len(sent) == 1  # the camera's frames, stacked
+    read = _all_words(scene_text.read_text(sent[0]))
+    assert bool(read & {"glass", "plastic", "paper"}) is not hide
+
+
+def _fresh_interpreter(code: str, **env: str) -> str:
+    """Run code in a new interpreter, so config and server are imported under env."""
+    base = {k: v for k, v in os.environ.items() if not k.startswith("SCENE_TEXT_")}
+    out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, cwd=ROOT,
+                         capture_output=True, text=True, check=True)
+    return out.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.parametrize("env, hide", [
+    ({}, False),
+    ({"SCENE_TEXT_ENABLED": "0"}, True),
+    ({"SCENE_TEXT_ENABLED": "0", "SCENE_TEXT_HIDE": "0"}, False),
+    ({"SCENE_TEXT_HIDE": "1"}, True),
+])
+def test_hiding_is_on_by_default_exactly_when_text_reading_is_off(env, hide):
+    assert _fresh_interpreter("from mcp_robot import config; print(config.SCENE_TEXT_HIDE)", **env) == str(hide)
+
+
+_SERVER_VIEW = (
+    "import json; from mcp_robot import server; "
+    "print(json.dumps({'instructions': server.mcp.instructions, "
+    "'status_tool': server.mcp._tool_manager.get_tool('scene_text_status') is not None}))"
+)
+
+
+def test_baseline_server_tells_claude_nothing_about_text():
+    view = json.loads(_fresh_interpreter(_SERVER_VIEW, SCENE_TEXT_ENABLED="0"))
+    assert not re.search(r"text|\bsign|label|ocr|neil", view["instructions"], re.IGNORECASE)
+    assert not view["status_tool"]
+
+
+def test_server_reading_text_carries_the_visual_signal_protocol():
+    view = json.loads(_fresh_interpreter(_SERVER_VIEW, SCENE_TEXT_ENABLED="1"))
+    assert "VISUAL SIGNALS" in view["instructions"]
+    assert "replan_with_observation" in view["instructions"] and "tail -n 0 -F" in view["instructions"]
+    assert len(view["instructions"]) <= 4096  # what Claude Code keeps of a server's instructions
+    assert view["status_tool"]
