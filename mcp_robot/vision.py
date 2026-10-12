@@ -3,7 +3,7 @@ Vision analysis for robot before/after frame pairs.
 
 Supports two backends selected by config.VISION_BACKEND:
   "gemini"  — Gemini Robotics-ER via Google GenAI SDK
-  "ollama"  — local Qwen3-VL (or any multimodal model) via Ollama
+  "ollama"  — local Gemma 4 (or any multimodal model) via Ollama
   "auto"    — try Gemini first; fall back to Ollama on quota/error
 """
 from __future__ import annotations
